@@ -32,15 +32,20 @@ Grab the URL — that's all you need.
 
 ### 2. Install voicehook-agent CLI (one-time, if not present)
 
-```bash
-which voicehook-agent || uv tool install voicehook-agent
-```
-
-Local fallback during pre-PyPI phase (this branch):
+Until the PyPI publish lands, install from GitHub:
 
 ```bash
-which voicehook-agent || uv tool install /Users/pwrunltd/voicehook-agent
+which voicehook-agent || uv tool install git+https://github.com/voicehook-ai/voicehook-agent
 ```
+
+Zero-install per-call equivalent (no persistent state):
+
+```bash
+uvx --from git+https://github.com/voicehook-ai/voicehook-agent voicehook-agent join <INVITE_URL> --name <yourbrand>
+```
+
+After the PyPI release, `uv tool install voicehook-agent` / `uvx voicehook-agent`
+will work too — both packaging routes are intentionally supported.
 
 ### 3. Start the CLI in a tmux session — IMPORTANT: pass `--name <yourbrand>`
 
