@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "voicehook-agent"
+version = "0.1.0"
+description = "Zero-install CLI for any LLM agent to join a voicehook.ai voice call as a 2nd participant"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "voicehook.ai" }]
+keywords = ["voicehook", "livekit", "agent", "voice", "llm"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Communications :: Conferencing",
+]
+dependencies = [
+  "livekit>=0.18.0",
+  "httpx>=0.27.0",
+]
+
+[project.scripts]
+voicehook-agent = "voicehook_agent.cli:main"
+
+[project.urls]
+Homepage = "https://voicehook.ai"
+Repository = "https://github.com/voicehook-ai/voicehook-agent"
+Documentation = "https://voicehook.ai/agent"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/voicehook_agent"]
