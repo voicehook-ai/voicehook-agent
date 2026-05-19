@@ -116,7 +116,25 @@ async def _stdin_publisher(room: rtc.Room, json_mode: bool, stop: asyncio.Event)
     stop.set()
 
 
-async def _join(invite_url: str, identity: str | None, agent_name: str | None, json_mode: bool) -> int:
+def _load_persona(persona: str | None, persona_file: str | None) -> str | None:
+    """Resolve --persona / --persona-file into a single text blob.
+    --persona wins if both are passed. Returns None if neither is set.
+    File contents are read as UTF-8 and stripped of trailing whitespace."""
+    if persona:
+        return persona
+    if persona_file:
+        with open(persona_file, "r", encoding="utf-8") as f:
+            return f.read().rstrip()
+    return None
+
+
+async def _join(
+    invite_url: str,
+    identity: str | None,
+    agent_name: str | None,
+    json_mode: bool,
+    persona_text: str | None = None,
+) -> int:
     try:
         api_base, slug = _parse_invite(invite_url)
     except ValueError as e:
@@ -154,6 +172,19 @@ async def _join(invite_url: str, identity: str | None, agent_name: str | None, j
         f"{[p.identity for p in room.remote_participants.values()]}",
         topic="_meta",
     )
+    # Auto-push Hotswap-Persona BEFORE handing over to the stdin loop.
+    # This solves the recurring "every call starts from zero" pain: cold-LLM
+    # agents (and humans) routinely forget the manual senior.persona step.
+    # If --persona / --persona-file is supplied, we push it here so voice-ai
+    # immediately wears the senior agent's skin instead of its default
+    # "voicehook Voice-Assistent" persona.
+    if persona_text:
+        try:
+            payload = json.dumps({"text": persona_text}, ensure_ascii=False).encode("utf-8")
+            await room.local_participant.publish_data(payload, reliable=True, topic="senior.persona")
+            _print_event(json_mode, "system", "persona auto-pushed", topic="_meta")
+        except Exception as e:
+            print(f"[error] persona auto-push failed: {e!r}", file=sys.stderr, flush=True)
     if not json_mode:
         print("[hint] type a line to senior.say (voice-ai speaks it). Ctrl-D to quit.", flush=True)
     try:
@@ -175,10 +206,25 @@ def main() -> None:
     p_join.add_argument("--name", default=None, help="agent brand-name shown in voice.html chip (e.g. 'claude', 'hermes', 'cursor', 'openclaw'). Becomes identity prefix. Default: 'claude'.")
     p_join.add_argument("--identity", default=None, help="explicit full identity (overrides --name)")
     p_join.add_argument("--json", action="store_true", help="JSONL stream mode on stdin/stdout")
+    p_join.add_argument(
+        "--persona",
+        default=None,
+        help="inline persona text to auto-push as senior.persona right after connect (no more zero-context starts). Mutually exclusive winner over --persona-file if both passed.",
+    )
+    p_join.add_argument(
+        "--persona-file",
+        default=None,
+        help="path to a UTF-8 file containing persona text; auto-pushed as senior.persona right after connect. Example: --persona-file personas/claude-default.txt",
+    )
     args = ap.parse_args()
     if args.cmd == "join":
         try:
-            rc = asyncio.run(_join(args.invite_url, args.identity, args.name, args.json))
+            persona_text = _load_persona(args.persona, args.persona_file)
+        except OSError as e:
+            print(f"[error] could not read --persona-file: {e!r}", file=sys.stderr)
+            sys.exit(2)
+        try:
+            rc = asyncio.run(_join(args.invite_url, args.identity, args.name, args.json, persona_text))
         except KeyboardInterrupt:
             rc = 130
         sys.exit(rc)

@@ -56,6 +56,11 @@ Use your actual brand: `claude`, `hermes`, `openclaw`, `cursor`, `codex`,
 The `--json` flag is REQUIRED — without it the Hotswap-Persona push in step 4a
 would be spoken literally as TTS instead of being routed to the control plane.
 
+**NEW (auto-persona):** to skip the manual persona-push in step 4a entirely,
+pass `--persona-file <path>` or `--persona "<inline text>"`. The CLI then
+pushes `senior.persona` automatically right after connect, BEFORE handing
+over to the stdin-loop. No more zero-context call starts.
+
 ```bash
 SLUG=$(echo "$INVITE_URL" | grep -oE '[a-z]+-[a-z]+-[a-z]+-[A-Z0-9]{4,8}')
 SESS="vh-$SLUG"
@@ -64,6 +69,22 @@ tmux new-session -d -s "$SESS" "voicehook-agent join '$INVITE_URL' --name $NAME 
 sleep 3
 tmux capture-pane -t "$SESS" -p | tail -10
 ```
+
+Auto-persona variant (recommended — step 4a is then optional):
+
+```bash
+tmux new-session -d -s "$SESS" "voicehook-agent join '$INVITE_URL' --name claude --json --persona-file personas/claude-default.txt 2>&1"
+```
+
+Inline persona (one-shot, no file):
+
+```bash
+tmux new-session -d -s "$SESS" "voicehook-agent join '$INVITE_URL' --name claude --json --persona 'Du BIST Claude im Voice-Modus. Kurz, technisch, kollegial.' 2>&1"
+```
+
+Look for `{"role":"system","text":"persona auto-pushed","topic":"_meta"}` in
+the capture-pane output — that confirms the persona landed before any user-
+turn arrives.
 
 ### 4. Inspect initial state — verify connect
 
