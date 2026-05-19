@@ -128,6 +128,16 @@ def _load_persona(persona: str | None, persona_file: str | None) -> str | None:
     return None
 
 
+def _kind_label(p) -> str:
+    """ParticipantKind enum → short string ('user' / 'agent' / 'sip' / ...).
+    LK proto: 0=standard(user), 1=ingress, 2=egress, 3=sip, 4=agent."""
+    try:
+        k = int(getattr(p, "kind", 0))
+    except Exception:
+        return "user"
+    return {0: "user", 1: "ingress", 2: "egress", 3: "sip", 4: "agent"}.get(k, f"kind{k}")
+
+
 async def _join(
     invite_url: str,
     identity: str | None,
@@ -160,7 +170,87 @@ async def _join(
     room = rtc.Room()
     room.on("data_received", _on_data_factory(json_mode))
     stop = asyncio.Event()
-    room.on("disconnected", lambda *_: stop.set())
+
+    # ---- Live peer-state tracking ------------------------------------------
+    # Senior brain needs to see WHO is in the room and WHO is active. We track
+    # (a) which identities have an audible audio track subscribed, and
+    # (b) which identities are currently in the active-speakers set.
+    audible: set[str] = set()       # identities w/ at least one subscribed audio track
+    speakers: set[str] = set()      # identities currently emitting voice
+
+    def _emit_meta(text: str, **extra) -> None:
+        _print_event(json_mode, "system", text, topic="_meta", **extra)
+
+    # --- Participant join/leave (the prompt expects these even though the
+    # previous version only logged initial peers).
+    def _on_participant_connected(p) -> None:
+        _emit_meta(f"peer-joined: {p.identity} ({_kind_label(p)})")
+
+    def _on_participant_disconnected(p) -> None:
+        ident_ = p.identity
+        audible.discard(ident_)
+        speakers.discard(ident_)
+        _emit_meta(f"peer-left: {ident_} ({_kind_label(p)})")
+
+    room.on("participant_connected", _on_participant_connected)
+    room.on("participant_disconnected", _on_participant_disconnected)
+
+    # --- Active speakers
+    def _on_active_speakers(spk_list) -> None:
+        new_set = {s.identity for s in spk_list}
+        speakers.clear()
+        speakers.update(new_set)
+        idents = sorted(new_set)
+        _emit_meta(f"speaking: [{', '.join(idents)}]", speakers=idents)
+
+    room.on("active_speakers_changed", _on_active_speakers)
+
+    # --- Audio track subscribe / unsubscribe
+    def _on_track_subscribed(track, publication, participant) -> None:
+        if int(getattr(track, "kind", 0)) != 1:  # 1 = KIND_AUDIO
+            return
+        audible.add(participant.identity)
+        _emit_meta(f"audio-track-on: {participant.identity}")
+
+    def _on_track_unsubscribed(track, publication, participant) -> None:
+        if int(getattr(track, "kind", 0)) != 1:
+            return
+        audible.discard(participant.identity)
+        _emit_meta(f"audio-track-off: {participant.identity}")
+
+    room.on("track_subscribed", _on_track_subscribed)
+    room.on("track_unsubscribed", _on_track_unsubscribed)
+
+    # --- Mute / unmute (audio only)
+    def _on_track_muted(participant, publication) -> None:
+        if int(getattr(publication, "kind", 0)) != 1:
+            return
+        _emit_meta(f"mic-mute: {participant.identity}")
+
+    def _on_track_unmuted(participant, publication) -> None:
+        if int(getattr(publication, "kind", 0)) != 1:
+            return
+        _emit_meta(f"mic-unmute: {participant.identity}")
+
+    room.on("track_muted", _on_track_muted)
+    room.on("track_unmuted", _on_track_unmuted)
+
+    # --- Connection-state hiccups
+    room.on("reconnecting", lambda *_: _emit_meta("reconnecting"))
+    room.on("reconnected", lambda *_: _emit_meta("reconnected"))
+
+    # --- Disconnect (with reason)
+    def _on_disconnected(*args) -> None:
+        reason = args[0] if args else None
+        try:
+            reason_name = rtc.DisconnectReason.Name(int(reason)) if reason is not None else "UNKNOWN"
+        except Exception:
+            reason_name = str(reason)
+        _emit_meta(f"room-disconnected reason={reason_name}")
+        stop.set()
+
+    room.on("disconnected", _on_disconnected)
+
     try:
         await room.connect(tok["url"], tok["token"])
     except Exception as e:
@@ -172,6 +262,50 @@ async def _join(
         f"{[p.identity for p in room.remote_participants.values()]}",
         topic="_meta",
     )
+    # Pre-populate `audible` from already-subscribed tracks (covers the case
+    # where peers + their audio publications existed BEFORE we joined and the
+    # track_subscribed event already fired during connect).
+    for p in room.remote_participants.values():
+        for pub in p.track_publications.values():
+            if int(getattr(pub, "kind", 0)) == 1 and getattr(pub, "subscribed", False):
+                audible.add(p.identity)
+
+    # --- 10s heartbeat with dedup -------------------------------------------
+    async def _heartbeat() -> None:
+        last_sig: tuple | None = None
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=10.0)
+                return  # stop got set
+            except asyncio.TimeoutError:
+                pass
+            peers_list = []
+            for p in room.remote_participants.values():
+                peers_list.append({
+                    "identity": p.identity,
+                    "kind": _kind_label(p),
+                    "audio": p.identity in audible,
+                    "speaking": p.identity in speakers,
+                })
+            peers_list.sort(key=lambda x: x["identity"])
+            # Build a stable signature for dedup.
+            sig = tuple((d["identity"], d["kind"], d["audio"], d["speaking"]) for d in peers_list)
+            if sig == last_sig:
+                continue
+            last_sig = sig
+            if json_mode:
+                obj = {"role": "system", "text": "room-state", "topic": "_meta", "peers": peers_list}
+                print(json.dumps(obj, ensure_ascii=False), flush=True)
+            else:
+                summary = ", ".join(
+                    f"{d['identity']}({d['kind']}{'*' if d['speaking'] else ''}"
+                    f"{'' if d['audio'] else ' no-audio'})"
+                    for d in peers_list
+                ) or "<empty>"
+                print(f"[system] room-state: {summary}", flush=True)
+
+    hb_task = asyncio.create_task(_heartbeat())
+
     # Auto-push Hotswap-Persona BEFORE handing over to the stdin loop.
     # This solves the recurring "every call starts from zero" pain: cold-LLM
     # agents (and humans) routinely forget the manual senior.persona step.
@@ -190,6 +324,12 @@ async def _join(
     try:
         await _stdin_publisher(room, json_mode, stop)
     finally:
+        stop.set()
+        hb_task.cancel()
+        try:
+            await hb_task
+        except (asyncio.CancelledError, Exception):
+            pass
         try:
             await room.disconnect()
         except Exception:
