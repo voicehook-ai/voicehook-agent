@@ -145,6 +145,39 @@ tmux send-keys -t "$SESS" "$(jq -nc --arg t "erklär X" '{topic:"senior.inject",
 user's language. No markdown, no lists, no emoji. Tech terms stay English
 (commit, webhook, JWT).
 
+### 5a. Keep the main track free — DELEGATE heavy lifting
+
+While you're in a voice-call, the user is **waiting on you live**. Any
+multi-step bash, code-search, CI-setup, codebase-scan, or anything that
+takes more than ~10 seconds blocks the conversation — Olli's word: "Fokus
+verloren". The voice-call must stay snappy.
+
+**Rule:** the senior brain stays in the conversational loop. Long-running
+work goes to a subagent.
+
+Use `Agent({ subagent_type: "general-purpose", prompt: "..." })` for:
+- Setting up CI / GitHub Actions / deploy pipelines
+- Codebase searches that span more than 3 greps
+- Multi-file refactors
+- Writing long documentation
+- Researching API docs / SDKs
+- Anything where you'd otherwise be silent for >15 seconds
+
+The pattern:
+
+```
+1. push senior.say to user: "Ich delegier das an einen Subagent, bin in <N> Min zurueck."
+2. spawn Agent in foreground if you need its output, OR run_in_background if you can keep talking
+3. continue conversational loop with user while subagent works
+4. when subagent reports back, summarize result via senior.say
+```
+
+DO YOURSELF (no subagent needed):
+- Single Edit / Write of a known file
+- Single Bash command under 5 seconds
+- Reading 1-2 specific files
+- Pushing senior.say / senior.persona / senior.interrupt
+
 ### 6. Cleanup when user ends call
 
 ```bash
