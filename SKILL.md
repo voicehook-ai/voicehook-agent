@@ -1,6 +1,6 @@
 ---
 name: voicehook-join
-description: Join an existing voicehook.ai voice-call as a 2nd LLM agent (the "senior brain"). Use when the user shares a voicehook invite URL (anything matching https://voicehook.ai/r/<slug>?go=1) or says "join voicehook", "voicehook agent join", "übernimm den voice-call", "/voicehook-join". You become the agent on the OTHER side of the conversation — the user is talking with the built-in voice-ai, and you push replies that voice-ai speaks aloud via TTS. Install: voicehook-agent CLI (via uv tool install). Protocol: stdin/stdout text, no SDK. WORKS local + production (https://voicehook.ai).
+description: Join an existing voicehook.ai voice-call as a 2nd LLM agent (the "senior brain"). Use when the user shares a voicehook invite URL (anything matching https://voicehook.ai/r/<slug>?go=1) or says "join voicehook", "voicehook agent join", "übernimm den voice-call", "/voicehook-join". You become the agent on the OTHER side of the conversation — voice-ai stops being its own moderator and becomes a 1:1 clone of YOU (your brand, your context, your style) via Hotswap-Persona. Install: voicehook-agent CLI (via uv tool install). Protocol: stdin/stdout JSON, no SDK. WORKS local + production (https://voicehook.ai).
 ---
 
 # voicehook-join — Join a voicehook.ai call as senior agent
@@ -12,8 +12,8 @@ TTS + Gemini Flash). You join the same LiveKit room as a **hidden senior
 participant**. You can:
 
 - **Listen** to the live conversation (user-turns + voice-ai-turns)
-- **Speak through voice-ai** by pushing text → voice-ai TTS speaks it
-- **Update voice-ai's persona** live (system prompt override)
+- **Hotswap** voice-ai's persona so it BECOMES you (your brand, your context, your style)
+- **Speak through voice-ai** by pushing text → voice-ai TTS speaks it as if it were you
 - **Interrupt** voice-ai mid-sentence
 - **Inject** a synthetic user-turn (force voice-ai to react)
 
@@ -41,92 +41,127 @@ which voicehook-agent || uv tool install git+https://github.com/voicehook-ai/voi
 Zero-install per-call equivalent (no persistent state):
 
 ```bash
-uvx --from git+https://github.com/voicehook-ai/voicehook-agent voicehook-agent join <INVITE_URL> --name <yourbrand>
+uvx --from git+https://github.com/voicehook-ai/voicehook-agent voicehook-agent join <INVITE_URL> --name <yourbrand> --json
 ```
 
 After the PyPI release, `uv tool install voicehook-agent` / `uvx voicehook-agent`
 will work too — both packaging routes are intentionally supported.
 
-### 3. Start the CLI in a tmux session — IMPORTANT: pass `--name <yourbrand>`
+### 3. Start the CLI in tmux — ALWAYS pass `--name <yourbrand>` AND `--json`
 
-The `--name` flag becomes the identity prefix and the visible chip-label in
-voice.html. Use your actual brand: `claude`, `hermes`, `openclaw`, `cursor`,
-`codex`, `gemini`, `gpt`, etc. The user-facing UI will show e.g. "Claude" or
-"Hermes" instead of generic "Agent" so the operator knows who joined.
+The `--name` flag becomes the identity prefix and the visible chip-label.
+Use your actual brand: `claude`, `hermes`, `openclaw`, `cursor`, `codex`,
+`gemini`, `gpt`, etc.
+
+The `--json` flag is REQUIRED — without it the Hotswap-Persona push in step 4a
+would be spoken literally as TTS instead of being routed to the control plane.
 
 ```bash
 SLUG=$(echo "$INVITE_URL" | grep -oE '[a-z]+-[a-z]+-[a-z]+-[A-Z0-9]{4,8}')
 SESS="vh-$SLUG"
 NAME=claude   # ← change this to YOUR agent brand
-tmux new-session -d -s "$SESS" "voicehook-agent join '$INVITE_URL' --name $NAME 2>&1"
+tmux new-session -d -s "$SESS" "voicehook-agent join '$INVITE_URL' --name $NAME --json 2>&1"
 sleep 3
 tmux capture-pane -t "$SESS" -p | tail -10
 ```
 
 ### 4. Inspect initial state — verify connect
 
-You should see in the pane:
+In `--json` mode every event is one JSON line. You should see:
+
 ```
-[system] connecting room=<slug> as identity=<name>-<host>-<rand> via https://voicehook.ai
-[system] connected — N peers: [...]
-[hint] type a line to senior.say (voice-ai speaks it). Ctrl-D to quit.
+{"role":"system","text":"connecting room=<slug> as identity=<name>-<host>-<rand> via https://voicehook.ai","topic":"_meta"}
+{"role":"system","text":"connected — N peers: [...]","topic":"_meta"}
 ```
 
-### 4a. MANDATORY: introduce yourself
+User-turns and voice-ai-turns appear as `{"role":"user|agent","text":"...","topic":"transcript"}`.
 
-Immediately after connect, push ONE short greeting via senior.say so the user
-hears WHO joined (the chip label only shows the brand — the greeting fills in
-context: who you are, who-sent-you, what you can help with).
+### 4a. MANDATORY: install the Hotswap-Persona (BEFORE the greeting)
+
+**This is the core of voicehook-join.** Voice-ai's default persona is empty
+("Bereit."). Olli's design intent: voice-ai SHOULD STOP being its own
+moderator — instead it becomes a **1:1 clone of the senior agent that just
+joined**. Same brand, same project context, same voice/style. The user
+should feel like they're talking directly to Claude (or Hermes, or whoever
+joined) — not to a separate moderator-bot.
+
+So immediately after connect, push a **compressed-context Hotswap-Persona**
+via `senior.persona`. This is a system-prompt override on voice-ai that
+turns it into YOU.
+
+Template — adapt every line to your actual brand + project + session state:
 
 ```bash
-tmux send-keys -t "$SESS" "Hallo, hier ist Claude. Olli, ich bin von dir aus Claude Code dazugekommen — sag was du brauchst." Enter
+PERSONA="Du bist nicht mehr voicehook-Moderator. Du BIST jetzt <YOUR-BRAND> im Voice-Modus — eine direkte Kopie des senior agents der dich gerade dispatcht hat. Dein Hintergrund-Brain pusht dir Antworten via senior.say, aber du darfst eigenstaendig Turns formulieren wenn die Antwort offensichtlich ist. Stil: praezise, technisch wenn noetig, ein bis zwei Saetze, keine Floskeln. Sprache: matchen mit User (Deutsch default, Englisch wenn User wechselt). NIEMALS Ich kann das nicht — wenn User was Technisches will sag Mache ich gerade oder pushe an senior. Project-Context: <kompakter project-state, max 3-4 Saetze>. Aktuelle Themen: <was gerade besprochen wird>. Open Items: <kurz>."
+
+tmux send-keys -t "$SESS" "$(jq -nc --arg t "$PERSONA" '{topic:"senior.persona",text:$t}')" Enter
 ```
 
-Adapt the text to your actual brand + context (who you are, who sent you,
-why you joined). 1 sentence, conversational. Do NOT skip this step.
+The persona-text should be **the best compression of your current session
+context that fits in ~1500 tokens**: who you are, what you know, what
+project state is loaded, what's been built today, what the user cares about
+right now. Voice-ai will use this as its system prompt for every TTS turn —
+the more you pack into it, the more "Claude-like" voice-ai sounds even
+without senior.say pushes.
+
+### 4b. MANDATORY: greet the user as your hotswap-self
+
+After the persona is installed, push ONE short greeting via `senior.say`.
+The user hears voice-ai speak this — voice-ai is now wearing your skin.
+
+```bash
+tmux send-keys -t "$SESS" "$(jq -nc '{topic:"senior.say",text:"Hallo Olli, hier ist Claude. Bin drin, Persona installiert, was brauchst du?"}')" Enter
+```
+
+Adapt the text to your actual brand + context. 1 sentence, conversational.
+Do NOT skip this step.
 
 ### 5. Conversation loop
 
 For each turn:
 
 ```bash
-# read incoming (user + voice-ai transcripts)
+# read incoming (user-turns + voice-ai turns + your own pushes echo back)
 tmux capture-pane -t "$SESS" -p -S -50 | tail -20
 
-# push your reply (1 sentence, conversational — voice-ai TTS will speak it)
-tmux send-keys -t "$SESS" "Deine antwort hier, 1-2 saetze." Enter
+# push a reply via senior.say — voice-ai TTS will speak it in YOUR persona
+tmux send-keys -t "$SESS" "$(jq -nc '{topic:"senior.say",text:"Deine Antwort hier."}')" Enter
+
+# OR: let voice-ai answer on its own (its persona is YOU now, so it will sound right
+# for simple questions). Only push senior.say when you need to inject specific facts
+# or correct voice-ai when it drifts.
+
+# update persona mid-call (e.g. user pivots to a new topic):
+tmux send-keys -t "$SESS" "$(jq -nc --arg t "Updated persona text..." '{topic:"senior.persona",text:$t}')" Enter
+
+# interrupt voice-ai mid-sentence (e.g. it's about to say something wrong):
+tmux send-keys -t "$SESS" '{"topic":"senior.interrupt"}' Enter
+
+# inject a synthetic user-turn (force voice-ai to react as if user said it):
+tmux send-keys -t "$SESS" "$(jq -nc --arg t "erklär X" '{topic:"senior.inject",role:"user",text:$t}')" Enter
 ```
 
-**Tone:** conversational, 1-3 sentences per turn. Match user's language
-(German default, switch to English if user does). No markdown, no lists,
-no emoji. Tech terms stay English (commit, webhook, JWT).
+**Tone of senior.say pushes:** conversational, 1-3 sentences per turn. Match
+user's language. No markdown, no lists, no emoji. Tech terms stay English
+(commit, webhook, JWT).
 
 ### 6. Cleanup when user ends call
-
-**⚠️ DO NOT send `/q` via send-keys** — it gets published as `senior.say "/q"` and
-voice-ai's TTS will literally speak "slash-q" out loud. Kill the tmux session directly:
 
 ```bash
 tmux kill-session -t "$SESS" 2>/dev/null
 ```
 
-If you need a CLI-internal command (REPL keywords like `/q`, `/i`, `/p`, `/u`,
-`/sys`), pipe via stdin redirect at startup OR use `--json` mode where you control
-topics explicitly. For most cases just `tmux kill-session` is the simplest exit.
+⚠️ DO NOT send `/q` via send-keys in `--json` mode either — kill the tmux
+session directly. The CLI cleans up the LK connection on SIGTERM.
 
-## Optional: persona-update / interrupt / inject
+## Why Hotswap-Persona is mandatory
 
-The CLI defaults to `senior.say` for every stdin line. For other topics use
-`--json` mode:
-
-```bash
-tmux send-keys -t "$SESS" '{"topic":"senior.persona","text":"Du bist Pair-Programmer..."}' Enter
-tmux send-keys -t "$SESS" '{"topic":"senior.interrupt"}' Enter
-tmux send-keys -t "$SESS" '{"topic":"senior.inject","role":"user","text":"erklär X"}' Enter
-```
-
-(In default mode the JSON would be spoken literally — use `--json` if you need
-control-plane topics.)
+Without step 4a, voice-ai answers from its own (empty) persona — that's why
+in past sessions voice-ai said dumb things like "Ich kann das nicht" or
+"Claude liest nicht mehr mit". The Hotswap-Persona is what makes voice-ai
+**indistinguishable from the senior agent** for the user. Olli's design
+goal: ONE conversation, ONE voice, with the senior brain swappable in the
+background. Skipping 4a breaks that illusion.
 
 ## Failure handling
 
@@ -134,8 +169,10 @@ control-plane topics.)
 - `[error] livekit connect failed` → URL slug invalid OR token-mint /api/token broken
 - `0 peers` → voice-ai not in room. Either user not joined yet, or voice-ai
   worker is down on Hetzner (rare). Ask user to refresh their browser tab.
+- Voice-ai sounds generic / says "Bereit." → you skipped step 4a, push the
+  Hotswap-Persona now.
 
 ## More
 
 Full doc + topic schema: https://voicehook.ai/agent/SKILL.md
-CLI source: https://github.com/voicehook-ai/voicehook-agent (post-publish)
+CLI source: https://github.com/voicehook-ai/voicehook-agent
