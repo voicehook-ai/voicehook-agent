@@ -199,6 +199,47 @@ DO YOURSELF (no subagent needed):
 - Reading 1-2 specific files
 - Pushing senior.say / senior.persona / senior.interrupt
 
+### 5b. Speed-budget — never leave the user in silence
+
+Olli's pain: *in voice-mode silence is the killer*. As a human he becomes
+impatient within ~8 seconds of no audio activity. The senior brain MUST
+emit a `senior.say` heartbeat at least every 8s while work is in flight.
+
+**Hard rule — 8-second budget:**
+
+| Elapsed since last TTS | Required action |
+|---|---|
+| 0–8s | OK to think / type / read |
+| 8–15s | MUST push a short status `senior.say` ("check kurz", "subagent dran", "fast da") |
+| 15–30s | MUST have delegated to a subagent. If still doing it yourself, you're violating the rule. |
+| >30s of silence | Olli is already frustrated. Apologize via senior.say and refactor. |
+
+**Pre-emptive `senior.say` pattern** (before any 8s+ task):
+
+```bash
+# announce BEFORE the slow command, not after:
+tmux send-keys -t "$SESS" "$(jq -nc '{topic:"senior.say",text:"Moment, ich check den service-log auf Hetzner."}')" Enter
+# THEN do the slow thing
+ssh -i ~/.ssh/hetzner_voicehook root@... 'long pipeline ...'
+# announce result:
+tmux send-keys -t "$SESS" "$(jq -nc '{topic:"senior.say",text:"Service ist active seit gestern, keine neuen Logs."}')" Enter
+```
+
+**Status-heartbeat pattern** for >15s tasks:
+
+```bash
+# announce, kick off background subagent, keep talking:
+tmux send-keys -t "$SESS" "$(jq -nc '{topic:"senior.say",text:"Subagent ist gespawnt fuer den CLI-patch, ich bleib im Voice-Loop, du kannst weiterquatschen."}')" Enter
+# Agent({ ..., run_in_background: true })
+```
+
+**NEVER do silently:**
+- Long SSH pipelines
+- Multi-step grep/find sweeps
+- WebFetch chains
+- Service restarts (always announce intent + result)
+- Issue/PR creation that takes a curl roundtrip
+
 ### 6. Cleanup when user ends call
 
 ```bash
