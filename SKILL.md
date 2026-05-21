@@ -56,6 +56,20 @@ Use your actual brand: `claude`, `hermes`, `openclaw`, `cursor`, `codex`,
 The `--json` flag is REQUIRED — without it the Hotswap-Persona push in step 4a
 would be spoken literally as TTS instead of being routed to the control plane.
 
+**NEW (0.2.0 relay-hardening):**
+- `--keep-alive` is now the **default** — stdin-EOF no longer quits and
+  transient disconnects auto-reconnect. The old FIFO sleep-holder hack is no
+  longer needed; the agent stays connected until the host leaves the call,
+  the room closes, `/q` / `{"topic":"quit"}`, or SIGTERM (kill the tmux session).
+- `--strict-relay` injects a bundled strict-relay persona so the voicebot
+  speaks ONLY your pushed `senior.say` text and never self-generates facts
+  (anti-hallucination, #8). Use it when correctness matters more than fluency.
+- `--suppress-echo` keeps your own relayed TTS out of the operator stream (#10).
+- `--say-ttl <sec>` drops a `senior.say` that went stale (older than `<sec>` or
+  superseded by a newer user-turn) instead of speaking it late (#9).
+- `--notify-url <url>` / `_wake` stdout markers wake a coding agent per
+  finalized user-turn (push, not poll, #12). Grep `'"topic": "_wake"'`.
+
 **NEW (auto-persona):** to skip the manual persona-push in step 4a entirely,
 pass `--persona-file <path>` or `--persona "<inline text>"`. The CLI then
 pushes `senior.persona` automatically right after connect, BEFORE handing
@@ -246,8 +260,10 @@ tmux send-keys -t "$SESS" "$(jq -nc '{topic:"senior.say",text:"Subagent ist gesp
 tmux kill-session -t "$SESS" 2>/dev/null
 ```
 
-⚠️ DO NOT send `/q` via send-keys in `--json` mode either — kill the tmux
-session directly. The CLI cleans up the LK connection on SIGTERM.
+Killing the tmux session (SIGTERM) ends the call cleanly. You can also send an
+explicit quit on stdin: `/q` (plain) or `{"topic":"quit"}` (json). Under the
+default `--keep-alive`, only these explicit signals end the session — Ctrl-D /
+stdin-EOF no longer quits.
 
 ## Why Hotswap-Persona is mandatory
 

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "voicehook-agent"
-version = "0.1.0"
+version = "0.2.0"
 description = "Zero-install CLI for any LLM agent to join a voicehook.ai voice call as a 2nd participant"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -35,3 +35,9 @@ Documentation = "https://voicehook.ai/agent"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/voicehook_agent"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/voicehook_agent/strict-relay.txt" = "voicehook_agent/strict-relay.txt"
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
