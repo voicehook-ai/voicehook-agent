@@ -169,3 +169,29 @@ def test_terminal_disconnect_classification():
     assert relay.is_terminal_disconnect("SIGNAL_CLOSE") is False
     assert relay.is_terminal_disconnect("STATE_MISMATCH") is False
     assert relay.is_terminal_disconnect("") is False
+
+
+# --------------------------------------------------------------------------- #
+# graph — live-context sync
+# --------------------------------------------------------------------------- #
+def test_read_graph_missing_file_returns_none(tmp_path):
+    snap = relay.read_graph(str(tmp_path / "nope.jsonl"))
+    assert snap.digest is None
+    assert snap.text is None
+
+
+def test_read_graph_returns_digest_and_text(tmp_path):
+    f = tmp_path / "graph.jsonl"
+    f.write_text("Du bist DeepSeek. Gerade: Barge-in bauen.\n", encoding="utf-8")
+    snap = relay.read_graph(str(f))
+    assert snap.text == "Du bist DeepSeek. Gerade: Barge-in bauen."
+    assert snap.digest and len(snap.digest) == 64  # sha256 hex
+
+
+def test_read_graph_digest_changes_with_content(tmp_path):
+    f = tmp_path / "graph.jsonl"
+    f.write_text("a", encoding="utf-8")
+    d1 = relay.read_graph(str(f)).digest
+    f.write_text("b", encoding="utf-8")
+    d2 = relay.read_graph(str(f)).digest
+    assert d1 != d2

@@ -36,7 +36,7 @@ from livekit import rtc
 from . import relay
 
 _SLUG_RX = re.compile(r"^[a-z]+-[a-z]+-[a-z]+-[A-Z0-9]{4,8}$")
-_VERSION = "0.2.0"
+_VERSION = "0.3.0"
 _USER_AGENT = f"voicehook-agent/{_VERSION}"
 
 # Bundled persona template for --strict-relay (#8). Shipped inside the package
@@ -138,6 +138,29 @@ def _load_persona(persona: str | None, persona_file: str | None,
     return None
 
 
+def _compose_greet(
+    *,
+    name: str,
+    username: str | None = None,
+    topic: str | None = None,
+    prompt: str | None = None,
+) -> str:
+    """Voice-friendly join greeting built from the self-report fields.
+
+    "Hallo {username}, hier ist {name}. Ich bin dem Call beigetreten
+    [, wir waren gerade dabei {topic}] [. {prompt}]"
+    """
+    salutation = f"Hallo {username}," if username else "Hallo,"
+    greet = f"{salutation} hier ist {name}. Ich bin dem Call beigetreten"
+    if topic:
+        greet += f", wir waren gerade dabei {topic}."
+    else:
+        greet += "."
+    if prompt:
+        greet += f" {prompt}"
+    return greet
+
+
 def _kind_label(p) -> str:
     """ParticipantKind enum → short string ('user' / 'agent' / 'sip' / ...).
     LK proto: 0=standard(user), 1=ingress, 2=egress, 3=sip, 4=agent."""
@@ -155,6 +178,12 @@ async def _post_webhook(client: httpx.AsyncClient | None, url: str, payload: dic
         await client.post(url, json=payload, timeout=5.0)
     except Exception as e:
         print(f"[error] notify-url POST failed: {e!r}", file=sys.stderr, flush=True)
+
+
+async def _push_persona(room: rtc.Room, text: str) -> None:
+    """Publish a senior.persona blob — the voice-ai swaps its live instructions."""
+    payload = json.dumps({"text": text}, ensure_ascii=False).encode("utf-8")
+    await room.local_participant.publish_data(payload, reliable=True, topic="senior.persona")
 
 
 async def _stdin_publisher(
@@ -262,6 +291,9 @@ async def _connect_and_listen(
     notify_url: str | None,
     http_client: httpx.AsyncClient | None,
     read_stdin: bool,
+    greet_text: str | None = None,
+    graph_path: str | None = None,
+    graph_interval: float = 60.0,
 ) -> tuple[int, str | None]:
     """One connect→listen cycle. Returns (rc, disconnect_reason_name).
     disconnect_reason_name is None for a clean stdin-driven quit; otherwise the
@@ -274,6 +306,7 @@ async def _connect_and_listen(
 
     room = rtc.Room()
     stop = asyncio.Event()
+    turn_event = asyncio.Event()  # set on finalized user-turn → graph re-sync
     disconnect_reason: dict[str, str | None] = {"name": None}
 
     audible: set[str] = set()
@@ -299,6 +332,7 @@ async def _connect_and_listen(
             # #9 — a fresh user turn supersedes any older queued say.
             if role == "user":
                 say_tracker.note_user_turn()
+                turn_event.set()  # graph-per-turn: refresh live context
             # #12 — wake on finalized user turns (deduped, role-filtered).
             decision = notifier.consider(role, text, payload, room=slug)
             if decision.wake and decision.payload is not None:
@@ -435,6 +469,47 @@ async def _connect_and_listen(
         except Exception as e:
             print(f"[error] persona auto-push failed: {e!r}", file=sys.stderr, flush=True)
 
+    if greet_text:
+        try:
+            payload = json.dumps({"text": greet_text}, ensure_ascii=False).encode("utf-8")
+            await room.local_participant.publish_data(payload, reliable=True, topic="senior.say")
+            _print_event(json_mode, "system", "greet auto-pushed", topic="_meta")
+        except Exception as e:
+            print(f"[error] greet auto-push failed: {e!r}", file=sys.stderr, flush=True)
+
+    # ---- live-context sync: --graph auto-refresh (status loop + per-turn) ---- #
+    graph_snap: relay.GraphSnapshot | None = None
+
+    async def _sync_graph(force: bool = False) -> None:
+        nonlocal graph_snap
+        if not graph_path:
+            return
+        snap = relay.read_graph(graph_path)
+        if snap.digest is None or not snap.text:
+            return
+        if not force and snap.digest == (graph_snap.digest if graph_snap else None):
+            return
+        graph_snap = snap
+        try:
+            await _push_persona(room, snap.text)
+            _print_event(json_mode, "system", "graph auto-pushed", topic="_meta")
+        except Exception as e:  # noqa: BLE001
+            print(f"[error] graph push failed: {e!r}", file=sys.stderr, flush=True)
+
+    async def _graph_loop() -> None:
+        if not graph_path:
+            return
+        await _sync_graph(force=True)  # initial snapshot at connect
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(turn_event.wait(), timeout=graph_interval)
+            except asyncio.TimeoutError:
+                pass
+            turn_event.clear()
+            await _sync_graph()
+
+    graph_task = asyncio.create_task(_graph_loop()) if graph_path else None
+
     if not json_mode:
         print("[hint] type a line to senior.say (voice-ai speaks it). "
               "/q to quit (Ctrl-D no longer quits under --keep-alive).", flush=True)
@@ -460,6 +535,12 @@ async def _connect_and_listen(
             await hb_task
         except (asyncio.CancelledError, Exception):
             pass
+        if graph_task is not None:
+            graph_task.cancel()
+            try:
+                await graph_task
+            except (asyncio.CancelledError, Exception):
+                pass
         try:
             await room.disconnect()
         except Exception:
@@ -481,6 +562,14 @@ async def _join(
     wake_only_user: bool = True,
     suppress_echo: bool = False,
     say_ttl: float | None = None,
+    model: str | None = None,
+    topic: str | None = None,
+    username: str | None = None,
+    prompt: str | None = None,
+    greet: str | None = None,
+    no_greet: bool = False,
+    graph_path: str | None = None,
+    graph_interval: float = 60.0,
 ) -> int:
     try:
         api_base, slug = _parse_invite(invite_url)
@@ -491,10 +580,30 @@ async def _join(
     if not identity:
         import socket
         host = re.sub(r"[^a-z0-9]", "", socket.gethostname().lower())[:12] or "host"
-        name = (agent_name or "claude").lower()
-        name = re.sub(r"[^a-z0-9]", "", name)[:16] or "claude"
+        name = (agent_name or "agent").lower()
+        name = re.sub(r"[^a-z0-9]", "", name)[:16] or "agent"
         identity = f"{name}-{host}-{os.urandom(2).hex()}"
     ident = identity
+
+    # Self-report → voice-friendly auto-greet. The senior brain MUST identify
+    # itself (name + model + topic) — never hardcode a brand. If the mandatory
+    # fields are missing we skip the greet instead of guessing.
+    greet_text: str | None = None
+    if not no_greet:
+        if greet:
+            greet_text = greet
+        else:
+            name_for_greet = identity if identity else agent_name
+            if not name_for_greet or not model:
+                _print_event(
+                    json_mode, "system",
+                    "self-report incomplete (--name/--identity + --model fehlen) — "
+                    "kein Auto-Greet", topic="_meta")
+            else:
+                greet_text = _compose_greet(
+                    name=(agent_name or name_for_greet), username=username,
+                    topic=topic, prompt=prompt,
+                )
 
     _print_event(json_mode, "system",
                  f"connecting room={slug} as identity={ident} via {api_base}", topic="_meta")
@@ -518,6 +627,8 @@ async def _join(
                 keep_alive=keep_alive, notifier=notifier, echo=echo,
                 say_tracker=say_tracker, notify_url=notify_url,
                 http_client=http_client, read_stdin=first,
+                greet_text=greet_text if first else None,
+                graph_path=graph_path, graph_interval=graph_interval,
             )
             first = False
             # Clean quit (stdin /q or {"topic":"quit"}): reason is None.
@@ -554,8 +665,14 @@ def main() -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
     p_join = sub.add_parser("join", help="join a voicehook.ai call as an agent")
     p_join.add_argument("invite_url", help="https://voicehook.ai/r/<slug>?go=1  OR  bare <slug>")
-    p_join.add_argument("--name", default=None, help="agent brand-name shown in voice.html chip (e.g. 'claude', 'hermes', 'cursor', 'openclaw'). Becomes identity prefix. Default: 'claude'.")
+    p_join.add_argument("--name", default=None, help="agent brand-name shown in the call chip (e.g. 'deepseek', 'hermes', 'cursor'). Becomes the identity prefix and the name spoken in the auto-greet. REQUIRED for the auto-greet — never hardcode a vendor you are not.")
     p_join.add_argument("--identity", default=None, help="explicit full identity (overrides --name)")
+    p_join.add_argument("--model", default=None, help="self-report: the exact model the senior brain runs on (e.g. 'deepseek-v4-pro'). Required for the auto-greet.")
+    p_join.add_argument("--topic", default=None, help="self-report: what the call is about (<=5 words), spoken as 'wir waren gerade dabei {topic}'.")
+    p_join.add_argument("--username", default=None, help="the host's name, spoken in the salutation ('Hallo {username},'). Omitted if unknown.")
+    p_join.add_argument("--prompt", default=None, help="extra sentence appended after the auto-greet.")
+    p_join.add_argument("--greet", default=None, help="full custom greeting (overrides the composed template).")
+    p_join.add_argument("--no-greet", action="store_true", default=False, help="disable the auto-greet entirely.")
     p_join.add_argument("--json", action="store_true", help="JSONL stream mode on stdin/stdout")
     p_join.add_argument(
         "--persona", default=None,
@@ -602,6 +719,15 @@ def main() -> None:
         "--strict-relay", action="store_true", default=False,
         help="inject a bundled strict-relay persona at connect: voicebot speaks ONLY pushed text, never self-generates. Overridden by --persona/--persona-file. [#8]",
     )
+    # live-context sync (status loop + graph-per-turn)
+    p_join.add_argument(
+        "--graph", default=None, metavar="PATH",
+        help="path to a live-context/status file (the 'graph'). Auto-pushed as senior.persona at connect, every --graph-interval seconds, and on each finalized user-turn (deduped by content hash).",
+    )
+    p_join.add_argument(
+        "--graph-interval", type=float, default=60.0, metavar="SEC",
+        help="seconds between graph auto-refreshes (default 60).",
+    )
     args = ap.parse_args()
     if args.cmd == "join":
         try:
@@ -614,7 +740,10 @@ def main() -> None:
                 args.invite_url, args.identity, args.name, args.json, persona_text,
                 keep_alive=args.keep_alive, notify_url=args.notify_url,
                 wake_only_user=args.wake_only_user, suppress_echo=args.suppress_echo,
-                say_ttl=args.say_ttl,
+                say_ttl=args.say_ttl, model=args.model, topic=args.topic,
+                username=args.username, prompt=args.prompt, greet=args.greet,
+                no_greet=args.no_greet, graph_path=args.graph,
+                graph_interval=args.graph_interval,
             ))
         except KeyboardInterrupt:
             rc = 130

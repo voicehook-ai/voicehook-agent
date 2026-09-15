@@ -75,30 +75,81 @@ pass `--persona-file <path>` or `--persona "<inline text>"`. The CLI then
 pushes `senior.persona` automatically right after connect, BEFORE handing
 over to the stdin-loop. No more zero-context call starts.
 
+**NEW (0.3.0 live-context sync — Status-Loop + Graph-per-Turn):**
+Olli's rule: *der Voice-Agent muss auch während der Senior arbeitet automatisch
+im Bild bleiben — minütlicher Status-Loop UND Graph-Update je User-Turn sind
+EIN Feature, kein separates.* Dafür hältst du als Senior eine Live-Context-
+Datei (den "Graph") mit deinem aktuellen Stand (Identität + was du gerade tust
++ offene Items) und übergibst sie mit `--graph`:
+- `--graph <file>` — wird bei Connect, alle `--graph-interval` Sekunden und bei
+  jedem finalisierten User-Turn als `senior.persona` gepusht (dedup per Hash).
+- `--graph-interval <sec>` — Kadenz des periodischen Re-Push (default 60).
+
+```bash
+# während der Arbeit: Stand in die Graph-Datei schreiben, CLI sync'd automatisch
+printf 'Du BIST DeepSeek im Voice-Modus. Gerade: Barge-in + Status-Loop gebaut.\nOpen: Graph-Datei deployen.\n' > /tmp/vh-graph.txt
+tmux new-session -d -s "$SESS" \
+  "voicehook-agent join '$INVITE_URL' --name $NAME --model $MODEL --json --graph /tmp/vh-graph.txt 2>&1"
+```
+
+Wenn der User dann fragt "was machst du gerade", antwortet voice-ai aus dem
+zuletzt gepushten Graph — nicht mehr "ich lese nur das Transkript".
+
 ```bash
 SLUG=$(echo "$INVITE_URL" | grep -oE '[a-z]+-[a-z]+-[a-z]+-[A-Z0-9]{4,8}')
 SESS="vh-$SLUG"
-NAME=claude   # ← change this to YOUR agent brand
-tmux new-session -d -s "$SESS" "voicehook-agent join '$INVITE_URL' --name $NAME --json 2>&1"
+NAME=deepseek          # ← deine ECHTE Brand (nie einen anderen Vendor hartkodieren)
+MODEL=deepseek-v4-pro  # ← dein ECHTES Model-ID aus deiner Runtime
+TOPIC="<worum es geht>" # ← max 5 Wörter
+USERNAME=olli          # ← falls bekannt, sonst weglassen
+
+tmux new-session -d -s "$SESS" \
+  "voicehook-agent join '$INVITE_URL' --name $NAME --model $MODEL --topic '$TOPIC' --username $USERNAME --json --persona-file personas/claude-default.txt 2>&1"
 sleep 3
 tmux capture-pane -t "$SESS" -p | tail -10
 ```
 
-Auto-persona variant (recommended — step 4a is then optional):
+Look for two markers in the capture-pane output:
+- `{"role":"system","text":"persona auto-pushed","topic":"_meta"}` — persona landed
+- `{"role":"system","text":"greet auto-pushed","topic":"_meta"}` — self-intro landed
 
-```bash
-tmux new-session -d -s "$SESS" "voicehook-agent join '$INVITE_URL' --name claude --json --persona-file personas/claude-default.txt 2>&1"
-```
+The auto-greet is **composed by the CLI from the self-report flags** (see 3a).
+If you see `self-report incomplete` instead, you forgot `--name`/`--identity`
+or `--model` — fill them and retry; never fall back to a guessed brand.
 
-Inline persona (one-shot, no file):
+### 3a. MANDATORY: Self-Report (Pflichtangaben) — never hardcode a vendor
 
-```bash
-tmux new-session -d -s "$SESS" "voicehook-agent join '$INVITE_URL' --name claude --json --persona 'Du BIST Claude im Voice-Modus. Kurz, technisch, kollegial.' 2>&1"
-```
+The CLI does NOT know what model you are. YOU do. So you must pass the three
+self-report fields, derived from your own runtime, **not** from the operator:
 
-Look for `{"role":"system","text":"persona auto-pushed","topic":"_meta"}` in
-the capture-pane output — that confirms the persona landed before any user-
-turn arrives.
+| Flag | Wert | Quelle |
+|---|---|---|
+| `--name` | deine Brand / Agent-Name | eigene Identität (nicht "claude" wenn du deepseek bist) |
+| `--model` | exaktes Model-ID | eigener System-Context / Runtime |
+| `--topic` | worum der Call geht (≤5 Wörter) | Session-Kontext |
+
+Optionale Felder für den voice-freundlichen Gruß:
+| Flag | Zweck |
+|---|---|
+| `--username` | Salutation "Hallo {username}," — weglassen wenn unbekannt |
+| `--prompt` | Satz nach dem Gruß ("Was möchtest du besprechen?") |
+| `--greet` | kompletter eigener Gruß (überschreibt das Template) |
+| `--no-greet` | Auto-Greet ganz aus |
+
+**Qualitätskriterien (damit es mit JEDEM Modell klappt):**
+1. Selbst-Introspektion statt Operator-Eingabe — nie den Operator fragen, das eigene Modell aus der Runtime ableiten.
+2. Wahrheitspflicht / Anti-Impersonation — `model` = echtes ID, `name` gibt keinen fremden Vendor vor.
+3. Modell-agnostisch — funktioniert für Claude Code, Cursor, ZeroClaw, Hermes, deepseek, gpt.
+4. Kompakt — Gruß ≤ 2 Sätze, topic ≤ 5 Wörter.
+5. Kein Secret-Leak — nie Keys/Tokens/PII in name/model/topic/prompt.
+6. Konsistenz — name/model/topic identisch in Persona und Gruß.
+7. Fallback — Modell nicht bestimmbar → weglassen/bridgen, nie raten.
+
+**Gruß-Template** (spricht die CLI automatisch, wenn `--name`+`--model` gesetzt):
+
+> "Hallo {username}, hier ist {name}. Ich bin dem Call beigetreten, wir waren gerade dabei {topic}. {prompt}"
+
+Beispiel: `"Hallo Olli, hier ist DeepSeek. Ich bin dem Call beigetreten, wir waren gerade dabei den Multi-Agent-Flow zu testen. Was möchtest du besprechen?"`
 
 ### 4. Inspect initial state — verify connect
 

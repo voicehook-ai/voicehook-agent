@@ -14,8 +14,10 @@ Keeping these here means a test suite can exercise the tricky edge cases
 """
 from __future__ import annotations
 
+import hashlib
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Iterable, Iterator
 
 
@@ -268,3 +270,32 @@ TERMINAL_DISCONNECT_REASONS: frozenset[str] = frozenset({
 
 def is_terminal_disconnect(reason_name: str) -> bool:
     return (reason_name or "").upper() in TERMINAL_DISCONNECT_REASONS
+
+
+# --------------------------------------------------------------------------- #
+# #graph — live-context sync (status loop + graph-per-turn)
+# --------------------------------------------------------------------------- #
+@dataclass
+class GraphSnapshot:
+    """A read of the senior's live-context file (the "graph").
+
+    ``digest`` is a sha256 of the raw bytes so the CLI can skip unchanged
+    pushes; ``text`` is the decoded content pushed verbatim as `senior.persona`
+    so the voice-ai always knows "was gerade Phase ist".
+    """
+
+    digest: str | None
+    text: str | None
+
+
+def read_graph(path: str) -> GraphSnapshot:
+    """Read the graph/status file. Returns (None, None) when missing/unreadable —
+    the caller treats that as "no update available" and never crashes the loop."""
+    try:
+        raw = Path(path).read_bytes()
+    except OSError:
+        return GraphSnapshot(digest=None, text=None)
+    return GraphSnapshot(
+        digest=hashlib.sha256(raw).hexdigest(),
+        text=raw.decode("utf-8").rstrip(),
+    )
