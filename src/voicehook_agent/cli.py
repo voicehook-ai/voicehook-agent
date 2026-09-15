@@ -31,6 +31,8 @@ import json
 import os
 import re
 import sys
+import time
+from collections.abc import AsyncIterator
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -188,6 +190,30 @@ async def _push_persona(room: rtc.Room, text: str) -> None:
     """Publish a senior.persona blob — the voice-ai swaps its live instructions."""
     payload = json.dumps({"text": text}, ensure_ascii=False).encode("utf-8")
     await room.local_participant.publish_data(payload, reliable=True, topic="senior.persona")
+
+
+async def _ollama_summarize(
+    client: httpx.AsyncClient | None,
+    url: str,
+    model: str,
+    prompt: str,
+    timeout: float,
+) -> str | None:
+    """Call a local Ollama to digest turns → short summary. None on any failure
+    (caller falls back to the deterministic digest)."""
+    if client is None:
+        return None
+    try:
+        r = await client.post(
+            f"{url}/api/generate",
+            json={"model": model, "prompt": prompt, "stream": False},
+            timeout=timeout,
+        )
+        r.raise_for_status()
+        return (r.json().get("response") or "").strip() or None
+    except Exception as e:  # noqa: BLE001
+        print(f"[error] ollama summarize failed: {e!r}", file=sys.stderr, flush=True)
+        return None
 
 
 async def _stdin_publisher(
@@ -675,6 +701,100 @@ async def _join(
     return rc
 
 
+# --------------------------------------------------------------------------- #
+# log-summary — the "2nd micro agent": digest the call log into senior.graph
+# --------------------------------------------------------------------------- #
+def _parse_transcript(line: str) -> tuple[str, str] | None:
+    """Extract (role, text) from a `--json` transcript line. None for noise."""
+    try:
+        obj = json.loads(line)
+    except ValueError:
+        return None
+    if obj.get("topic") != "transcript":
+        return None
+    role = obj.get("role")
+    text = (obj.get("text") or "").strip()
+    if role not in ("user", "agent") or not text:
+        return None
+    return role, text
+
+
+async def _follow_lines(path: str, from_start: bool = False) -> AsyncIterator[str]:
+    """Yield complete new lines appended to `path` (tail -f semantics)."""
+    f = open(path, "rb")
+    f.seek(0 if from_start else 2)
+    buf = b""
+    loop = asyncio.get_running_loop()
+    while True:
+        chunk = await loop.run_in_executor(None, f.read)
+        if chunk:
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                yield line.decode("utf-8", "replace")
+        else:
+            f.seek(0, 1)  # clear EOF flag so a grown file is picked up
+            await asyncio.sleep(0.5)
+
+
+async def _emit_graph(out_path: str | None, base: str, text: str) -> None:
+    body = f"{base}\n\nWas bisher passiert ist:\n{text}" if base else f"Was bisher passiert ist:\n{text}"
+    line = json.dumps({"topic": "senior.graph", "text": body}, ensure_ascii=False)
+    if out_path:
+        with open(out_path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    else:
+        print(line, flush=True)
+
+
+async def _run_log_summary(args) -> int:
+    summary = relay.RollingSummary(max_turns=args.max_turns)
+    base = ""
+    if args.base:
+        try:
+            base = open(args.base, encoding="utf-8").read().rstrip()
+        except OSError as e:
+            print(f"[error] cannot read --base: {e!r}", file=sys.stderr, flush=True)
+
+    client = None
+    if args.summarize:
+        client = httpx.AsyncClient(timeout=args.timeout)
+
+    last_emit = time.monotonic()
+    try:
+        async for line in _follow_lines(args.log, from_start=args.from_start):
+            parsed = _parse_transcript(line)
+            if parsed:
+                summary.add(*parsed)
+            if time.monotonic() - last_emit >= args.interval:
+                turns = summary.turns
+                if turns:
+                    text = summary.deterministic()
+                    if args.summarize:
+                        got = await _ollama_summarize(
+                            client, args.ollama_url, args.model,
+                            relay.build_summary_prompt(turns), args.timeout,
+                        )
+                        text = got if got else text  # LLM down → deterministic
+                    await _emit_graph(args.out, base, text)
+                last_emit = time.monotonic()
+        # final flush on EOF/interrupt
+        turns = summary.turns
+        if turns:
+            text = summary.deterministic()
+            if args.summarize:
+                got = await _ollama_summarize(
+                    client, args.ollama_url, args.model,
+                    relay.build_summary_prompt(turns), args.timeout,
+                )
+                text = got if got else text
+            await _emit_graph(args.out, base, text)
+    finally:
+        if client is not None:
+            await client.aclose()
+    return 0
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(prog="voicehook-agent", description=__doc__)
     ap.add_argument("--version", action="version", version=f"voicehook-agent {_VERSION}")
@@ -744,6 +864,26 @@ def main() -> None:
         "--graph-interval", type=float, default=60.0, metavar="SEC",
         help="seconds between graph auto-pushes (default 60).",
     )
+    # log-summary: the 2nd micro agent (digests the call log into senior.graph)
+    p_sum = sub.add_parser("log-summary", help="watch a call log and emit senior.graph digests")
+    p_sum.add_argument("log", help="path to the CLI's --json transcript log (JSONL)")
+    p_sum.add_argument("--interval", type=float, default=60.0, metavar="SEC",
+                       help="emit cadence (default 60).")
+    p_sum.add_argument("--max-turns", type=int, default=8,
+                       help="turns kept in the rolling digest (default 8).")
+    p_sum.add_argument("--out", default=None, metavar="PATH",
+                       help="append senior.graph JSON lines here (FIFO/file); default stdout.")
+    p_sum.add_argument("--base", default=None, metavar="FILE",
+                       help="static context (identity + task) prepended to every digest.")
+    p_sum.add_argument("--summarize", action="store_true", default=False,
+                       help="use a local LLM (Ollama) to compress turns into a real summary.")
+    p_sum.add_argument("--model", default="gemma3:4b", help="Ollama model (default gemma3:4b).")
+    p_sum.add_argument("--ollama-url", default="http://127.0.0.1:11434",
+                       help="Ollama base URL (default http://127.0.0.1:11434).")
+    p_sum.add_argument("--timeout", type=float, default=30.0, metavar="SEC",
+                       help="Ollama request timeout (default 30).")
+    p_sum.add_argument("--from-start", action="store_true", default=False,
+                       help="process existing log content too (default: tail from end).")
     args = ap.parse_args()
     if args.cmd == "join":
         try:
@@ -761,6 +901,12 @@ def main() -> None:
                 no_greet=args.no_greet, graph_path=args.graph,
                 graph_interval=args.graph_interval,
             ))
+        except KeyboardInterrupt:
+            rc = 130
+        sys.exit(rc)
+    if args.cmd == "log-summary":
+        try:
+            rc = asyncio.run(_run_log_summary(args))
         except KeyboardInterrupt:
             rc = 130
         sys.exit(rc)

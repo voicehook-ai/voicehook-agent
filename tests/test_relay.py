@@ -211,3 +211,39 @@ def test_graph_holder_clears_on_empty():
     g.set("was")
     g.set(None)
     assert g.latest is None
+
+
+# --------------------------------------------------------------------------- #
+# RollingSummary — the log-summary micro agent digest
+# --------------------------------------------------------------------------- #
+def test_rolling_summary_dedupes_consecutive():
+    s = relay.RollingSummary(max_turns=8)
+    s.add("user", "hallo")
+    s.add("user", "hallo")  # dup → skipped
+    assert s.turns == [("user", "hallo")]
+
+
+def test_rolling_summary_trims_to_max_turns():
+    s = relay.RollingSummary(max_turns=3)
+    for i in range(5):
+        s.add("user", f"t{i}")
+    assert [t for _, t in s.turns] == ["t2", "t3", "t4"]
+
+
+def test_rolling_summary_ignores_empty():
+    s = relay.RollingSummary()
+    s.add("user", "   ")
+    assert s.turns == []
+
+
+def test_rolling_summary_deterministic_format():
+    s = relay.RollingSummary()
+    s.add("user", "Hallo")
+    s.add("agent", "Hi Olli")
+    assert s.deterministic() == "- user: Hallo\n- agent: Hi Olli"
+
+
+def test_build_summary_prompt_contains_turns():
+    p = relay.build_summary_prompt([("user", "Frage"), ("agent", "Antwort")])
+    assert "Frage" in p and "Antwort" in p
+    assert "zusammen" in p  # German compression instruction

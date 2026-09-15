@@ -315,3 +315,51 @@ class GraphHolder:
 
     def set(self, text: str | None) -> None:
         self.latest = text
+
+
+# --------------------------------------------------------------------------- #
+# #log-summary — the "2nd micro agent" (rolling call-log digest)
+# --------------------------------------------------------------------------- #
+@dataclass
+class RollingSummary:
+    """Rolling digest of the last `max_turns` finalized transcript turns.
+
+    The micro-agent feeds this from the CLI's `--json` transcript stream and
+    emits the digest as a `senior.graph` update — so the voice-ai (and the
+    senior, when it's back in the loop) knows "was bisher passiert ist" without
+    the senior having to do it live.
+    """
+
+    max_turns: int = 8
+    _turns: list[tuple[str, str]] = field(default_factory=list)
+    _last: tuple[str, str] | None = None
+
+    def add(self, role: str, text: str) -> None:
+        text = (text or "").strip()
+        if not text:
+            return
+        role = role if role in ("user", "agent") else "other"
+        sig = (role, text)
+        if sig == self._last:
+            return  # consecutive dup → skip
+        self._last = sig
+        self._turns.append(sig)
+        if len(self._turns) > self.max_turns:
+            self._turns = self._turns[-self.max_turns:]
+
+    @property
+    def turns(self) -> list[tuple[str, str]]:
+        return list(self._turns)
+
+    def deterministic(self) -> str:
+        return "\n".join(f"- {r}: {t}" for r, t in self._turns)
+
+
+def build_summary_prompt(turns: list[tuple[str, str]]) -> str:
+    """Prompt for the local LLM: compress the raw turns into a short digest."""
+    lines = [f"{role}: {text}" for role, text in turns]
+    return (
+        "Fasse in maximal 3 kurzen Saetzen zusammen, was im Call besprochen, "
+        "entschieden oder als offen markiert wurde. Deutsch, kein Markdown.\n"
+        + "\n".join(lines)
+    )

@@ -98,6 +98,30 @@ Die CLI pusht den letzten `senior.graph`-Stand dann automatisch minütlich an
 voice-ai. Fragt der User "was machst du gerade", antwortet voice-ai aus dem
 zuletzt gepushten Stand — nicht "ich lese nur das Transkript".
 
+**NEW (0.3.0 log-summary — der „2. Micro-Agent"):**
+Der Senior ist im Turn und kann nicht gleichzeitig den Call-Log auswerten.
+Ein zweiter, eigenständiger Prozess (`voicehook-agent log-summary`) tailt das
+Transkript-Log, destilliert „was bisher passiert ist" und schreibt es als
+`senior.graph` — die CLI pusht es dann in der gewohnten Kadenz. Er hat ~60s
+Zeit, also reicht sogar das lokale 12B (6s); Default ist das schnelle 4B.
+
+```bash
+# 1) CLI-Output in ein Log file tee'n (dann tailt der Micro-Agent es):
+tmux new-session -d -s "$SESS" \
+  "voicehook-agent join '$INVITE_URL' --name $NAME --model $MODEL --json 2>&1 | tee /tmp/vh-$SLUG.log"
+
+# 2) Micro-Agent parallel starten — schreibt senior.graph in die CLI-Stdin (FIFO):
+mkfifo /tmp/vh-$SLUG.graph
+tmux new-session -d -s "$SESS-sum" \
+  "voicehook-agent log-summary /tmp/vh-$SLUG.log --out /tmp/vh-$SLUG.graph --base /tmp/vh-base.txt --summarize --model gemma3:4b 2>&1"
+```
+
+- Default deterministisch (letzte `--max-turns` Turns rollierend), `--summarize`
+  schaltet das lokale Ollama zu (Fallback auf deterministisch bei Endpoint-Down).
+- `--base <file>` = statischer Kontext (Identität + Task), wird jeder Digest
+  vorangestellt. `--model`/`--ollama-url` konfigurieren das lokale LLM
+  (Secure-Agent-Box: `gemma3:4b` schnell / `gemma3:12b` gründlich).
+
 ```bash
 SLUG=$(echo "$INVITE_URL" | grep -oE '[a-z]+-[a-z]+-[a-z]+-[A-Z0-9]{4,8}')
 SESS="vh-$SLUG"
