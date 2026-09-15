@@ -78,22 +78,25 @@ over to the stdin-loop. No more zero-context call starts.
 **NEW (0.3.0 live-context sync — Status-Loop + Graph-per-Turn):**
 Olli's rule: *der Voice-Agent muss auch während der Senior arbeitet automatisch
 im Bild bleiben — minütlicher Status-Loop UND Graph-Update je User-Turn sind
-EIN Feature, kein separates.* Dafür hältst du als Senior eine Live-Context-
-Datei (den "Graph") mit deinem aktuellen Stand (Identität + was du gerade tust
-+ offene Items) und übergibst sie mit `--graph`:
-- `--graph <file>` — wird bei Connect, alle `--graph-interval` Sekunden und bei
-  jedem finalisierten User-Turn als `senior.persona` gepusht (dedup per Hash).
-- `--graph-interval <sec>` — Kadenz des periodischen Re-Push (default 60).
+EIN Feature, kein separates.* Die CLI erzwingt die Kadenz, der Senior liefert
+nur seinen aktuellen Stand, wann immer er sich ändert:
+- `{"topic":"senior.graph","text":"<aktueller Stand>"}` auf **stdin** → CLI hält
+  den Stand im Speicher und pusht ihn als `senior.persona` **alle
+  `--graph-interval` Sek (default 60) + bei jedem finalisierten User-Turn**
+  (sofort nach Empfang, dann als Heartbeat).
+- `--graph <file>` — optionaler Seed (einmalig bei Connect gelesen).
+- `--graph-interval <sec>` — Kadenz des periodischen Push (default 60).
 
 ```bash
-# während der Arbeit: Stand in die Graph-Datei schreiben, CLI sync'd automatisch
-printf 'Du BIST DeepSeek im Voice-Modus. Gerade: Barge-in + Status-Loop gebaut.\nOpen: Graph-Datei deployen.\n' > /tmp/vh-graph.txt
 tmux new-session -d -s "$SESS" \
-  "voicehook-agent join '$INVITE_URL' --name $NAME --model $MODEL --json --graph /tmp/vh-graph.txt 2>&1"
+  "voicehook-agent join '$INVITE_URL' --name $NAME --model $MODEL --json 2>&1"
+# während der Arbeit Stand aktualisieren (wann immer er sich ändert):
+tmux send-keys -t "$SESS" "$(jq -nc '{topic:"senior.graph",text:"Gerade: Barge-in gebaut. Open: Graph deployen."}')" Enter
 ```
 
-Wenn der User dann fragt "was machst du gerade", antwortet voice-ai aus dem
-zuletzt gepushten Graph — nicht mehr "ich lese nur das Transkript".
+Die CLI pusht den letzten `senior.graph`-Stand dann automatisch minütlich an
+voice-ai. Fragt der User "was machst du gerade", antwortet voice-ai aus dem
+zuletzt gepushten Stand — nicht "ich lese nur das Transkript".
 
 ```bash
 SLUG=$(echo "$INVITE_URL" | grep -oE '[a-z]+-[a-z]+-[a-z]+-[A-Z0-9]{4,8}')

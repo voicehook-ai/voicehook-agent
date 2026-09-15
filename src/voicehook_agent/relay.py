@@ -299,3 +299,19 @@ def read_graph(path: str) -> GraphSnapshot:
         digest=hashlib.sha256(raw).hexdigest(),
         text=raw.decode("utf-8").rstrip(),
     )
+
+
+@dataclass
+class GraphHolder:
+    """In-memory slot for the senior's live-context (the "graph").
+
+    Fed by `senior.graph` stdin lines (and optionally seeded from `--graph` at
+    connect). The CLI's cadence loop pushes `latest` as `senior.persona` every
+    `--graph-interval` seconds — the CLI enforces the cadence, the senior only
+    writes its current state whenever it changes.
+    """
+
+    latest: str | None = None
+
+    def set(self, text: str | None) -> None:
+        self.latest = text

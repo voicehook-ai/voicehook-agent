@@ -9,6 +9,8 @@ stdout: incoming user turns + voice-ai turns, one per line
         json mode:   {"role":"user","text":"..."}\n
 stdin:  one line per turn → published as senior.say  (voice-ai speaks it via TTS)
         json mode:   {"text":"..."} or {"topic":"senior.persona","text":"..."}
+        live context: {"topic":"senior.graph","text":"<current state>"} — held in
+        memory, pushed as senior.persona every --graph-interval sec + per turn.
 
 Relay-hardening flags (see PR "Relay hardening …"):
     --keep-alive / --no-keep-alive   stdin-EOF does NOT quit; reconnect on
@@ -18,6 +20,8 @@ Relay-hardening flags (see PR "Relay hardening …"):
     --suppress-echo                  drop our own relayed TTS from the stream   (#10)
     --say-ttl <sec>                  drop stale/superseded senior.say           (#9)
     --strict-relay                   inject a strict-relay persona at connect   (#8)
+    --graph <file>                   optional live-context seed (stdin updates live)
+    --graph-interval <sec>           cadence of the live-context push (default 60)
 """
 from __future__ import annotations
 
@@ -194,6 +198,8 @@ async def _stdin_publisher(
     keep_alive: bool,
     say_tracker: relay.SayTracker,
     echo: relay.EchoSuppressor,
+    graph: relay.GraphHolder,
+    turn_event: asyncio.Event,
 ) -> None:
     """Reads stdin, publishes lines. Newline-tolerant (#11): a final chunk
     without a trailing newline is processed (with a warning) instead of being
@@ -226,6 +232,14 @@ async def _stdin_publisher(
         else:
             topic = "senior.say"
             payload = {"text": line}
+
+        # senior.graph = live-context update: hold in memory, do NOT publish.
+        # The cadence loop pushes the latest as senior.persona every interval.
+        if topic == "senior.graph":
+            text = (payload.get("text") or "").strip() or None
+            graph.set(text)
+            turn_event.set()  # wake the loop → push immediately, then heartbeat
+            return
 
         if topic.startswith("senior.") and topic not in KNOWN_OUT_TOPICS:
             print(f"[warn] unknown control topic {topic!r} (relaying anyway)",
@@ -292,7 +306,7 @@ async def _connect_and_listen(
     http_client: httpx.AsyncClient | None,
     read_stdin: bool,
     greet_text: str | None = None,
-    graph_path: str | None = None,
+    graph: relay.GraphHolder | None = None,
     graph_interval: float = 60.0,
 ) -> tuple[int, str | None]:
     """One connect→listen cycle. Returns (rc, disconnect_reason_name).
@@ -477,38 +491,31 @@ async def _connect_and_listen(
         except Exception as e:
             print(f"[error] greet auto-push failed: {e!r}", file=sys.stderr, flush=True)
 
-    # ---- live-context sync: --graph auto-refresh (status loop + per-turn) ---- #
-    graph_snap: relay.GraphSnapshot | None = None
-
-    async def _sync_graph(force: bool = False) -> None:
-        nonlocal graph_snap
-        if not graph_path:
+    # ---- live-context sync: cadence loop pushes the latest graph ---- #
+    async def _push_latest_graph() -> None:
+        if graph is None:
             return
-        snap = relay.read_graph(graph_path)
-        if snap.digest is None or not snap.text:
+        text = graph.latest
+        if not text:
             return
-        if not force and snap.digest == (graph_snap.digest if graph_snap else None):
-            return
-        graph_snap = snap
         try:
-            await _push_persona(room, snap.text)
-            _print_event(json_mode, "system", "graph auto-pushed", topic="_meta")
+            await _push_persona(room, text)
+            _print_event(json_mode, "system", "graph pushed", topic="_meta")
         except Exception as e:  # noqa: BLE001
             print(f"[error] graph push failed: {e!r}", file=sys.stderr, flush=True)
 
     async def _graph_loop() -> None:
-        if not graph_path:
+        if graph is None:
             return
-        await _sync_graph(force=True)  # initial snapshot at connect
         while not stop.is_set():
             try:
                 await asyncio.wait_for(turn_event.wait(), timeout=graph_interval)
             except asyncio.TimeoutError:
                 pass
             turn_event.clear()
-            await _sync_graph()
+            await _push_latest_graph()
 
-    graph_task = asyncio.create_task(_graph_loop()) if graph_path else None
+    graph_task = asyncio.create_task(_graph_loop()) if graph is not None else None
 
     if not json_mode:
         print("[hint] type a line to senior.say (voice-ai speaks it). "
@@ -518,7 +525,8 @@ async def _connect_and_listen(
         if read_stdin:
             stdin_task = asyncio.create_task(
                 _stdin_publisher(room, json_mode, stop,
-                                 keep_alive=keep_alive, say_tracker=say_tracker, echo=echo)
+                                 keep_alive=keep_alive, say_tracker=say_tracker,
+                                 echo=echo, graph=graph, turn_event=turn_event)
             )
             await stop.wait()
             stdin_task.cancel()
@@ -615,6 +623,14 @@ async def _join(
     echo = relay.EchoSuppressor(enabled=suppress_echo)
     say_tracker = relay.SayTracker(ttl=say_ttl)
 
+    # Live-context holder — seeded once from --graph (if any), then fed live
+    # via `senior.graph` stdin lines. The cadence loop pushes it every interval.
+    graph = relay.GraphHolder()
+    if graph_path:
+        seed = relay.read_graph(graph_path)
+        if seed.text:
+            graph.set(seed.text)
+
     http_client = httpx.AsyncClient(headers={"user-agent": _USER_AGENT}) if notify_url else None
 
     rc = 0
@@ -628,7 +644,7 @@ async def _join(
                 say_tracker=say_tracker, notify_url=notify_url,
                 http_client=http_client, read_stdin=first,
                 greet_text=greet_text if first else None,
-                graph_path=graph_path, graph_interval=graph_interval,
+                graph=graph, graph_interval=graph_interval,
             )
             first = False
             # Clean quit (stdin /q or {"topic":"quit"}): reason is None.
@@ -722,11 +738,11 @@ def main() -> None:
     # live-context sync (status loop + graph-per-turn)
     p_join.add_argument(
         "--graph", default=None, metavar="PATH",
-        help="path to a live-context/status file (the 'graph'). Auto-pushed as senior.persona at connect, every --graph-interval seconds, and on each finalized user-turn (deduped by content hash).",
+        help="optional seed file: read once at connect into the live-context holder. Live updates arrive via `senior.graph` stdin lines, pushed as senior.persona every --graph-interval sec + on each finalized user-turn.",
     )
     p_join.add_argument(
         "--graph-interval", type=float, default=60.0, metavar="SEC",
-        help="seconds between graph auto-refreshes (default 60).",
+        help="seconds between graph auto-pushes (default 60).",
     )
     args = ap.parse_args()
     if args.cmd == "join":

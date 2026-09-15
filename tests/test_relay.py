@@ -195,3 +195,19 @@ def test_read_graph_digest_changes_with_content(tmp_path):
     f.write_text("b", encoding="utf-8")
     d2 = relay.read_graph(str(f)).digest
     assert d1 != d2
+
+
+def test_graph_holder_holds_latest():
+    g = relay.GraphHolder()
+    assert g.latest is None
+    g.set("Du bist DeepSeek. Gerade: Barge-in bauen.")
+    assert g.latest == "Du bist DeepSeek. Gerade: Barge-in bauen."
+    g.set("neuer Stand")
+    assert g.latest == "neuer Stand"  # overwritten, not appended
+
+
+def test_graph_holder_clears_on_empty():
+    g = relay.GraphHolder()
+    g.set("was")
+    g.set(None)
+    assert g.latest is None
