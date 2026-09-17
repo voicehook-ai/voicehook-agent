@@ -7,10 +7,10 @@ Usage:
 stdout: incoming user turns + voice-ai turns, one per line
         plain mode:  [role] text
         json mode:   {"role":"user","text":"..."}\n
-stdin:  one line per turn → published as senior.say  (voice-ai speaks it via TTS)
-        json mode:   {"text":"..."} or {"topic":"senior.persona","text":"..."}
-        live context: {"topic":"senior.graph","text":"<current state>"} — held in
-        memory, pushed as senior.persona every --graph-interval sec + per turn.
+stdin:  one line per turn → published as operator.say  (voice-ai speaks it via TTS)
+        json mode:   {"text":"..."} or {"topic":"operator.persona","text":"..."}
+        live context: {"topic":"operator.graph","text":"<current state>"} — held in
+        memory, pushed as operator.persona every --graph-interval sec + per turn.
 
 Relay-hardening flags (see PR "Relay hardening …"):
     --keep-alive / --no-keep-alive   stdin-EOF does NOT quit; reconnect on
@@ -18,7 +18,7 @@ Relay-hardening flags (see PR "Relay hardening …"):
     --notify-url <url>               POST a wake payload per finalized turn     (#12)
     --wake-only-user / --wake-all    only role=user wakes (default user-only)   (#12)
     --suppress-echo                  drop our own relayed TTS from the stream   (#10)
-    --say-ttl <sec>                  drop stale/superseded senior.say           (#9)
+    --say-ttl <sec>                  drop stale/superseded operator.say           (#9)
     --strict-relay                   inject a strict-relay persona at connect   (#8)
     --graph <file>                   optional live-context seed (stdin updates live)
     --graph-interval <sec>           cadence of the live-context push (default 60)
@@ -55,13 +55,14 @@ _STRICT_RELAY_PERSONA_CANDIDATES = (
 
 # Control topics the CLI relays. The CLI is topic-agnostic on publish, but we
 # document/validate the known set so a typo'd topic is visible (#10 mentions a
-# new `senior.backchannel` topic the CLI should pass through).
+# new `operator.backchannel` topic the CLI should pass through).
 KNOWN_OUT_TOPICS = frozenset({
-    "senior.say",
-    "senior.persona",
-    "senior.interrupt",
-    "senior.inject",
-    "senior.backchannel",  # operator <-> agent silent side-channel (#10/F8)
+    "operator.say",
+    "operator.persona",
+    "operator.mode",
+    "operator.interrupt",
+    "operator.inject",
+    "operator.backchannel",  # operator <-> agent silent side-channel (#10/F8)
 })
 
 
@@ -135,11 +136,11 @@ def _load_persona(persona: str | None, persona_file: str | None,
         # if the bundled file is missing from an install.
         return (
                 "STRICT RELAY MODE. Du bist ein reines Mundstueck. Du sprichst "
-                "AUSSCHLIESSLICH Text den der Operator per senior.say liefert. "
+                "AUSSCHLIESSLICH Text den der Operator per operator.say liefert. "
                 "Du generierst NIEMALS eigene fachliche Inhalte, Zahlen oder "
                 "Behauptungen. Bei Luecken: neutraler Filler, niemals raten. "
                 "Wenn der User dich direkt anspricht: warte auf die naechste "
-                "senior.say und gib sie wieder, antworte NIE selbst."
+                "operator.say und gib sie wieder, antworte NIE selbst."
             )
     return None
 
@@ -187,9 +188,9 @@ async def _post_webhook(client: httpx.AsyncClient | None, url: str, payload: dic
 
 
 async def _push_persona(room: rtc.Room, text: str) -> None:
-    """Publish a senior.persona blob — the voice-ai swaps its live instructions."""
+    """Publish an operator.persona blob — the voice-ai swaps its live instructions."""
     payload = json.dumps({"text": text}, ensure_ascii=False).encode("utf-8")
-    await room.local_participant.publish_data(payload, reliable=True, topic="senior.persona")
+    await room.local_participant.publish_data(payload, reliable=True, topic="operator.persona")
 
 
 async def _ollama_summarize(
@@ -250,34 +251,34 @@ async def _stdin_publisher(
             except Exception as e:
                 print(f"[error] invalid json on stdin: {e!r}", file=sys.stderr, flush=True)
                 return
-            topic = obj.get("topic", "senior.say")
+            topic = obj.get("topic", "operator.say")
             if topic == "quit":
                 stop.set()
                 return
             payload = {k: v for k, v in obj.items() if k != "topic"}
         else:
-            topic = "senior.say"
+            topic = "operator.say"
             payload = {"text": line}
 
-        # senior.graph = live-context update: hold in memory, do NOT publish.
-        # The cadence loop pushes the latest as senior.persona every interval.
-        if topic == "senior.graph":
+        # operator.graph = live-context update: hold in memory, do NOT publish.
+        # The cadence loop pushes the latest as operator.persona every interval.
+        if topic == "operator.graph":
             text = (payload.get("text") or "").strip() or None
             graph.set(text)
             turn_event.set()  # wake the loop → push immediately, then heartbeat
             return
 
-        if topic.startswith("senior.") and topic not in KNOWN_OUT_TOPICS:
+        if topic.startswith("operator.") and topic not in KNOWN_OUT_TOPICS:
             print(f"[warn] unknown control topic {topic!r} (relaying anyway)",
                   file=sys.stderr, flush=True)
 
-        # #9 — tag senior.say with seq/ts and drop if stale/superseded.
-        if topic == "senior.say":
+        # #9 — tag operator.say with seq/ts and drop if stale/superseded.
+        if topic == "operator.say":
             extra = {k: v for k, v in payload.items() if k != "text"}
             say = say_tracker.tag(payload.get("text", ""), topic=topic, extra=extra)
             stale, reason = say_tracker.is_stale(say)
             if stale:
-                print(f"[warn] dropped stale senior.say seq={say.seq}: {reason}",
+                print(f"[warn] dropped stale operator.say seq={say.seq}: {reason}",
                       file=sys.stderr, flush=True)
                 return
             payload = say_tracker.envelope(say)
@@ -334,6 +335,7 @@ async def _connect_and_listen(
     greet_text: str | None = None,
     graph: relay.GraphHolder | None = None,
     graph_interval: float = 60.0,
+    strict: bool = False,
 ) -> tuple[int, str | None]:
     """One connect→listen cycle. Returns (rc, disconnect_reason_name).
     disconnect_reason_name is None for a clean stdin-driven quit; otherwise the
@@ -379,7 +381,7 @@ async def _connect_and_listen(
                 _emit_wake(json_mode, decision.payload)
                 if notify_url:
                     asyncio.create_task(_post_webhook(http_client, notify_url, decision.payload))
-        elif topic.startswith("senior."):
+        elif topic.startswith("operator."):
             sender = getattr(pkt.participant, "identity", "?") if pkt.participant else "?"
             _print_event(json_mode, "system",
                          f"({topic} from {sender}) {payload.get('text','')}", topic=topic)
@@ -504,15 +506,23 @@ async def _connect_and_listen(
     if persona_text:
         try:
             payload = json.dumps({"text": persona_text}, ensure_ascii=False).encode("utf-8")
-            await room.local_participant.publish_data(payload, reliable=True, topic="senior.persona")
+            await room.local_participant.publish_data(payload, reliable=True, topic="operator.persona")
             _print_event(json_mode, "system", "persona auto-pushed", topic="_meta")
         except Exception as e:
             print(f"[error] persona auto-push failed: {e!r}", file=sys.stderr, flush=True)
 
+    if strict:
+        try:
+            payload = json.dumps({"mode": "strict"}).encode("utf-8")
+            await room.local_participant.publish_data(payload, reliable=True, topic="operator.mode")
+            _print_event(json_mode, "system", "mode auto-pushed (strict)", topic="_meta")
+        except Exception as e:
+            print(f"[error] mode auto-push failed: {e!r}", file=sys.stderr, flush=True)
+
     if greet_text:
         try:
             payload = json.dumps({"text": greet_text}, ensure_ascii=False).encode("utf-8")
-            await room.local_participant.publish_data(payload, reliable=True, topic="senior.say")
+            await room.local_participant.publish_data(payload, reliable=True, topic="operator.say")
             _print_event(json_mode, "system", "greet auto-pushed", topic="_meta")
         except Exception as e:
             print(f"[error] greet auto-push failed: {e!r}", file=sys.stderr, flush=True)
@@ -544,7 +554,7 @@ async def _connect_and_listen(
     graph_task = asyncio.create_task(_graph_loop()) if graph is not None else None
 
     if not json_mode:
-        print("[hint] type a line to senior.say (voice-ai speaks it). "
+        print("[hint] type a line to operator.say (voice-ai speaks it). "
               "/q to quit (Ctrl-D no longer quits under --keep-alive).", flush=True)
 
     try:
@@ -604,6 +614,7 @@ async def _join(
     no_greet: bool = False,
     graph_path: str | None = None,
     graph_interval: float = 60.0,
+    strict: bool = False,
 ) -> int:
     try:
         api_base, slug = _parse_invite(invite_url)
@@ -619,7 +630,7 @@ async def _join(
         identity = f"{name}-{host}-{os.urandom(2).hex()}"
     ident = identity
 
-    # Self-report → voice-friendly auto-greet. The senior brain MUST identify
+    # Self-report → voice-friendly auto-greet. The operator MUST identify
     # itself (name + model + topic) — never hardcode a brand. If the mandatory
     # fields are missing we skip the greet instead of guessing.
     greet_text: str | None = None
@@ -650,7 +661,7 @@ async def _join(
     say_tracker = relay.SayTracker(ttl=say_ttl)
 
     # Live-context holder — seeded once from --graph (if any), then fed live
-    # via `senior.graph` stdin lines. The cadence loop pushes it every interval.
+    # via `operator.graph` stdin lines. The cadence loop pushes it every interval.
     graph = relay.GraphHolder()
     if graph_path:
         seed = relay.read_graph(graph_path)
@@ -671,6 +682,7 @@ async def _join(
                 http_client=http_client, read_stdin=first,
                 greet_text=greet_text if first else None,
                 graph=graph, graph_interval=graph_interval,
+                strict=strict,
             )
             first = False
             # Clean quit (stdin /q or {"topic":"quit"}): reason is None.
@@ -702,7 +714,7 @@ async def _join(
 
 
 # --------------------------------------------------------------------------- #
-# log-summary — the "2nd micro agent": digest the call log into senior.graph
+# log-summary — the "2nd micro agent": digest the call log into operator.graph
 # --------------------------------------------------------------------------- #
 def _parse_transcript(line: str) -> tuple[str, str] | None:
     """Extract (role, text) from a `--json` transcript line. None for noise."""
@@ -739,7 +751,7 @@ async def _follow_lines(path: str, from_start: bool = False) -> AsyncIterator[st
 
 async def _emit_graph(out_path: str | None, base: str, text: str) -> None:
     body = f"{base}\n\nWas bisher passiert ist:\n{text}" if base else f"Was bisher passiert ist:\n{text}"
-    line = json.dumps({"topic": "senior.graph", "text": body}, ensure_ascii=False)
+    line = json.dumps({"topic": "operator.graph", "text": body}, ensure_ascii=False)
     if out_path:
         with open(out_path, "a", encoding="utf-8") as f:
             f.write(line + "\n")
@@ -803,7 +815,7 @@ def main() -> None:
     p_join.add_argument("invite_url", help="https://voicehook.ai/r/<slug>?go=1  OR  bare <slug>")
     p_join.add_argument("--name", default=None, help="agent brand-name shown in the call chip (e.g. 'deepseek', 'hermes', 'cursor'). Becomes the identity prefix and the name spoken in the auto-greet. REQUIRED for the auto-greet — never hardcode a vendor you are not.")
     p_join.add_argument("--identity", default=None, help="explicit full identity (overrides --name)")
-    p_join.add_argument("--model", default=None, help="self-report: the exact model the senior brain runs on (e.g. 'deepseek-v4-pro'). Required for the auto-greet.")
+    p_join.add_argument("--model", default=None, help="self-report: the exact model the operator runs on (e.g. 'deepseek-v4-pro'). Required for the auto-greet.")
     p_join.add_argument("--topic", default=None, help="self-report: what the call is about (<=5 words), spoken as 'wir waren gerade dabei {topic}'.")
     p_join.add_argument("--username", default=None, help="the host's name, spoken in the salutation ('Hallo {username},'). Omitted if unknown.")
     p_join.add_argument("--prompt", default=None, help="extra sentence appended after the auto-greet.")
@@ -812,11 +824,11 @@ def main() -> None:
     p_join.add_argument("--json", action="store_true", help="JSONL stream mode on stdin/stdout")
     p_join.add_argument(
         "--persona", default=None,
-        help="inline persona text to auto-push as senior.persona right after connect. Wins over --persona-file and --strict-relay.",
+        help="inline persona text to auto-push as operator.persona right after connect. Wins over --persona-file and --strict-relay.",
     )
     p_join.add_argument(
         "--persona-file", default=None,
-        help="path to a UTF-8 file with persona text; auto-pushed as senior.persona after connect. Example: --persona-file personas/claude-default.txt",
+        help="path to a UTF-8 file with persona text; auto-pushed as operator.persona after connect. Example: --persona-file personas/claude-default.txt",
     )
     # #6 keep-alive
     p_join.add_argument(
@@ -843,12 +855,12 @@ def main() -> None:
     # #10 echo suppression
     p_join.add_argument(
         "--suppress-echo", action="store_true", default=False,
-        help="drop the agent's own relayed TTS (role=agent transcript matching a recent senior.say) from the operator stream. [#10]",
+        help="drop the agent's own relayed TTS (role=agent transcript matching a recent operator.say) from the operator stream. [#10]",
     )
     # #9 say TTL
     p_join.add_argument(
         "--say-ttl", type=float, default=None, metavar="SEC",
-        help="drop a senior.say that is older than SEC seconds or superseded by a newer user-turn, instead of sending it stale. [#9]",
+        help="drop a operator.say that is older than SEC seconds or superseded by a newer user-turn, instead of sending it stale. [#9]",
     )
     # #8 strict relay
     p_join.add_argument(
@@ -858,21 +870,21 @@ def main() -> None:
     # live-context sync (status loop + graph-per-turn)
     p_join.add_argument(
         "--graph", default=None, metavar="PATH",
-        help="optional seed file: read once at connect into the live-context holder. Live updates arrive via `senior.graph` stdin lines, pushed as senior.persona every --graph-interval sec + on each finalized user-turn.",
+        help="optional seed file: read once at connect into the live-context holder. Live updates arrive via `operator.graph` stdin lines, pushed as operator.persona every --graph-interval sec + on each finalized user-turn.",
     )
     p_join.add_argument(
         "--graph-interval", type=float, default=60.0, metavar="SEC",
         help="seconds between graph auto-pushes (default 60).",
     )
-    # log-summary: the 2nd micro agent (digests the call log into senior.graph)
-    p_sum = sub.add_parser("log-summary", help="watch a call log and emit senior.graph digests")
+    # log-summary: the 2nd micro agent (digests the call log into operator.graph)
+    p_sum = sub.add_parser("log-summary", help="watch a call log and emit operator.graph digests")
     p_sum.add_argument("log", help="path to the CLI's --json transcript log (JSONL)")
     p_sum.add_argument("--interval", type=float, default=60.0, metavar="SEC",
                        help="emit cadence (default 60).")
     p_sum.add_argument("--max-turns", type=int, default=8,
                        help="turns kept in the rolling digest (default 8).")
     p_sum.add_argument("--out", default=None, metavar="PATH",
-                       help="append senior.graph JSON lines here (FIFO/file); default stdout.")
+                       help="append operator.graph JSON lines here (FIFO/file); default stdout.")
     p_sum.add_argument("--base", default=None, metavar="FILE",
                        help="static context (identity + task) prepended to every digest.")
     p_sum.add_argument("--summarize", action="store_true", default=False,
@@ -899,7 +911,7 @@ def main() -> None:
                 say_ttl=args.say_ttl, model=args.model, topic=args.topic,
                 username=args.username, prompt=args.prompt, greet=args.greet,
                 no_greet=args.no_greet, graph_path=args.graph,
-                graph_interval=args.graph_interval,
+                graph_interval=args.graph_interval, strict=args.strict_relay,
             ))
         except KeyboardInterrupt:
             rc = 130

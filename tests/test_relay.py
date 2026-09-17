@@ -26,9 +26,9 @@ def test_linebuffer_flush_surfaces_unterminated_tail():
     """The core #11 bug: a control line without trailing newline must NOT be
     silently swallowed — flush surfaces it as (line, complete=False)."""
     buf = relay.LineBuffer()
-    assert list(buf.feed('{"topic":"senior.say","text":"hi"}')) == []  # no newline
+    assert list(buf.feed('{"topic":"operator.say","text":"hi"}')) == []  # no newline
     flushed = list(buf.flush())
-    assert flushed == [('{"topic":"senior.say","text":"hi"}', False)]
+    assert flushed == [('{"topic":"operator.say","text":"hi"}', False)]
     # buffer is drained after flush
     assert buf.pending == ""
 

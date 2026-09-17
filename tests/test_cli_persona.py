@@ -29,7 +29,7 @@ def test_strict_relay_loads_bundled_template():
     assert text is not None
     assert "STRICT RELAY MODE" in text
     # the hard rules the SEV-1 issue (#8) demands
-    assert "senior.say" in text
+    assert "operator.say" in text
 
 
 def test_no_persona_returns_none():
@@ -37,5 +37,5 @@ def test_no_persona_returns_none():
 
 
 def test_known_topics_include_backchannel():
-    # #10 — senior.backchannel must be a recognized pass-through topic
-    assert "senior.backchannel" in cli.KNOWN_OUT_TOPICS
+    # #10 — operator.backchannel must be a recognized pass-through topic
+    assert "operator.backchannel" in cli.KNOWN_OUT_TOPICS

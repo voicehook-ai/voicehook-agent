@@ -143,7 +143,7 @@ class TurnNotifier:
 # #10 — echo suppression
 # --------------------------------------------------------------------------- #
 class EchoSuppressor:
-    """Suppresses the operator-stream echo of text we just pushed via senior.say.
+    """Suppresses the operator-stream echo of text we just pushed via operator.say.
 
     When ``--suppress-echo`` is on, an incoming ``role=agent`` transcript whose
     text matches something we recently sent is dropped (it's our own relayed
@@ -188,12 +188,12 @@ class PendingSay:
     seq: int
     text: str
     created: float
-    topic: str = "senior.say"
+    topic: str = "operator.say"
     extra: dict = field(default_factory=dict)
 
 
 class SayTracker:
-    """Tags each outgoing senior.say with a monotonically increasing ``seq`` and
+    """Tags each outgoing operator.say with a monotonically increasing ``seq`` and
     a ``ts``; enforces a TTL and supersede-on-newer-user-turn rule (#9).
 
     The server today does not ack a say, so "spoken" cannot be observed from
@@ -211,7 +211,7 @@ class SayTracker:
     def note_user_turn(self, now: float | None = None) -> None:
         self._last_user_turn_ts = now if now is not None else time.time()
 
-    def tag(self, text: str, topic: str = "senior.say", extra: dict | None = None,
+    def tag(self, text: str, topic: str = "operator.say", extra: dict | None = None,
             now: float | None = None) -> PendingSay:
         self._seq += 1
         return PendingSay(
@@ -277,10 +277,10 @@ def is_terminal_disconnect(reason_name: str) -> bool:
 # --------------------------------------------------------------------------- #
 @dataclass
 class GraphSnapshot:
-    """A read of the senior's live-context file (the "graph").
+    """A read of the operator's live-context file (the "graph").
 
     ``digest`` is a sha256 of the raw bytes so the CLI can skip unchanged
-    pushes; ``text`` is the decoded content pushed verbatim as `senior.persona`
+    pushes; ``text`` is the decoded content pushed verbatim as `operator.persona`
     so the voice-ai always knows "was gerade Phase ist".
     """
 
@@ -303,11 +303,11 @@ def read_graph(path: str) -> GraphSnapshot:
 
 @dataclass
 class GraphHolder:
-    """In-memory slot for the senior's live-context (the "graph").
+    """In-memory slot for the operator's live-context (the "graph").
 
-    Fed by `senior.graph` stdin lines (and optionally seeded from `--graph` at
-    connect). The CLI's cadence loop pushes `latest` as `senior.persona` every
-    `--graph-interval` seconds — the CLI enforces the cadence, the senior only
+    Fed by `operator.graph` stdin lines (and optionally seeded from `--graph` at
+    connect). The CLI's cadence loop pushes `latest` as `operator.persona` every
+    `--graph-interval` seconds — the CLI enforces the cadence, the operator only
     writes its current state whenever it changes.
     """
 
@@ -325,9 +325,9 @@ class RollingSummary:
     """Rolling digest of the last `max_turns` finalized transcript turns.
 
     The micro-agent feeds this from the CLI's `--json` transcript stream and
-    emits the digest as a `senior.graph` update — so the voice-ai (and the
-    senior, when it's back in the loop) knows "was bisher passiert ist" without
-    the senior having to do it live.
+    emits the digest as a `operator.graph` update — so the voice-ai (and the
+    operator, when it's back in the loop) knows "was bisher passiert ist" without
+    the operator having to do it live.
     """
 
     max_turns: int = 8

@@ -62,7 +62,7 @@ shares a voicehook invite.
 $ voicehook-agent join https://voicehook.ai/r/abc-def-ghi-XYZ4?go=1
 [system] connecting room=abc-def-ghi-XYZ4 as identity=agent-cli-7f3a via https://voicehook.ai
 [system] connected — 1 peers: ['agent-AJ_qwerty1234']
-[hint] type a line to senior.say (voice-ai speaks it). /q to quit (Ctrl-D no longer quits under --keep-alive).
+[hint] type a line to operator.say (voice-ai speaks it). /q to quit (Ctrl-D no longer quits under --keep-alive).
 [user] Hallo, wer bist du?
 Ich bin dein Pair-Programming-Brain.    ← typed by agent (voice-ai TTS speaks it)
 [agent] Ich bin dein Pair-Programming-Brain.
@@ -83,10 +83,10 @@ stdout (JSONL):
 
 stdin (JSONL):
 ```json
-{"text": "Hi there"}                                          → senior.say (default)
-{"topic": "senior.persona", "text": "Du bist X..."}           → live system-prompt update
-{"topic": "senior.interrupt"}                                 → cut off voice-ai
-{"topic": "senior.inject", "role": "user", "text": "..."}     → force voice-ai reply
+{"text": "Hi there"}                                          → operator.say (default)
+{"topic": "operator.persona", "text": "Du bist X..."}           → live system-prompt update
+{"topic": "operator.interrupt"}                                 → cut off voice-ai
+{"topic": "operator.inject", "role": "user", "text": "..."}     → force voice-ai reply
 ```
 
 ## Topics
@@ -96,11 +96,11 @@ stdin (JSONL):
 | `transcript`        | in        | Live user + voice-ai turns             |
 | `_wake`             | out*      | Wake marker on each finalized user-turn (#12) |
 | `_meta`             | out*      | Connection / room-state events         |
-| `senior.say`        | out       | TTS push (voice-ai speaks your text); tagged `_seq`/`_ts` (#9) |
-| `senior.persona`    | out       | live update voice-ai system prompt     |
-| `senior.interrupt`  | out       | cut off voice-ai mid-sentence          |
-| `senior.inject`     | out       | force voice-ai to react (user-role)    |
-| `senior.backchannel`| out       | silent operator↔agent side-channel, relayed as-is (#10) |
+| `operator.say`        | out       | TTS push (voice-ai speaks your text); tagged `_seq`/`_ts` (#9) |
+| `operator.persona`    | out       | live update voice-ai system prompt     |
+| `operator.interrupt`  | out       | cut off voice-ai mid-sentence          |
+| `operator.inject`     | out       | force voice-ai to react (user-role)    |
+| `operator.backchannel`| out       | silent operator↔agent side-channel, relayed as-is (#10) |
 
 *`out` here = emitted on the CLI's **stdout** (not published to the room).
 
@@ -113,8 +113,8 @@ Hardening flags (0.2.0) for unattended / background relay operation:
 | `--keep-alive` / `--no-keep-alive` | #6 | stdin-EOF does **not** quit; auto-reconnect (exp. backoff, cap 30s) on transient disconnect until the host leaves / room closes / `/q` / SIGTERM. Default: on. |
 | `--notify-url <url>` | #12 | POST `{role,text,room,timestamp}` to `<url>` on each finalized user-turn. |
 | `--wake-only-user` / `--wake-all` | #12 | Only role=user wakes (default); `--wake-all` also wakes on agent turns (debug). |
-| `--suppress-echo` | #10 | Drop the agent's own relayed TTS (role=agent transcript matching a recent `senior.say`) from the stdout stream. |
-| `--say-ttl <sec>` | #9 | Drop a `senior.say` older than `<sec>` seconds, or superseded by a newer user-turn, instead of speaking it stale. |
+| `--suppress-echo` | #10 | Drop the agent's own relayed TTS (role=agent transcript matching a recent `operator.say`) from the stdout stream. |
+| `--say-ttl <sec>` | #9 | Drop a `operator.say` older than `<sec>` seconds, or superseded by a newer user-turn, instead of speaking it stale. |
 | `--strict-relay` | #8 | Inject a bundled strict-relay persona at connect: the voicebot speaks **only** pushed text and never self-generates. Reuses `--persona-file` semantics; overridden by `--persona`/`--persona-file`. |
 
 ### Wake marker (JSON mode)
@@ -137,7 +137,7 @@ emitted on stderr (`[warn] stdin closed with un-terminated line …`). Prefer
 ### Server-side dependencies (honest notes)
 
 - **#9 say-TTL** is best-effort client-side: the server does not currently
-  *ack* that a `senior.say` was spoken, so "spoken within TTL" is approximated
+  *ack* that a `operator.say` was spoken, so "spoken within TTL" is approximated
   by age + supersede-by-newer-user-turn. The wire payload carries `_seq`/`_ts`
   so a future server ack can correlate. Delivery-ack (#10 F8) and a true
   interrupt-confirmation (#10 F7) need server support and are not implemented.
