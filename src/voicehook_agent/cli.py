@@ -42,7 +42,7 @@ from livekit import rtc
 from . import relay
 
 _SLUG_RX = re.compile(r"^[a-z]+-[a-z]+-[a-z]+-[A-Z0-9]{4,8}$")
-_VERSION = "0.3.0"
+_VERSION = "0.4.0"
 _USER_AGENT = f"voicehook-agent/{_VERSION}"
 
 # Bundled persona template for --strict-relay (#8). Shipped inside the package
@@ -85,15 +85,48 @@ def _parse_invite(url: str) -> tuple[str, str]:
     return base, m.group(1)
 
 
-async def _mint_token(api_base: str, slug: str, identity: str) -> dict:
+async def _mint_token(api_base: str, slug: str, identity: str,
+                      name: str | None = None, model: str | None = None) -> dict:
     """Calls /api/token?room=...&identity=...&invite=1 — invite=1 prevents
     a second voice-ai dispatch (voice-ai is presumably already in the room
-    if a user is talking to it; we join as the additional agent participant)."""
+    if a user is talking to it; we join as the additional agent participant).
+
+    `name` / `model` (the mandatory self-report) ride along: the server puts
+    them into the JWT as LiveKit `name` + `attributes` (vh.name / vh.model), so
+    the web call UI shows "Name · model" in the Agent chip. A plain token has
+    no canUpdateOwnMetadata grant, so a runtime set_name/set_attributes would be
+    rejected — the claims are the only path. Older servers ignore the params."""
     url = f"{api_base}/api/token"
+    params = {"room": slug, "identity": identity, "invite": "1"}
+    if name:
+        params["name"] = name
+    if model:
+        params["model"] = model
     async with httpx.AsyncClient(timeout=10.0, headers={"user-agent": _USER_AGENT}) as cli:
-        r = await cli.get(url, params={"room": slug, "identity": identity, "invite": "1"})
+        r = await cli.get(url, params=params)
         r.raise_for_status()
         return r.json()
+
+
+SELF_REPORT_ERROR = (
+    "[error] Selbstauskunft fehlt: `join` braucht --name UND --model.\n"
+    "  --name   dein Anzeigename im Call (wie du dich nennst, z.B. 'Claude', 'Hermes', 'Cursor')\n"
+    "  --model  das exakte Modell, auf dem du gerade laeufst (z.B. 'opus-5.5', 'deepseek-v4-pro')\n"
+    "Beide erscheinen im Agent-Chip der Web-UI als 'Name · Modell'. Nie eine Marke raten,\n"
+    "die du nicht bist.\n"
+    "Beispiel:\n"
+    "  voicehook-agent join https://voicehook.ai/r/<slug> --name Claude --model opus-5.5 --json"
+)
+
+
+def _missing_self_report(name: str | None, model: str | None) -> list[str]:
+    """Returns the missing mandatory self-report flags (empty list = ok)."""
+    missing = []
+    if not (name or "").strip():
+        missing.append("--name")
+    if not (model or "").strip():
+        missing.append("--model")
+    return missing
 
 
 def _print_event(json_mode: bool, role: str, text: str, **extra) -> None:
@@ -336,12 +369,14 @@ async def _connect_and_listen(
     graph: relay.GraphHolder | None = None,
     graph_interval: float = 60.0,
     strict: bool = False,
+    agent_name: str | None = None,
+    model: str | None = None,
 ) -> tuple[int, str | None]:
     """One connect→listen cycle. Returns (rc, disconnect_reason_name).
     disconnect_reason_name is None for a clean stdin-driven quit; otherwise the
     LK reason that ended the cycle (used by the reconnect loop in #6)."""
     try:
-        tok = await _mint_token(api_base, slug, ident)
+        tok = await _mint_token(api_base, slug, ident, name=agent_name, model=model)
     except httpx.HTTPError as e:
         print(f"[error] token mint failed: {e!r}", file=sys.stderr)
         return 3, "TOKEN_MINT_FAILED"
@@ -616,6 +651,12 @@ async def _join(
     graph_interval: float = 60.0,
     strict: bool = False,
 ) -> int:
+    missing = _missing_self_report(agent_name, model)
+    if missing:
+        print(f"{SELF_REPORT_ERROR}\n(fehlt: {', '.join(missing)})", file=sys.stderr)
+        return 2
+    agent_name = agent_name.strip()
+    model = model.strip()
     try:
         api_base, slug = _parse_invite(invite_url)
     except ValueError as e:
@@ -630,25 +671,16 @@ async def _join(
         identity = f"{name}-{host}-{os.urandom(2).hex()}"
     ident = identity
 
-    # Self-report → voice-friendly auto-greet. The operator MUST identify
-    # itself (name + model + topic) — never hardcode a brand. If the mandatory
-    # fields are missing we skip the greet instead of guessing.
+    # Self-report → voice-friendly auto-greet. --name + --model are mandatory
+    # (checked above) — never hardcode a brand.
     greet_text: str | None = None
     if not no_greet:
         if greet:
             greet_text = greet
         else:
-            name_for_greet = identity if identity else agent_name
-            if not name_for_greet or not model:
-                _print_event(
-                    json_mode, "system",
-                    "self-report incomplete (--name/--identity + --model fehlen) — "
-                    "kein Auto-Greet", topic="_meta")
-            else:
-                greet_text = _compose_greet(
-                    name=(agent_name or name_for_greet), username=username,
-                    topic=topic, prompt=prompt,
-                )
+            greet_text = _compose_greet(
+                name=agent_name, username=username, topic=topic, prompt=prompt,
+            )
 
     _print_event(json_mode, "system",
                  f"connecting room={slug} as identity={ident} via {api_base}", topic="_meta")
@@ -682,7 +714,7 @@ async def _join(
                 http_client=http_client, read_stdin=first,
                 greet_text=greet_text if first else None,
                 graph=graph, graph_interval=graph_interval,
-                strict=strict,
+                strict=strict, agent_name=agent_name, model=model,
             )
             first = False
             # Clean quit (stdin /q or {"topic":"quit"}): reason is None.
@@ -807,15 +839,15 @@ async def _run_log_summary(args) -> int:
     return 0
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="voicehook-agent", description=__doc__)
     ap.add_argument("--version", action="version", version=f"voicehook-agent {_VERSION}")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p_join = sub.add_parser("join", help="join a voicehook.ai call as an agent")
     p_join.add_argument("invite_url", help="https://voicehook.ai/r/<slug>?go=1  OR  bare <slug>")
-    p_join.add_argument("--name", default=None, help="agent brand-name shown in the call chip (e.g. 'deepseek', 'hermes', 'cursor'). Becomes the identity prefix and the name spoken in the auto-greet. REQUIRED for the auto-greet — never hardcode a vendor you are not.")
+    p_join.add_argument("--name", default=None, help="REQUIRED. Your display name in the call (e.g. 'Claude', 'Hermes', 'Cursor'). Shown in the web Agent chip as 'Name · model', becomes the identity prefix and the name spoken in the auto-greet. Never claim a vendor you are not.")
     p_join.add_argument("--identity", default=None, help="explicit full identity (overrides --name)")
-    p_join.add_argument("--model", default=None, help="self-report: the exact model the operator runs on (e.g. 'deepseek-v4-pro'). Required for the auto-greet.")
+    p_join.add_argument("--model", default=None, help="REQUIRED. Self-report: the exact model you run on (e.g. 'opus-5.5', 'deepseek-v4-pro'). Shown in the web Agent chip.")
     p_join.add_argument("--topic", default=None, help="self-report: what the call is about (<=5 words), spoken as 'wir waren gerade dabei {topic}'.")
     p_join.add_argument("--username", default=None, help="the host's name, spoken in the salutation ('Hallo {username},'). Omitted if unknown.")
     p_join.add_argument("--prompt", default=None, help="extra sentence appended after the auto-greet.")
@@ -896,8 +928,12 @@ def main() -> None:
                        help="Ollama request timeout (default 30).")
     p_sum.add_argument("--from-start", action="store_true", default=False,
                        help="process existing log content too (default: tail from end).")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     if args.cmd == "join":
+        missing = _missing_self_report(args.name, args.model)
+        if missing:
+            print(f"{SELF_REPORT_ERROR}\n(fehlt: {', '.join(missing)})", file=sys.stderr)
+            sys.exit(2)
         try:
             persona_text = _load_persona(args.persona, args.persona_file, args.strict_relay)
         except OSError as e:
