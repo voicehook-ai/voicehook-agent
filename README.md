@@ -96,9 +96,10 @@ stdin (JSONL):
 | `transcript`        | in        | Live user + voice-ai turns             |
 | `_wake`             | out*      | Wake marker on each finalized user-turn (#12) |
 | `_meta`             | out*      | Connection / room-state events         |
-| `operator.say`        | out       | TTS push (voice-ai speaks your text); tagged `_seq`/`_ts` (#9) |
+| `operator.say`        | out       | TTS push; tagged `_seq`/`_ts` (#9). `mode`: `revise` (default: if unspoken text is pending the agent stops and answers with `operator.revise`), `overwrite` (your merged answer), `append` (queue) |
 | `operator.persona`    | out       | live update voice-ai system prompt     |
-| `operator.interrupt`  | out       | cut off voice-ai mid-sentence          |
+| `operator.interrupt`  | out       | stop everything; unspoken rest comes back as `operator.revise` |
+| `operator.revise`     | in        | agent → you: `{unspoken[], new, text}` — merge into ONE statement, send with `mode:"overwrite"` within 8s |
 | `operator.inject`     | out       | force voice-ai to react (user-role)    |
 | `operator.backchannel`| out       | silent operator↔agent side-channel, relayed as-is (#10) |
 

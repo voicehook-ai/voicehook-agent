@@ -261,6 +261,30 @@ tmux send-keys -t "$SESS" "$(jq -nc --arg t "erklär X" '{topic:"operator.inject
 user's language. No markdown, no lists, no emoji. Tech terms stay English
 (commit, webhook, JWT).
 
+### 5c. One statement per turn + `operator.revise` (server voicehook-v4 PR #70)
+
+`operator.say` does NOT queue blindly any more. `mode` decides:
+
+| `mode` | effect |
+|---|---|
+| `revise` (default) | nothing unspoken pending → spoken at once. Otherwise the agent STOPS, holds your new text and sends you `operator.revise` with what was NOT spoken yet |
+| `overwrite` | your merged answer to a revise: replaces everything pending/held, spoken at once |
+| `append` | queue behind the current output (deliberate multi-part only; heartbeats) |
+
+On stdout you then see a line like
+`(operator.revise from agent-…) REVISE: Noch NICHT gesprochen: [1] … [neu] …`.
+**Immediately** merge [1..n] and [neu] into ONE statement: keep everything
+important, drop what is wrong or outdated, then send it:
+
+```bash
+tmux send-keys -t "$SESS" "$(jq -nc --arg t "Zusammengefasste Aussage." '{topic:"operator.say",text:$t,mode:"overwrite"}')" Enter
+```
+
+No overwrite within 8s → the agent speaks only [neu]; the unspoken rest is lost.
+Rules: one summarising say per turn (what is true NOW), never a series of
+sentences; `operator.interrupt` stops everything and also reports the unspoken
+rest via `operator.revise`.
+
 ### 5a. Keep the main track free — DELEGATE heavy lifting
 
 While you're in a voice-call, the user is **waiting on you live**. Any
@@ -305,7 +329,7 @@ emit a `operator.say` heartbeat at least every 8s while work is in flight.
 | Elapsed since last TTS | Required action |
 |---|---|
 | 0–8s | OK to think / type / read |
-| 8–15s | MUST push a short status `operator.say` ("check kurz", "subagent dran", "fast da") |
+| 8–15s | MUST push a short status `operator.say` with `mode:"append"` ("check kurz", "subagent dran", "fast da") — append, so a heartbeat never cancels real content |
 | 15–30s | MUST have delegated to a subagent. If still doing it yourself, you're violating the rule. |
 | >30s of silence | Olli is already frustrated. Apologize via operator.say and refactor. |
 
