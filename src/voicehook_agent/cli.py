@@ -107,8 +107,36 @@ def _invite_code(url: str) -> str | None:
     return (q.get("invite") or [None])[0]
 
 
+OPERATOR_INVITE_REQUIRED_ERROR = (
+    "[error] operator invite required: the server only lets an agent join with the\n"
+    "  full invite link, including its ?invite=... part, e.g.\n"
+    "    voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name N --model M\n"
+    "  A bare slug or a link without ?invite= is rejected. Ask the host for the full link."
+)
+
+
+class TokenMintError(Exception):
+    """Token mint rejected. The message never contains the request URL, so the
+    operator invite (`op_invite`) cannot leak into logs or stderr."""
+
+    def __init__(self, status: int, detail: str):
+        self.status = status
+        self.detail = detail
+        super().__init__(f"HTTP {status} {detail}".strip())
+
+
+def _operator_invite(url: str) -> str | None:
+    """The HMAC operator invite of a join URL, or None for a bare slug, a link
+    without `?invite=`, or the legacy flag value `?invite=1`."""
+    code = _invite_code(url) if "/" in url else None
+    if not code or code == "1":
+        return None
+    return code
+
+
 async def _mint_token(api_base: str, slug: str, identity: str,
-                      name: str | None = None, model: str | None = None) -> dict:
+                      name: str | None = None, model: str | None = None,
+                      op_invite: str | None = None) -> dict:
     """Calls /api/token?room=...&identity=...&invite=1 — invite=1 prevents
     a second voice-ai dispatch (voice-ai is presumably already in the room
     if a user is talking to it; we join as the additional agent participant).
@@ -117,16 +145,30 @@ async def _mint_token(api_base: str, slug: str, identity: str,
     them into the JWT as LiveKit `name` + `attributes` (vh.name / vh.model), so
     the web call UI shows "Name · model" in the Agent chip. A plain token has
     no canUpdateOwnMetadata grant, so a runtime set_name/set_attributes would be
-    rejected — the claims are the only path. Older servers ignore the params."""
+    rejected — the claims are the only path. Older servers ignore the params.
+
+    `op_invite` is the HMAC `?invite=` value of the invite link; the server
+    verifies it on this operator path (invalid -> 403 "invalid invite: ...",
+    missing -> 403 "operator invite required" once enforced). Old servers
+    ignore it. It is URL-encoded by httpx and never logged."""
     url = f"{api_base}/api/token"
     params = {"room": slug, "identity": identity, "invite": "1"}
     if name:
         params["name"] = name
     if model:
         params["model"] = model
+    if op_invite:
+        params["op_invite"] = op_invite
     async with httpx.AsyncClient(timeout=10.0, headers={"user-agent": _USER_AGENT}) as cli:
         r = await cli.get(url, params=params)
-        r.raise_for_status()
+        if r.status_code >= 400:
+            try:
+                detail = (r.text or "").strip()[:200]
+            except Exception:
+                detail = ""
+            if op_invite:
+                detail = detail.replace(op_invite, "***")
+            raise TokenMintError(r.status_code, detail)
         return r.json()
 
 
@@ -576,9 +618,20 @@ async def _connect_and_listen(
                                      user_agent=_USER_AGENT)
     else:
         try:
-            tok = await _mint_token(api_base, slug, ident, name=agent_name, model=model)
+            tok = await _mint_token(api_base, slug, ident, name=agent_name, model=model,
+                                    op_invite=invite)
+        except TokenMintError as e:
+            if e.status == 403 and "operator invite required" in e.detail.lower():
+                print(OPERATOR_INVITE_REQUIRED_ERROR, file=sys.stderr, flush=True)
+                return 3, "TOKEN_FORBIDDEN"
+            if e.status == 403:
+                print(f"[error] token mint rejected: {e}", file=sys.stderr, flush=True)
+                return 3, "TOKEN_FORBIDDEN"
+            print(f"[error] token mint failed: {e}", file=sys.stderr, flush=True)
+            return 3, "TOKEN_MINT_FAILED"
         except httpx.HTTPError as e:
-            print(f"[error] token mint failed: {e!r}", file=sys.stderr)
+            # type only: the exception text can carry the request URL (op_invite)
+            print(f"[error] token mint failed: {type(e).__name__}", file=sys.stderr)
             return 3, "TOKEN_MINT_FAILED"
         room = rtc.Room()
     stop = asyncio.Event()
@@ -947,7 +1000,7 @@ async def _join(
                  f"connecting room={slug} as identity={ident} via {api_base}", topic="_meta")
     cur_transport, why = vtransport.initial_transport(transport)
     _print_event(json_mode, "system", f"transport={cur_transport} ({why})", topic="_meta")
-    invite = _invite_code(invite_url)
+    invite = _operator_invite(invite_url)
 
     # Shared state across reconnect cycles (#6): the notifier dedup, echo ring,
     # and say-seq counter persist so we don't re-wake on the same turn after a
@@ -1036,7 +1089,9 @@ async def _join(
             # #6 — reconnect only on transient disconnects, and only when
             # keep-alive is on. Terminal reasons (host left / room closed /
             # client-initiated) end the session.
-            if not keep_alive or relay.is_terminal_disconnect(reason):
+            # A 403 on the token mint (invite missing/invalid) will not heal by retrying.
+            if (not keep_alive or relay.is_terminal_disconnect(reason)
+                    or reason == "TOKEN_FORBIDDEN"):
                 _print_event(json_mode, "system",
                              f"session ended (reason={reason}, keep_alive={keep_alive})",
                              topic="_meta")
@@ -1214,7 +1269,7 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--version", action="version", version=f"voicehook-agent {_VERSION}")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p_join = sub.add_parser("join", help="join a voicehook.ai call as an agent")
-    p_join.add_argument("invite_url", help="https://voicehook.ai/r/<slug>?go=1  OR  bare <slug>")
+    p_join.add_argument("invite_url", help="full invite link https://voicehook.ai/r/<slug>?invite=<code>  OR  bare <slug>")
     p_join.add_argument("--name", default=None, help="REQUIRED. Your display name in the call (e.g. 'Claude', 'Hermes', 'Cursor'). Shown in the web Agent chip as 'Name · model', becomes the identity prefix and the name spoken in the auto-greet. Never claim a vendor you are not.")
     p_join.add_argument("--identity", default=None, help="explicit full identity (overrides --name)")
     p_join.add_argument("--model", default=None, help="REQUIRED. Self-report: the exact model you run on (e.g. 'opus-5.5', 'deepseek-v4-pro'). Shown in the web Agent chip.")

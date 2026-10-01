@@ -53,6 +53,7 @@ def test_mint_token_sends_name_and_model(monkeypatch):
     sent = {}
 
     class _Resp:
+        status_code = 200
         def raise_for_status(self): pass
         def json(self): return {"token": "t", "url": "wss://x"}
 
