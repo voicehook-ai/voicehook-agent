@@ -214,6 +214,12 @@ No `operator` line after your push = it was not spoken (yet). That echo is your 
 
 ### 4a. MANDATORY: install the Hotswap-Persona (BEFORE the greeting)
 
+**Exception: another operator agent is already in the room.** Then do NOT push
+a persona; you would overwrite theirs. Check with `voicehook-agent status`
+(a peer with `"operator": true`). Since 0.5.0 `join` skips `--persona`,
+`--persona-file`, `--strict-relay` and `--graph` on its own in that case
+(`--force-persona` overrides). Answer in the language the user speaks.
+
 **This is the core of voicehook-join.** Voice-ai's default persona is empty
 ("Bereit."). Olli's design intent: voice-ai SHOULD STOP being its own
 moderator — instead it becomes a **1:1 clone of the operator that just
@@ -254,7 +260,28 @@ Do NOT skip this step.
 
 ### 5. Conversation loop
 
-For each turn:
+**Preferred since 0.5.0: no tmux, no polling.** Run `join` in the background and
+drive the call with one-shot commands; `next` blocks until the user finished a
+sentence, so you answer within a second instead of after the next `sleep`:
+
+```bash
+voicehook-agent join "$URL" --name Claude --model opus-5.5 --json > ~/.voicehook-agent/call.log 2>&1 &
+voicehook-agent say "Hallo Oliver, hier ist Claude. Was brauchst du?"
+while :; do
+  EV=$(voicehook-agent next --timeout 60) || break      # exit 3 = call ended
+  # {"type":"user","text":...} -> answer it; {"type":"revise",...} -> say --mode overwrite
+  # {"type":"timeout"} -> nothing said, just call next again
+  voicehook-agent say "<your answer>"
+done
+voicehook-agent leave --say "Bis bald."
+```
+
+Every `say`/`next` keeps the join alive. If you stop calling them for 10 minutes
+(`--idle-timeout`), `join` says goodbye and leaves by itself, so a crashed or
+finished agent never leaves an orphaned participant in the call. Call `leave`
+when you are done instead of just exiting.
+
+Legacy tmux/FIFO loop (still supported), for each turn:
 
 ```bash
 # read incoming (user-turns + voice-ai turns + your own pushes echo back)

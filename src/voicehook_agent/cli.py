@@ -1,8 +1,14 @@
 """voicehook-agent CLI.
 
 Usage:
-    voicehook-agent join <invite-url>           # interactive mode
-    voicehook-agent join <invite-url> --json    # JSONL stream mode
+    voicehook-agent join <invite-url> --name N --model M          # interactive mode
+    voicehook-agent join <invite-url> --name N --model M --json   # JSONL stream mode
+
+Agent loop without polling (against the running join, via a local socket):
+    voicehook-agent say "Hallo, ich bin da."     # speak one line
+    voicehook-agent next --timeout 60            # block until the next user turn
+    voicehook-agent leave                        # end the join cleanly
+    voicehook-agent status                       # connection + room state
 
 stdout: incoming user turns + voice-ai turns, one per line
         plain mode:  [role] text
@@ -30,6 +36,7 @@ import asyncio
 import json
 import os
 import re
+import signal
 import sys
 import time
 from collections.abc import AsyncIterator
@@ -39,10 +46,11 @@ from urllib.parse import urlparse
 import httpx
 from livekit import rtc
 
-from . import relay
+from . import __version__, relay
+from . import session as vsession
 
 _SLUG_RX = re.compile(r"^[a-z]+-[a-z]+-[a-z]+-[A-Z0-9]{4,8}$")
-_VERSION = "0.4.0"
+_VERSION = __version__
 _USER_AGENT = f"voicehook-agent/{_VERSION}"
 
 # Bundled persona template for --strict-relay (#8). Shipped inside the package
@@ -250,6 +258,152 @@ async def _ollama_summarize(
         return None
 
 
+DEFAULT_IDLE_SAY = (
+    "Ich verlasse den Call jetzt, weil ich von meinem Agenten seit einer Weile "
+    "nichts mehr hoere. Lade mich gern wieder ein."
+)
+
+
+class _Control:
+    """State shared between the join's reconnect cycles and the local control
+    socket (say / next / leave / status)."""
+
+    def __init__(self, slug: str, ident: str, say_tracker: relay.SayTracker,
+                 echo: relay.EchoSuppressor, idle_timeout: float) -> None:
+        self.slug = slug
+        self.ident = ident
+        self.say_tracker = say_tracker
+        self.echo = echo
+        self.events = vsession.EventQueue()
+        self.watchdog = vsession.IdleWatchdog(timeout=idle_timeout)
+        self.quit = asyncio.Event()
+        self.room: rtc.Room | None = None
+        self.room_ready = asyncio.Event()
+
+    def attach(self, room: rtc.Room) -> None:
+        self.room = room
+        self.room_ready.set()
+
+    def detach(self) -> None:
+        self.room = None
+        self.room_ready.clear()
+
+    async def wait_room(self, timeout: float) -> rtc.Room | None:
+        if self.room is not None:
+            return self.room
+        try:
+            await asyncio.wait_for(self.room_ready.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return None
+        return self.room
+
+
+async def _publish_say(room: rtc.Room, text: str, extra: dict,
+                       say_tracker: relay.SayTracker,
+                       echo: relay.EchoSuppressor) -> dict:
+    """Tag + publish one operator.say (same envelope as the stdin path)."""
+    say = say_tracker.tag(text, extra=extra)
+    stale, reason = say_tracker.is_stale(say)
+    if stale:
+        return {"ok": False, "error": f"dropped stale say: {reason}", "seq": say.seq}
+    payload = say_tracker.envelope(say)
+    echo.record_sent(say.text)
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    await room.local_participant.publish_data(data, reliable=True, topic="operator.say")
+    return {"ok": True, "seq": say.seq}
+
+
+_SAY_MODES = ("revise", "overwrite", "append")
+
+
+async def _control_handler(ctl: _Control, req: dict) -> dict:
+    """One request from `voicehook-agent say|next|leave|status`."""
+    cmd = req.get("cmd")
+    if cmd == "say":
+        ctl.watchdog.touch()
+        text = str(req.get("text") or "").strip()
+        if not text:
+            return {"ok": False, "error": "empty text"}
+        extra: dict = {}
+        mode = req.get("mode")
+        if mode:
+            if mode not in _SAY_MODES:
+                return {"ok": False, "error": f"mode must be one of {_SAY_MODES}"}
+            extra["mode"] = mode
+        room = await ctl.wait_room(10.0)
+        if room is None:
+            return {"ok": False, "error": "not connected to the room (yet)"}
+        return await _publish_say(room, text, extra, ctl.say_tracker, ctl.echo)
+    if cmd == "next":
+        try:
+            timeout = float(req.get("timeout", 60))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "timeout must be a number"}
+        ctl.watchdog.enter()
+        try:
+            ev = await ctl.events.get(timeout)
+        finally:
+            ctl.watchdog.leave()
+        if ev is None:
+            return {"ok": True, "type": "timeout", "pending": 0}
+        return {"ok": True, **ev, "pending": len(ctl.events)}
+    if cmd == "leave":
+        ctl.watchdog.touch()
+        text = str(req.get("say") or "").strip()
+        if text and ctl.room is not None:
+            try:
+                await _publish_say(ctl.room, text, {"mode": "append"},
+                                   ctl.say_tracker, ctl.echo)
+            except Exception as e:  # noqa: BLE001
+                print(f"[error] leave say failed: {e!r}", file=sys.stderr, flush=True)
+        ctl.quit.set()
+        return {"ok": True, "type": "leaving"}
+    if cmd == "status":
+        room = ctl.room
+        peers = []
+        if room is not None:
+            for p in room.remote_participants.values():
+                attrs = dict(getattr(p, "attributes", None) or {})
+                peers.append({"identity": p.identity, "kind": _kind_label(p),
+                              "name": attrs.get("vh.name"), "model": attrs.get("vh.model"),
+                              "operator": attrs.get("vh.role") == "agent"
+                              and _kind_label(p) != "agent"})
+        return {"ok": True, "type": "status", "room": ctl.slug, "identity": ctl.ident,
+                "connected": room is not None, "pending": len(ctl.events),
+                "idle_s": round(ctl.watchdog.idle_for(), 1),
+                "idle_timeout_s": ctl.watchdog.timeout,
+                "peers": sorted(peers, key=lambda d: d["identity"])}
+    return {"ok": False, "error": f"unknown cmd {cmd!r}"}
+
+
+async def _idle_loop(ctl: _Control, json_mode: bool, announce: str | None) -> None:
+    """Orphan guard: leave the call when the brain sent no say/next/stdin line
+    for `watchdog.timeout` seconds."""
+    if ctl.watchdog.timeout <= 0:
+        return
+    tick = min(5.0, max(0.05, ctl.watchdog.timeout / 4))
+    while not ctl.quit.is_set():
+        try:
+            await asyncio.wait_for(ctl.quit.wait(), timeout=tick)
+            return
+        except asyncio.TimeoutError:
+            pass
+        if not ctl.watchdog.expired():
+            continue
+        _print_event(json_mode, "system",
+                     f"idle-timeout: no say/next from the agent for "
+                     f"{ctl.watchdog.timeout:.0f}s, leaving", topic="_meta")
+        if announce and ctl.room is not None:
+            try:
+                await _publish_say(ctl.room, announce, {"mode": "append"},
+                                   ctl.say_tracker, ctl.echo)
+                await asyncio.sleep(1.0)
+            except Exception as e:  # noqa: BLE001
+                print(f"[error] idle announce failed: {e!r}", file=sys.stderr, flush=True)
+        ctl.quit.set()
+        return
+
+
 async def _stdin_publisher(
     room: rtc.Room,
     json_mode: bool,
@@ -260,6 +414,7 @@ async def _stdin_publisher(
     echo: relay.EchoSuppressor,
     graph: relay.GraphHolder,
     turn_event: asyncio.Event,
+    on_activity=None,
 ) -> None:
     """Reads stdin, publishes lines. Newline-tolerant (#11): a final chunk
     without a trailing newline is processed (with a warning) instead of being
@@ -273,6 +428,8 @@ async def _stdin_publisher(
         line = line.strip()
         if not line:
             return
+        if on_activity is not None:
+            on_activity()  # the brain is alive (idle watchdog)
         # Explicit quit command (the only stdin-driven way to end the session
         # under keep-alive). Plain mode: "/q" or "/quit"; json: {"topic":"quit"}.
         if line in ("/q", "/quit"):
@@ -371,6 +528,8 @@ async def _connect_and_listen(
     strict: bool = False,
     agent_name: str | None = None,
     model: str | None = None,
+    ctl: _Control | None = None,
+    force_persona: bool = False,
 ) -> tuple[int, str | None]:
     """One connect→listen cycle. Returns (rc, disconnect_reason_name).
     disconnect_reason_name is None for a clean stdin-driven quit; otherwise the
@@ -406,6 +565,11 @@ async def _connect_and_listen(
             if echo.should_suppress(role, text):
                 return
             _print_event(json_mode, role, text, topic=topic)
+            # `voicehook-agent next` — queue finalized user turns.
+            if ctl is not None:
+                ev = relay.user_turn_event(role, text, payload)
+                if ev is not None:
+                    ctl.events.put_nowait(ev)
             # #9 — a fresh user turn supersedes any older queued say.
             if role == "user":
                 say_tracker.note_user_turn()
@@ -417,6 +581,8 @@ async def _connect_and_listen(
                 if notify_url:
                     asyncio.create_task(_post_webhook(http_client, notify_url, decision.payload))
         elif topic.startswith("operator."):
+            if topic == "operator.revise" and ctl is not None:
+                ctl.events.put_nowait(relay.revise_event(payload))
             sender = getattr(pkt.participant, "identity", "?") if pkt.participant else "?"
             _print_event(json_mode, "system",
                          f"({topic} from {sender}) {payload.get('text','')}", topic=topic)
@@ -538,6 +704,27 @@ async def _connect_and_listen(
 
     hb_task = asyncio.create_task(_heartbeat())
 
+    if ctl is not None:
+        ctl.attach(room)
+
+    def _other_operators() -> list[str]:
+        return relay.other_operators(
+            (p.identity, _kind_label(p), dict(getattr(p, "attributes", None) or {}))
+            for p in room.remote_participants.values()
+        )
+
+    # Persona guard: never overwrite the persona / mode another operator agent
+    # already set in this room (--force-persona overrides).
+    if (persona_text or strict) and not force_persona:
+        others = _other_operators()
+        if others:
+            msg = (f"persona/mode NOT pushed: other operator agent in the room "
+                   f"({', '.join(others)}); pass --force-persona to override")
+            _print_event(json_mode, "system", msg, topic="_meta")
+            print(f"[warn] {msg}", file=sys.stderr, flush=True)
+            persona_text = None
+            strict = False
+
     if persona_text:
         try:
             payload = json.dumps({"text": persona_text}, ensure_ascii=False).encode("utf-8")
@@ -569,6 +756,13 @@ async def _connect_and_listen(
         text = graph.latest
         if not text:
             return
+        if not force_persona:
+            others = _other_operators()
+            if others:
+                _print_event(json_mode, "system",
+                             f"graph NOT pushed: other operator agent in the room "
+                             f"({', '.join(others)})", topic="_meta")
+                return
         try:
             await _push_persona(room, text)
             _print_event(json_mode, "system", "graph pushed", topic="_meta")
@@ -588,6 +782,14 @@ async def _connect_and_listen(
 
     graph_task = asyncio.create_task(_graph_loop()) if graph is not None else None
 
+    async def _quit_watch() -> None:
+        if ctl is None:
+            return
+        await ctl.quit.wait()
+        stop.set()
+
+    quit_task = asyncio.create_task(_quit_watch())
+
     if not json_mode:
         print("[hint] type a line to operator.say (voice-ai speaks it). "
               "/q to quit (Ctrl-D no longer quits under --keep-alive).", flush=True)
@@ -597,7 +799,8 @@ async def _connect_and_listen(
             stdin_task = asyncio.create_task(
                 _stdin_publisher(room, json_mode, stop,
                                  keep_alive=keep_alive, say_tracker=say_tracker,
-                                 echo=echo, graph=graph, turn_event=turn_event)
+                                 echo=echo, graph=graph, turn_event=turn_event,
+                                 on_activity=ctl.watchdog.touch if ctl else None)
             )
             await stop.wait()
             stdin_task.cancel()
@@ -609,11 +812,14 @@ async def _connect_and_listen(
             # Reconnect cycle: no fresh stdin reader (the first cycle owns it).
             await stop.wait()
     finally:
-        hb_task.cancel()
-        try:
-            await hb_task
-        except (asyncio.CancelledError, Exception):
-            pass
+        if ctl is not None:
+            ctl.detach()
+        for t in (hb_task, quit_task):
+            t.cancel()
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
         if graph_task is not None:
             graph_task.cancel()
             try:
@@ -626,6 +832,8 @@ async def _connect_and_listen(
             pass
         _print_event(json_mode, "system", "disconnected", topic="_meta")
 
+    if ctl is not None and ctl.quit.is_set():
+        return 0, None  # leave / idle-timeout / SIGTERM: clean, no reconnect
     return 0, disconnect_reason["name"]
 
 
@@ -650,6 +858,10 @@ async def _join(
     graph_path: str | None = None,
     graph_interval: float = 60.0,
     strict: bool = False,
+    idle_timeout: float = 600.0,
+    idle_say: str | None = DEFAULT_IDLE_SAY,
+    force_persona: bool = False,
+    control: bool = True,
 ) -> int:
     missing = _missing_self_report(agent_name, model)
     if missing:
@@ -702,6 +914,41 @@ async def _join(
 
     http_client = httpx.AsyncClient(headers={"user-agent": _USER_AGENT}) if notify_url else None
 
+    # Local control socket for `say` / `next` / `leave` / `status` + idle guard.
+    ctl = _Control(slug, ident, say_tracker, echo, idle_timeout)
+    server: vsession.ControlServer | None = None
+    sess_dir = vsession.session_dir(slug)
+    if control and hasattr(asyncio, "start_unix_server"):
+        sess_dir.mkdir(parents=True, exist_ok=True)
+        server = vsession.ControlServer(vsession.socket_path(sess_dir),
+                                        lambda req: _control_handler(ctl, req))
+        try:
+            await server.start()
+        except vsession.SessionError as e:
+            print(f"[error] {e}", file=sys.stderr, flush=True)
+            if http_client is not None:
+                await http_client.aclose()
+            return 2
+        except OSError as e:
+            print(f"[warn] control socket unavailable ({e!r}); say/next/leave "
+                  f"will not work, stdin still does", file=sys.stderr, flush=True)
+            server = None
+        if server is not None:
+            vsession.write_info(sess_dir, {"pid": os.getpid(), "room": slug,
+                                           "identity": ident, "api_base": api_base,
+                                           "started": time.time()})
+            _print_event(json_mode, "system",
+                         f"control socket ready: {server.sock_path}", topic="_meta")
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
+        if sig is None:
+            continue
+        try:
+            loop.add_signal_handler(sig, ctl.quit.set)
+        except (NotImplementedError, RuntimeError, ValueError):
+            pass
+    idle_task = asyncio.create_task(_idle_loop(ctl, json_mode, idle_say))
+
     rc = 0
     try:
         backoff = relay.backoff_delays(base=1.0, factor=2.0, cap=30.0)
@@ -715,6 +962,7 @@ async def _join(
                 greet_text=greet_text if first else None,
                 graph=graph, graph_interval=graph_interval,
                 strict=strict, agent_name=agent_name, model=model,
+                ctl=ctl, force_persona=force_persona,
             )
             first = False
             # Clean quit (stdin /q or {"topic":"quit"}): reason is None.
@@ -733,10 +981,24 @@ async def _join(
                          f"transient disconnect ({reason}) — reconnecting in {delay:.0f}s",
                          topic="_meta")
             try:
-                await asyncio.sleep(delay)
+                await asyncio.wait_for(ctl.quit.wait(), timeout=delay)
+                break  # leave / idle-timeout / SIGTERM during backoff
+            except asyncio.TimeoutError:
+                pass
             except asyncio.CancelledError:
                 break
     finally:
+        ctl.quit.set()
+        idle_task.cancel()
+        try:
+            await idle_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        await ctl.events.close()  # a blocked `next` returns {"type":"ended"}
+        if server is not None:
+            await asyncio.sleep(0.05)
+            await server.close()
+            vsession.remove_info(sess_dir)
         if http_client is not None:
             try:
                 await http_client.aclose()
@@ -839,8 +1101,47 @@ async def _run_log_summary(args) -> int:
     return 0
 
 
+def _client_request(args) -> dict:
+    if args.cmd == "say":
+        text = " ".join(args.text)
+        if text == "-":
+            text = sys.stdin.read()
+        req = {"cmd": "say", "text": text.strip()}
+        if args.mode:
+            req["mode"] = args.mode
+        return req
+    if args.cmd == "next":
+        return {"cmd": "next", "timeout": args.timeout}
+    if args.cmd == "leave":
+        return {"cmd": "leave", "say": args.say} if args.say else {"cmd": "leave"}
+    return {"cmd": "status"}
+
+
+def _run_client(args) -> int:
+    """say / next / leave / status: one JSON line out. Exit 0 = ok (incl.
+    next timeout), 1 = request failed, 3 = no running join / join ended."""
+    req = _client_request(args)
+    try:
+        sock = vsession.resolve_socket(args.session, wait=args.wait)
+        sock_timeout = None if args.cmd == "next" else 30.0
+        reply = vsession.request(sock, req, timeout=sock_timeout)
+    except vsession.SessionError as e:
+        print(json.dumps({"ok": False, "type": "no-session", "error": str(e)},
+                         ensure_ascii=False), flush=True)
+        return 3
+    except OSError as e:
+        print(json.dumps({"ok": False, "type": "no-session", "error": repr(e)},
+                         ensure_ascii=False), flush=True)
+        return 3
+    print(json.dumps(reply, ensure_ascii=False), flush=True)
+    if reply.get("type") == "ended":
+        return 3
+    return 0 if reply.get("ok") else 1
+
+
 def main(argv: list[str] | None = None) -> None:
-    ap = argparse.ArgumentParser(prog="voicehook-agent", description=__doc__)
+    ap = argparse.ArgumentParser(prog="voicehook-agent", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=f"voicehook-agent {_VERSION}")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p_join = sub.add_parser("join", help="join a voicehook.ai call as an agent")
@@ -908,6 +1209,43 @@ def main(argv: list[str] | None = None) -> None:
         "--graph-interval", type=float, default=60.0, metavar="SEC",
         help="seconds between graph auto-pushes (default 60).",
     )
+    # persona guard + orphan guard + control socket
+    p_join.add_argument(
+        "--force-persona", action="store_true", default=False,
+        help="push --persona/--persona-file/--strict-relay/--graph even when another operator agent is already in the room (default: skip, never overwrite someone else's persona).",
+    )
+    p_join.add_argument(
+        "--idle-timeout", type=float, default=10.0, metavar="MIN",
+        help="leave the call (with a short announcement) when the agent sent no say/next/stdin line for MIN minutes; prevents orphaned joins. 0 = off. Default 10.",
+    )
+    p_join.add_argument(
+        "--idle-say", default=DEFAULT_IDLE_SAY,
+        help="what voice-ai says before an idle-timeout leave ('' = leave silently).",
+    )
+    p_join.add_argument(
+        "--no-control", action="store_true", default=False,
+        help="do not open the local control socket (disables say/next/leave/status).",
+    )
+    # one-shot commands against a running join
+    def _add_session(p):
+        p.add_argument("--session", default=None, metavar="SLUG",
+                       help="room slug (or session dir) of the running join; needed only when several joins run.")
+        p.add_argument("--wait", type=float, default=30.0, metavar="SEC",
+                       help="wait up to SEC seconds for the join to come up (default 30).")
+    p_say = sub.add_parser("say", help="speak one line through voice-ai in the running join")
+    p_say.add_argument("text", nargs="+", help="text to speak ('-' reads it from stdin)")
+    p_say.add_argument("--mode", choices=_SAY_MODES, default=None,
+                       help="operator.say mode (server default: revise). Answer an operator.revise with --mode overwrite.")
+    _add_session(p_say)
+    p_next = sub.add_parser("next", help="block until the next finalized user turn (or operator.revise); prints one JSON line")
+    p_next.add_argument("--timeout", type=float, default=60.0, metavar="SEC",
+                        help="give up after SEC seconds and print {\"type\":\"timeout\"} (default 60; 0 = only return what is queued).")
+    _add_session(p_next)
+    p_leave = sub.add_parser("leave", help="end the running join cleanly")
+    p_leave.add_argument("--say", default=None, metavar="TEXT", help="goodbye line spoken before leaving")
+    _add_session(p_leave)
+    p_status = sub.add_parser("status", help="show the running join's state as JSON")
+    _add_session(p_status)
     # log-summary: the 2nd micro agent (digests the call log into operator.graph)
     p_sum = sub.add_parser("log-summary", help="watch a call log and emit operator.graph digests")
     p_sum.add_argument("log", help="path to the CLI's --json transcript log (JSONL)")
@@ -948,10 +1286,15 @@ def main(argv: list[str] | None = None) -> None:
                 username=args.username, prompt=args.prompt, greet=args.greet,
                 no_greet=args.no_greet, graph_path=args.graph,
                 graph_interval=args.graph_interval, strict=args.strict_relay,
+                idle_timeout=max(0.0, args.idle_timeout) * 60.0,
+                idle_say=args.idle_say or None,
+                force_persona=args.force_persona, control=not args.no_control,
             ))
         except KeyboardInterrupt:
             rc = 130
         sys.exit(rc)
+    if args.cmd in ("say", "next", "leave", "status"):
+        sys.exit(_run_client(args))
     if args.cmd == "log-summary":
         try:
             rc = asyncio.run(_run_log_summary(args))

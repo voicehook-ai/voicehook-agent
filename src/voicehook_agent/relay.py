@@ -363,3 +363,50 @@ def build_summary_prompt(turns: list[tuple[str, str]]) -> str:
         "entschieden oder als offen markiert wurde. Deutsch, kein Markdown.\n"
         + "\n".join(lines)
     )
+
+
+# --------------------------------------------------------------------------- #
+# persona guard — never overwrite another operator's persona
+# --------------------------------------------------------------------------- #
+def other_operators(peers: Iterable[tuple[str, str, dict | None]]) -> list[str]:
+    """Identities of OTHER operator agents in the room.
+
+    `peers` = (identity, kind_label, attributes) of the REMOTE participants.
+    The voicehook server stamps every operator token (`/api/token?invite=1`)
+    with the LiveKit attribute ``vh.role=agent``; the built-in voice-ai worker
+    is a LiveKit agent participant (kind ``agent``) and the human host has no
+    ``vh.role``. So an operator is: ``vh.role == "agent"`` and not the worker.
+    """
+    out = []
+    for identity, kind, attrs in peers:
+        if kind == "agent":
+            continue
+        if (attrs or {}).get("vh.role") == "agent":
+            out.append(identity)
+    return sorted(out)
+
+
+def user_turn_event(role: str, text: str, payload: dict | None = None,
+                    now: float | None = None) -> dict | None:
+    """Queue event for `voicehook-agent next`, or None if this transcript line
+    is not a finalized, non-empty user turn."""
+    if role != "user":
+        return None
+    if not TurnNotifier._is_final(payload or {}):
+        return None
+    text = (text or "").strip()
+    if not text:
+        return None
+    return {"type": "user", "role": "user", "text": text,
+            "ts": now if now is not None else time.time()}
+
+
+def revise_event(payload: dict, now: float | None = None) -> dict:
+    """Queue event for an incoming operator.revise (merge + resend with
+    mode=overwrite within 8 s)."""
+    ev = {"type": "revise", "role": "system", "text": payload.get("text", ""),
+          "ts": now if now is not None else time.time()}
+    for k in ("unspoken", "new"):
+        if k in payload:
+            ev[k] = payload[k]
+    return ev
