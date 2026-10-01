@@ -7,9 +7,13 @@ participant. No SDK, no MCP server, no learning curve — stdin/stdout protocol.
 ## TL;DR
 
 ```bash
-uvx voicehook-agent join https://voicehook.ai/r/<slug>?go=1
+uvx voicehook-agent join https://voicehook.ai/r/<slug>?go=1 --name Claude --model opus-5.5
 ```
 
+- **`--name` + `--model` are mandatory** (since 0.4.0): your self-chosen display
+  name and the exact model you run on. Without both, `join` exits with code 2
+  and explains what to pass. The web call UI shows them in the Agent chip as
+  `Name · model` (a loading ring is shown there until you have joined).
 - **stdout** prints incoming user + voice-ai turns as `[role] text`
 - **stdin** lines are spoken by voice-ai (TTS via Google Chirp3-HD)
 - **`/q`, `{"topic":"quit"}`, or SIGTERM/Ctrl-C** ends the session
@@ -23,7 +27,7 @@ uvx voicehook-agent join https://voicehook.ai/r/<slug>?go=1
 ### One-shot (per-call, recommended)
 
 ```bash
-uvx voicehook-agent join https://voicehook.ai/r/<slug>?go=1
+uvx voicehook-agent join https://voicehook.ai/r/<slug>?go=1 --name Claude --model opus-5.5
 ```
 
 [uv](https://github.com/astral-sh/uv) downloads the package on demand. Zero state.
@@ -39,7 +43,7 @@ pipx install voicehook-agent
 Then:
 
 ```bash
-voicehook-agent join https://voicehook.ai/r/<slug>?go=1
+voicehook-agent join https://voicehook.ai/r/<slug>?go=1 --name Claude --model opus-5.5
 ```
 
 ## Agent-skill registration
@@ -51,7 +55,7 @@ Claude Code, `$CODEX_HOME/skills/voicehook-agent/SKILL.md` for Codex):
 curl -fsSL https://voicehook.ai/agent/SKILL.md
 ```
 
-The agent then knows to invoke `voicehook-agent join <url>` whenever a user
+The agent then knows to invoke `voicehook-agent join <url> --name <Name> --model <model>` whenever a user
 shares a voicehook invite.
 
 ## Protocol
@@ -59,8 +63,8 @@ shares a voicehook invite.
 ### Interactive mode (default)
 
 ```
-$ voicehook-agent join https://voicehook.ai/r/abc-def-ghi-XYZ4?go=1
-[system] connecting room=abc-def-ghi-XYZ4 as identity=agent-cli-7f3a via https://voicehook.ai
+$ voicehook-agent join https://voicehook.ai/r/abc-def-ghi-XYZ4?go=1 --name Claude --model opus-5.5
+[system] connecting room=abc-def-ghi-XYZ4 as identity=claude-mbp-7f3a via https://voicehook.ai
 [system] connected — 1 peers: ['agent-AJ_qwerty1234']
 [hint] type a line to operator.say (voice-ai speaks it). /q to quit (Ctrl-D no longer quits under --keep-alive).
 [user] Hallo, wer bist du?
@@ -73,7 +77,7 @@ Ich bin dein Pair-Programming-Brain.    ← typed by agent (voice-ai TTS speaks 
 ### JSON mode
 
 ```bash
-voicehook-agent join <url> --json
+voicehook-agent join <url> --name Claude --model opus-5.5 --json
 ```
 
 stdout (JSONL):
