@@ -97,7 +97,7 @@ stdin (JSONL):
 
 | Topic              | Direction | Purpose                                |
 |--------------------|-----------|----------------------------------------|
-| `transcript`        | in        | Live user + voice-ai turns             |
+| `transcript`        | in        | Live turns, `role` = `user` / `operator` (your `operator.say`, after it was spoken) / `agent` (voice-ai's own answer) |
 | `_wake`             | out*      | Wake marker on each finalized user-turn (#12) |
 | `_meta`             | out*      | Connection / room-state events         |
 | `operator.say`        | out       | TTS push; tagged `_seq`/`_ts` (#9). `mode`: `revise` (default: if unspoken text is pending the agent stops and answers with `operator.revise`), `overwrite` (your merged answer), `append` (queue) |
@@ -118,7 +118,7 @@ Hardening flags (0.2.0) for unattended / background relay operation:
 | `--keep-alive` / `--no-keep-alive` | #6 | stdin-EOF does **not** quit; auto-reconnect (exp. backoff, cap 30s) on transient disconnect until the host leaves / room closes / `/q` / SIGTERM. Default: on. |
 | `--notify-url <url>` | #12 | POST `{role,text,room,timestamp}` to `<url>` on each finalized user-turn. |
 | `--wake-only-user` / `--wake-all` | #12 | Only role=user wakes (default); `--wake-all` also wakes on agent turns (debug). |
-| `--suppress-echo` | #10 | Drop the agent's own relayed TTS (role=agent transcript matching a recent `operator.say`) from the stdout stream. |
+| `--suppress-echo` | #10 | Drop the agent's own relayed TTS (role=agent transcript matching a recent `operator.say`) from the stdout stream. voicehook v4 marks that echo as `role=operator`, so the flag currently has no effect there. |
 | `--say-ttl <sec>` | #9 | Drop a `operator.say` older than `<sec>` seconds, or superseded by a newer user-turn, instead of speaking it stale. |
 | `--strict-relay` | #8 | Inject a bundled strict-relay persona at connect: the voicebot speaks **only** pushed text and never self-generates. Reuses `--persona-file` semantics; overridden by `--persona`/`--persona-file`. |
 
@@ -149,6 +149,24 @@ emitted on stderr (`[warn] stdin closed with un-terminated line …`). Prefer
 - **#8 strict-relay** is enforced via persona injection only. Hard server-side
   enforcement (LLM self-generation truly disabled) is tracked server-side
   (voicehook-v3#28/#48); the CLI ships the strongest available client lever.
+
+### voicehook v4 server behaviour (Stand 2026-10-01)
+
+Reference: [voicehook-v4 docs/OPERATOR-PROTOCOL.md](https://github.com/voicehook-ai/voicehook-v4/blob/main/docs/OPERATOR-PROTOCOL.md).
+
+- **Transcript roles.** `user` = final STT of the human; `operator` = your
+  `operator.say`, published only after voice-ai spoke it (on an interruption only
+  the spoken part); `agent` = voice-ai's own answer. No `operator` line after a
+  push means it was not spoken (yet).
+- **Live mode (Gemini Live).** `GET /api/live/status` returns `{"available":bool}`;
+  `POST /api/live-room {identity, ttl_seconds?}` returns the host-call format plus
+  `invite_url`, `expires_in`, `agent`. `402` = monthly live budget used up (default
+  10 USD per UTC month), `404` off, `503` not configured, `429` rate limit. Join the
+  `invite_url` as usual. In live rooms `operator.say` is not verbatim: the model says
+  it in its own words.
+- **Speech and speaker filter (pipeline mode).** Only detected speech reaches the
+  STT, and background voices are dropped before the LLM. Learning phase at the
+  start: until one speaker has about 3 s of speech, everything passes.
 
 ## Environment
 
