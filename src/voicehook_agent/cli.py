@@ -264,6 +264,22 @@ DEFAULT_IDLE_SAY = (
 )
 
 
+def _quit_signals() -> list:
+    """Signals that make `join` leave cleanly. SIGHUP only when it is not
+    ignored: `nohup voicehook-agent join ... &` sets SIG_IGN and must keep the
+    call alive when the terminal closes."""
+    sigs = [signal.SIGTERM]
+    hup = getattr(signal, "SIGHUP", None)
+    if hup is not None:
+        try:
+            ignored = signal.getsignal(hup) is signal.SIG_IGN
+        except (ValueError, OSError):
+            ignored = False
+        if not ignored:
+            sigs.append(hup)
+    return sigs
+
+
 class _Control:
     """State shared between the join's reconnect cycles and the local control
     socket (say / next / leave / status)."""
@@ -321,6 +337,7 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
     cmd = req.get("cmd")
     if cmd == "say":
         ctl.watchdog.touch()
+        ctl.events.arm()  # from now on user turns are queued for `next`
         text = str(req.get("text") or "").strip()
         if not text:
             return {"ok": False, "error": "empty text"}
@@ -917,7 +934,7 @@ async def _join(
     # Local control socket for `say` / `next` / `leave` / `status` + idle guard.
     ctl = _Control(slug, ident, say_tracker, echo, idle_timeout)
     server: vsession.ControlServer | None = None
-    sess_dir = vsession.session_dir(slug)
+    sess_dir = vsession.session_dir(slug, ident)
     if control and hasattr(asyncio, "start_unix_server"):
         sess_dir.mkdir(parents=True, exist_ok=True)
         server = vsession.ControlServer(vsession.socket_path(sess_dir),
@@ -925,7 +942,14 @@ async def _join(
         try:
             await server.start()
         except vsession.SessionError as e:
-            print(f"[error] {e}", file=sys.stderr, flush=True)
+            hint = ("Options: `voicehook-agent leave --session "
+                    f"{slug}/{ident}` first, join with a different --name/--identity, "
+                    "or pass --no-control (stdin/FIFO only)."
+                    if isinstance(e, vsession.SessionBusy) else
+                    "Fix the directory, set a shorter VOICEHOOK_AGENT_HOME, or pass "
+                    "--no-control (stdin/FIFO only).")
+            print(f"[error] control socket: {e}\n        {hint}",
+                  file=sys.stderr, flush=True)
             if http_client is not None:
                 await http_client.aclose()
             return 2
@@ -940,9 +964,7 @@ async def _join(
             _print_event(json_mode, "system",
                          f"control socket ready: {server.sock_path}", topic="_meta")
     loop = asyncio.get_running_loop()
-    for sig in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
-        if sig is None:
-            continue
+    for sig in _quit_signals():
         try:
             loop.add_signal_handler(sig, ctl.quit.set)
         except (NotImplementedError, RuntimeError, ValueError):
@@ -999,6 +1021,10 @@ async def _join(
             await asyncio.sleep(0.05)
             await server.close()
             vsession.remove_info(sess_dir)
+            try:
+                sess_dir.rmdir()
+            except OSError:
+                pass
         if http_client is not None:
             try:
                 await http_client.aclose()
@@ -1229,7 +1255,7 @@ def main(argv: list[str] | None = None) -> None:
     # one-shot commands against a running join
     def _add_session(p):
         p.add_argument("--session", default=None, metavar="SLUG",
-                       help="room slug (or session dir) of the running join; needed only when several joins run.")
+                       help="<slug>/<identity> of the running join (a slug alone is enough when only one join runs in that room); needed only when several joins run.")
         p.add_argument("--wait", type=float, default=30.0, metavar="SEC",
                        help="wait up to SEC seconds for the join to come up (default 30).")
     p_say = sub.add_parser("say", help="speak one line through voice-ai in the running join")

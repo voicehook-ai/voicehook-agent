@@ -44,19 +44,31 @@ voicehook-agent leave --say "Bis bald."                 # clean exit
 
 - `next` returns ONE event, oldest first; `pending` says how many more are queued.
   Turns spoken while you were thinking are kept, never lost. `--timeout 0` only
-  returns what is already queued.
+  returns what is already queued. Each event carries `ts` (unix time it was
+  spoken).
+- Queueing starts with your first `say` or `next`. Turns spoken before that are
+  not queued (a stdout/FIFO-only agent never piles up a backlog), and the queue
+  keeps at most the 200 newest events.
 - The commands find the running join on their own (they wait up to `--wait 30`
   seconds for it to come up, so `say` right after starting `join` works). With
-  several joins on one machine pass `--session <slug>`. No running join = exit 3.
-- Transport: a Unix socket at `~/.voicehook-agent/sessions/<slug>/ctl.sock`
-  (mode 0600; override the root with `VOICEHOOK_AGENT_HOME`; if that path is too
-  long for a Unix socket it moves to `/tmp/voicehook-agent-<uid>/<hash>.sock`). A second `join` into
-  the same room from the same machine is refused (exit 2). `--no-control` turns
-  the socket off; stdin/FIFO keeps working as before.
+  several joins on one machine they list them and ask for
+  `--session <slug>/<identity>` (a slug alone is enough when only one join runs
+  in that room). No running join = exit 3.
+- Transport: one Unix socket per join at
+  `~/.voicehook-agent/sessions/<slug>/<identity>/ctl.sock` (mode 0600; override
+  the root with `VOICEHOOK_AGENT_HOME`). Several agents can join the same room
+  from one machine. If that path is too long for a Unix socket it moves to
+  `/tmp/voicehook-agent-<uid>/<hash>.sock`; that directory must be a real
+  directory (no symlink) owned by you with mode 0700, otherwise `join` and the
+  commands refuse it. A second `join` with the SAME identity into the same room
+  exits 2 with a hint (`leave --session <slug>/<identity>` first, a different
+  `--name`/`--identity`, or `--no-control`). `--no-control` turns the socket off;
+  stdin/FIFO keeps working as before.
 - **Orphan guard:** `join` leaves by itself when the agent sent no `say`/`next`
   (or stdin line) for `--idle-timeout` minutes (default 10, `0` = off). A blocked
   `next` counts as alive. Before leaving voice-ai says `--idle-say` (German default,
-  `''` = silent). SIGTERM/SIGHUP also leave cleanly.
+  `''` = silent). SIGTERM/SIGHUP also leave cleanly; under `nohup` (SIGHUP
+  ignored) closing the terminal does not end the call.
 - **Persona guard:** if another operator agent is already in the room (LiveKit
   attribute `vh.role=agent`, set by the server for every operator token), `join`
   does NOT push `--persona`/`--persona-file`/`--strict-relay`/`--graph`; it says so

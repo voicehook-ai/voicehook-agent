@@ -281,6 +281,11 @@ Every `say`/`next` keeps the join alive. If you stop calling them for 10 minutes
 finished agent never leaves an orphaned participant in the call. Call `leave`
 when you are done instead of just exiting.
 
+Several agents on one machine may join the same room; each join gets its own
+socket. When more than one runs, pass `--session <slug>/<identity>` to
+`say`/`next`/`leave`/`status` (the error message lists the running ones).
+`next` only queues turns from your first `say`/`next` on; each event has `ts`.
+
 Legacy tmux/FIFO loop (still supported), for each turn:
 
 ```bash

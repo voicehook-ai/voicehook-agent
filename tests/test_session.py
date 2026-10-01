@@ -8,6 +8,10 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
+import signal
+import socket
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -57,6 +61,7 @@ def test_revise_event_carries_unspoken():
 def test_event_queue_keeps_events_until_next():
     async def run():
         q = vs.EventQueue()
+        q.arm()
         await q.put({"type": "user", "text": "eins"})
         await q.put({"type": "user", "text": "zwei"})
         a = await q.get(1.0)
@@ -158,9 +163,9 @@ async def _call(req, wait=5.0):
     return await asyncio.to_thread(vs.request, sock, req, 10.0)
 
 
-def _join(**kw):
+def _join(identity=None, **kw):
     kw.setdefault("model", "opus-5.5")
-    return cli._join(URL, None, "Claude", True, kw.pop("persona", None), **kw)
+    return cli._join(URL, identity, "Claude", True, kw.pop("persona", None), **kw)
 
 
 # --------------------------------------------------------------------------- #
@@ -197,7 +202,7 @@ def test_say_next_leave_loop(fake_env):
     assert r_leave["type"] == "leaving" and says[-1]["text"] == "Tschuess"
     assert rc == 0
     assert vs.live_sessions() == []                      # socket gone after leave
-    assert not vs.socket_path(vs.session_dir(SLUG)).exists()
+    assert not vs.socket_path(vs.session_dir(SLUG, r_status["identity"])).exists()
 
 
 def test_blocked_next_returns_ended_when_join_stops(fake_env):
@@ -221,16 +226,268 @@ def test_client_exit_codes(fake_env, capsys):
     assert out["type"] == "no-session"
 
 
-def test_second_join_same_room_refused(fake_env):
+def test_second_join_same_room_gets_own_socket(fake_env):
+    """Two joins into the same room from one machine (multi-agent box) both
+    run; each has its own socket, clients pick by --session slug/identity."""
     async def run():
-        first = asyncio.create_task(_join(idle_timeout=0))
+        a = asyncio.create_task(_join(identity="claude-a", idle_timeout=0))
+        await _call({"cmd": "status"})                   # only one -> auto-pick
+        b = asyncio.create_task(_join(identity="claude-b", idle_timeout=0))
+        for _ in range(50):
+            if len(vs.live_sessions()) == 2:
+                break
+            await asyncio.sleep(0.1)
+        live = [vs._label(d) for d in vs.live_sessions()]
+        with pytest.raises(vs.SessionError) as auto:
+            vs.resolve_socket(None)
+        with pytest.raises(vs.SessionError) as by_slug:
+            vs.resolve_socket(SLUG)
+        sa = await asyncio.to_thread(vs.resolve_socket, f"{SLUG}/claude-a", 2)
+        sb = await asyncio.to_thread(vs.resolve_socket, f"{SLUG}/claude-b", 2)
+        st_a = await asyncio.to_thread(vs.request, sa, {"cmd": "status"}, 5)
+        st_b = await asyncio.to_thread(vs.request, sb, {"cmd": "status"}, 5)
+        await asyncio.to_thread(vs.request, sb, {"cmd": "leave"}, 5)
+        rc_b = await asyncio.wait_for(b, 5)
+        # one left -> auto-pick works again
+        st_auto = await _call({"cmd": "status"})
+        await _call({"cmd": "leave"})
+        return live, auto, by_slug, st_a, st_b, rc_b, st_auto, await asyncio.wait_for(a, 5)
+
+    live, auto, by_slug, st_a, st_b, rc_b, st_auto, rc_a = asyncio.run(run())
+    assert live == [f"{SLUG}/claude-a", f"{SLUG}/claude-b"]
+    assert "--session" in str(auto.value) and f"{SLUG}/claude-b" in str(auto.value)
+    assert "--session" in str(by_slug.value)
+    assert st_a["identity"] == "claude-a" and st_b["identity"] == "claude-b"
+    assert st_auto["identity"] == "claude-a"
+    assert rc_a == 0 and rc_b == 0
+
+
+def test_same_identity_twice_refused_with_hint(fake_env, capsys):
+    async def run():
+        first = asyncio.create_task(_join(identity="claude-x", idle_timeout=0))
         await asyncio.to_thread(vs.resolve_socket, None, 5)
-        rc2 = await _join(idle_timeout=0)
+        rc2 = await _join(identity="claude-x", idle_timeout=0)
         await _call({"cmd": "leave"})
         return rc2, await asyncio.wait_for(first, 5)
 
     rc2, rc1 = asyncio.run(run())
+    err = capsys.readouterr().err
     assert rc2 == 2 and rc1 == 0
+    assert f"leave --session {SLUG}/claude-x" in err and "--no-control" in err
+
+
+# --------------------------------------------------------------------------- #
+# /tmp fallback: directory must be ours, 0700, no symlink (server + client)
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def fallback(tmp_path, monkeypatch):
+    import shutil
+    import tempfile
+    root = Path(tempfile.mkdtemp(prefix="vhfb", dir="/tmp"))  # short: AF_UNIX limit
+    monkeypatch.setattr(vs, "FALLBACK_ROOT", root)
+    yield_root = root
+    deep = tmp_path / ("d" * 120)
+    sock = vs.socket_path(deep)
+    assert vs.is_fallback(sock) and sock.parent.parent == root
+    yield sock
+    for d in (sock.parent,):
+        if d.is_symlink():
+            d.unlink()
+    shutil.rmtree(yield_root, ignore_errors=True)
+
+
+def _start_server(sock):
+    async def h(req):
+        return {"ok": True}
+
+    async def run():
+        srv = vs.ControlServer(sock, h)
+        await srv.start()
+        await srv.close()
+    asyncio.run(run())
+
+
+def test_fallback_dir_created_private_and_usable(fallback):
+    _start_server(fallback)                       # positive control: own dir works
+    st = fallback.parent.lstat()
+    assert st.st_mode & 0o777 == 0o700
+
+
+def test_fallback_dir_refuses_loose_mode(fallback):
+    fallback.parent.mkdir(mode=0o755)
+    fallback.parent.chmod(0o755)
+    with pytest.raises(vs.SessionError, match="mode 755"):
+        _start_server(fallback)
+
+
+def test_fallback_dir_refuses_symlink(fallback, tmp_path):
+    target = tmp_path / "elsewhere"
+    target.mkdir(mode=0o700)
+    fallback.parent.symlink_to(target)
+    with pytest.raises(vs.SessionError, match="symlink"):
+        _start_server(fallback)
+
+
+def test_fallback_dir_refuses_foreign_owner(fallback, monkeypatch):
+    fallback.parent.mkdir(mode=0o700)
+    real = os.getuid()
+    monkeypatch.setattr(vs, "fallback_dir", lambda: fallback.parent)
+    monkeypatch.setattr(os, "getuid", lambda: real + 4242)
+    with pytest.raises(vs.SessionError, match="belongs to uid"):
+        _start_server(fallback)
+
+
+def test_client_refuses_socket_in_foreign_fallback_dir(fallback):
+    _start_server(fallback)
+
+    async def h(req):
+        return {"ok": True}
+
+    async def run():
+        srv = vs.ControlServer(fallback, h)
+        await srv.start()
+        try:
+            ok = await asyncio.to_thread(vs.resolve_socket, str(fallback), 1)  # control
+            fallback.parent.chmod(0o755)                # someone loosened the dir
+            try:
+                await asyncio.to_thread(vs.resolve_socket, str(fallback), 0)
+                bad = None
+            except vs.SessionError as e:
+                bad = e
+            finally:
+                fallback.parent.chmod(0o700)
+            return ok, bad
+        finally:
+            await srv.close()
+
+    ok, bad = asyncio.run(run())
+    assert ok == fallback
+    assert bad is not None and "mode 755" in str(bad)
+
+
+# --------------------------------------------------------------------------- #
+# SIGHUP respects nohup (SIG_IGN)
+# --------------------------------------------------------------------------- #
+def test_sighup_handler_only_when_not_ignored():
+    prev = signal.getsignal(signal.SIGHUP)
+    try:
+        signal.signal(signal.SIGHUP, signal.SIG_DFL)
+        assert signal.SIGHUP in cli._quit_signals()      # positive control
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)     # what nohup does
+        sigs = cli._quit_signals()
+        assert signal.SIGHUP not in sigs and signal.SIGTERM in sigs
+    finally:
+        signal.signal(signal.SIGHUP, prev)
+
+
+def test_join_under_nohup_ignores_sighup(fake_env):
+    prev = signal.getsignal(signal.SIGHUP)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    try:
+        async def run():
+            join = asyncio.create_task(_join(idle_timeout=0))
+            await _call({"cmd": "status"})
+            os.kill(os.getpid(), signal.SIGHUP)
+            await asyncio.sleep(0.3)
+            alive = not join.done()
+            await _call({"cmd": "leave"})
+            return alive, await asyncio.wait_for(join, 5)
+        alive, rc = asyncio.run(run())
+    finally:
+        signal.signal(signal.SIGHUP, prev)
+    assert alive and rc == 0
+
+
+# --------------------------------------------------------------------------- #
+# ControlServer.close() never hangs on a silent client
+# --------------------------------------------------------------------------- #
+def test_close_does_not_hang_on_silent_client(tmp_path):
+    sock = tmp_path / "c.sock"
+
+    async def slow(req):
+        await asyncio.sleep(60)
+        return {"ok": True}
+
+    async def run():
+        srv = vs.ControlServer(sock, slow, read_timeout=30, close_timeout=0.5)
+        await srv.start()
+        silent = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        silent.connect(str(sock))                       # connects, never sends
+        busy = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        busy.connect(str(sock))
+        busy.sendall(b'{"cmd":"say"}\n')                # handler hangs
+        await asyncio.sleep(0.1)
+        t0 = time.monotonic()
+        await asyncio.wait_for(srv.close(), 5)
+        took = time.monotonic() - t0
+        silent.close(); busy.close()
+        return took
+
+    took = asyncio.run(run())
+    assert took < 2.0 and not sock.exists()
+
+
+def test_silent_client_is_dropped_after_read_timeout(tmp_path):
+    sock = tmp_path / "r.sock"
+
+    async def h(req):
+        return {"ok": True}
+
+    async def run():
+        srv = vs.ControlServer(sock, h, read_timeout=0.2)
+        await srv.start()
+        try:
+            r = await asyncio.to_thread(vs.request, sock, {"cmd": "status"}, 2)  # control
+            def silent():
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.settimeout(3)
+                s.connect(str(sock))
+                try:
+                    return s.recv(10)                  # b"" = server closed us
+                finally:
+                    s.close()
+            got = await asyncio.to_thread(silent)
+            return r, got, len(srv._clients)
+        finally:
+            await srv.close()
+
+    r, got, left = asyncio.run(run())
+    assert r == {"ok": True} and got == b"" and left == 0
+
+
+# --------------------------------------------------------------------------- #
+# EventQueue only collects once armed, and is bounded
+# --------------------------------------------------------------------------- #
+def test_event_queue_ignores_turns_before_armed_and_is_bounded():
+    async def run():
+        q = vs.EventQueue(maxlen=3)
+        q.put_nowait({"type": "user", "text": "alt"})      # nobody uses next yet
+        before = len(q)
+        q.arm()
+        for i in range(5):
+            q.put_nowait({"type": "user", "text": str(i)})
+        got = [(await q.get(0))["text"] for _ in range(3)]
+        return before, got, q.dropped
+    before, got, dropped = asyncio.run(run())
+    assert before == 0
+    assert got == ["2", "3", "4"] and dropped == 2
+
+
+def test_turns_before_first_say_or_next_are_not_queued(fake_env):
+    async def run():
+        join = asyncio.create_task(_join(idle_timeout=0))
+        await _call({"cmd": "status"})                    # status does not arm
+        room = _FakeRoom.instances[0]
+        room.emit("transcript", {"role": "user", "text": "von vor zehn Minuten"})
+        stale = await _call({"cmd": "next", "timeout": 0})  # arms now
+        room.emit("transcript", {"role": "user", "text": "frisch"})
+        fresh = await _call({"cmd": "next", "timeout": 2})
+        await _call({"cmd": "leave"})
+        return stale, fresh, await asyncio.wait_for(join, 5)
+
+    stale, fresh, rc = asyncio.run(run())
+    assert stale["type"] == "timeout"
+    assert fresh["type"] == "user" and fresh["text"] == "frisch" and rc == 0
 
 
 # --------------------------------------------------------------------------- #

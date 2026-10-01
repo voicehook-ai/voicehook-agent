@@ -1,6 +1,8 @@
 """Local control channel between a running `join` and one-shot commands.
 
-`voicehook-agent join` opens a Unix socket in a per-room session directory.
+`voicehook-agent join` opens a Unix socket in a per-process session directory
+(`sessions/<slug>/<identity>/`), so several joins into the same room from the
+same machine do not collide.
 The one-shot commands `say`, `next`, `leave` and `status` talk to it, so an
 agent loop can run "say -> next -> say -> next" without a FIFO, without tmux
 and without `sleep; tail` polling.
@@ -21,7 +23,9 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import socket
+import stat
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -47,14 +51,63 @@ def sessions_root() -> Path:
     return home_dir() / "sessions"
 
 
-def session_dir(slug: str) -> Path:
-    return sessions_root() / slug
+def _safe_name(name: str) -> str:
+    """One path segment: keep [A-Za-z0-9._-], replace the rest."""
+    out = re.sub(r"[^A-Za-z0-9._-]", "_", name).strip(".") or "_"
+    return out[:80]
+
+
+def room_dir(slug: str) -> Path:
+    """Directory holding all joins of one room on this machine."""
+    return sessions_root() / _safe_name(slug)
+
+
+def session_dir(slug: str, identity: str) -> Path:
+    """Per-process session dir: one join = one (slug, identity) pair."""
+    return room_dir(slug) / _safe_name(identity)
 
 
 # AF_UNIX paths are limited to ~104-108 bytes. Deep home dirs (or a long
 # VOICEHOOK_AGENT_HOME) fall back to a short, deterministic path under /tmp, so
-# both `join` and the one-shot commands compute the same socket path.
+# both `join` and the one-shot commands compute the same socket path. That
+# directory is shared with other local users, so it is only used when it is a
+# real directory (no symlink) owned by us with mode 0700 (check_private_dir).
 _MAX_SOCK_PATH = 100
+FALLBACK_ROOT = Path("/tmp")
+
+
+def _uid() -> int:
+    return os.getuid() if hasattr(os, "getuid") else 0
+
+
+def fallback_dir() -> Path:
+    return FALLBACK_ROOT / f"voicehook-agent-{_uid()}"
+
+
+def check_private_dir(dir_: Path) -> None:
+    """Raise SessionError unless `dir_` is a real dir, owned by us, mode 0700
+    (no group/other bits). lstat, so a symlink is never followed."""
+    try:
+        st = os.lstat(dir_)
+    except OSError as e:
+        raise SessionError(f"socket dir {dir_} not usable: {e}") from e
+    if stat.S_ISLNK(st.st_mode):
+        raise SessionError(f"socket dir {dir_} is a symlink; refusing to use it")
+    if not stat.S_ISDIR(st.st_mode):
+        raise SessionError(f"socket dir {dir_} is not a directory; refusing to use it")
+    if hasattr(os, "getuid") and st.st_uid != os.getuid():
+        raise SessionError(
+            f"socket dir {dir_} belongs to uid {st.st_uid}, not to you "
+            f"(uid {os.getuid()}); refusing to use it. Remove it or set a "
+            "shorter VOICEHOOK_AGENT_HOME")
+    if st.st_mode & 0o077:
+        raise SessionError(
+            f"socket dir {dir_} has mode {stat.S_IMODE(st.st_mode):o}, expected 700; "
+            f"refusing to use it (chmod 700 {dir_})")
+
+
+def is_fallback(sock_path: Path) -> bool:
+    return sock_path.parent == fallback_dir()
 
 
 def socket_path(dir_: Path) -> Path:
@@ -63,8 +116,26 @@ def socket_path(dir_: Path) -> Path:
     if len(str(cand).encode("utf-8")) <= _MAX_SOCK_PATH:
         return cand
     digest = hashlib.sha256(str(dir_.resolve()).encode("utf-8")).hexdigest()[:16]
-    uid = os.getuid() if hasattr(os, "getuid") else 0
-    return Path("/tmp") / f"voicehook-agent-{uid}" / f"{digest}.sock"
+    return fallback_dir() / f"{digest}.sock"
+
+
+def prepare_socket_dir(sock_path: Path) -> None:
+    """Create the socket's directory for the server. The /tmp fallback must
+    pass check_private_dir (else SessionError); a dir under our own home is
+    created/tightened to 0700."""
+    parent = sock_path.parent
+    if is_fallback(sock_path):
+        try:
+            parent.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        check_private_dir(parent)
+        return
+    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(parent, 0o700)
+    except OSError:
+        pass
 
 
 def socket_alive(sock_path: Path, timeout: float = 1.0) -> bool:
@@ -83,45 +154,91 @@ def socket_alive(sock_path: Path, timeout: float = 1.0) -> bool:
 
 
 def live_sessions() -> list[Path]:
-    """Session dirs whose control socket answers."""
+    """Session dirs (sessions/<slug>/<identity>) whose control socket answers."""
     root = sessions_root()
     if not root.is_dir():
         return []
-    return sorted(d for d in root.iterdir() if d.is_dir() and socket_alive(socket_path(d)))
+    out = []
+    for room in sorted(root.iterdir()):
+        if not room.is_dir():
+            continue
+        for d in sorted(room.iterdir()):
+            if d.is_dir() and socket_alive(socket_path(d)):
+                out.append(d)
+    return out
 
 
 class SessionError(RuntimeError):
     pass
 
 
+class SessionBusy(SessionError):
+    """A live join already owns this (slug, identity) socket."""
+
+
+def _label(d: Path) -> str:
+    return f"{d.parent.name}/{d.name}"
+
+
+def _pick(live: list[Path], scope: str) -> Path:
+    if len(live) == 1:
+        return live[0]
+    names = ", ".join(_label(d) for d in live)
+    raise SessionError(f"several joins running {scope}({names}); "
+                       "pass --session <slug>/<identity>")
+
+
+def _checked(sock: Path) -> Path:
+    """Client side of the /tmp fallback check: never talk to a socket in a
+    directory another user could have planted."""
+    if is_fallback(sock):
+        check_private_dir(sock.parent)
+    return sock
+
+
 def resolve_socket(session: str | None, wait: float = 0.0,
                    poll: float = 0.2) -> Path:
     """Find the control socket of a running join.
 
-    `session` may be a slug, a session dir or a socket path. Without it, the
-    single live session is used; more than one is an error (pass --session).
-    Waits up to `wait` seconds for the socket to appear, so `say` right after
-    starting `join` in the background just works."""
+    `session` may be `<slug>/<identity>`, a slug, a session dir or a socket
+    path. A slug alone works when only one join runs in that room. Without
+    `session`, the single live join is used; more than one is an error that
+    lists them (pass --session). Waits up to `wait` seconds for the socket to
+    appear, so `say` right after starting `join` in the background just works."""
     deadline = time.monotonic() + max(0.0, wait)
     while True:
         if session:
             p = Path(session)
+            live: list[Path] = []
             if p.name.endswith(".sock") or p.is_socket():
-                cand = p
-            elif p.is_dir():
+                cand: Path | None = p
+            elif p.is_dir() and (p / SOCKET_NAME).exists():
                 cand = socket_path(p)
+            elif p.is_dir():
+                cand = None
+                live = [d for d in sorted(p.iterdir())
+                        if d.is_dir() and socket_alive(socket_path(d))]
+            elif "/" in session.strip("/") and not p.is_absolute():
+                slug, ident = session.strip("/").split("/", 1)
+                cand = socket_path(session_dir(slug, ident))
             else:
-                cand = socket_path(session_dir(session))
-            if socket_alive(cand):
-                return cand
-            msg = f"no running join for session {session!r} ({cand})"
+                cand = None
+                rd = room_dir(session)
+                if rd.is_dir():
+                    live = [d for d in sorted(rd.iterdir())
+                            if d.is_dir() and socket_alive(socket_path(d))]
+            if cand is not None:
+                if socket_alive(cand):
+                    return _checked(cand)
+                msg = f"no running join for session {session!r} ({cand})"
+            elif live:
+                return _checked(socket_path(_pick(live, f"in room {session!r} ")))
+            else:
+                msg = f"no running join for session {session!r}"
         else:
             live = live_sessions()
-            if len(live) == 1:
-                return socket_path(live[0])
-            if len(live) > 1:
-                names = ", ".join(d.name for d in live)
-                raise SessionError(f"several joins running ({names}); pass --session <slug>")
+            if live:
+                return _checked(socket_path(_pick(live, "")))
             msg = f"no running join found under {sessions_root()}"
         if time.monotonic() >= deadline:
             raise SessionError(msg)
@@ -155,25 +272,46 @@ def request(sock_path: Path, obj: dict, timeout: float | None = None) -> dict:
 class EventQueue:
     """FIFO of events for `next`: finalized user turns, operator.revise and the
     final `ended` marker. Events arriving while nobody waits are kept, so the
-    turn the user spoke between `say` and `next` is never lost."""
+    turn the user spoke between `say` and `next` is never lost.
 
-    def __init__(self) -> None:
-        self._q: deque[dict] = deque()
+    The queue only starts collecting once it is `arm()`ed (the join arms it on
+    the first `say` or `next` over the control socket). A FIFO/stdout-only
+    agent therefore never piles up turns, and an agent switching to `next`
+    late does not get minutes-old turns as if they were fresh. It is also
+    bounded (`maxlen`, oldest dropped, counted in `dropped`)."""
+
+    MAXLEN = 200
+
+    def __init__(self, maxlen: int | None = None, armed: bool = False) -> None:
+        self._q: deque[dict] = deque(maxlen=maxlen or self.MAXLEN)
         self._cond = asyncio.Condition()
         self.closed = False
+        self.armed = armed
+        self.dropped = 0
 
     def __len__(self) -> int:
         return len(self._q)
 
+    def arm(self) -> None:
+        self.armed = True
+
+    def _append(self, event: dict) -> bool:
+        if not self.armed:
+            return False
+        if len(self._q) == self._q.maxlen:
+            self.dropped += 1
+        self._q.append(event)
+        return True
+
     async def put(self, event: dict) -> None:
         async with self._cond:
-            self._q.append(event)
-            self._cond.notify_all()
+            if self._append(event):
+                self._cond.notify_all()
 
     def put_nowait(self, event: dict) -> None:
         """Sync push from LiveKit callbacks (same loop)."""
-        self._q.append(event)
-        asyncio.get_running_loop().create_task(self._notify())
+        if self._append(event):
+            asyncio.get_running_loop().create_task(self._notify())
 
     async def _notify(self) -> None:
         async with self._cond:
@@ -186,7 +324,8 @@ class EventQueue:
 
     async def get(self, timeout: float | None) -> dict | None:
         """Oldest event, or None on timeout. After close and once drained,
-        returns {"type": "ended"} immediately."""
+        returns {"type": "ended"} immediately. Arms the queue."""
+        self.arm()
         async def _wait() -> dict:
             async with self._cond:
                 while not self._q and not self.closed:
@@ -245,24 +384,29 @@ Handler = Callable[[dict], Awaitable[dict]]
 
 
 class ControlServer:
-    """asyncio Unix-socket server; one JSON request, one JSON reply."""
+    """asyncio Unix-socket server; one JSON request, one JSON reply.
 
-    def __init__(self, sock_path: Path, handler: Handler) -> None:
+    A client must send its request line within `read_timeout` seconds.
+    close() drops open client connections and returns within
+    `close_timeout` seconds even if a handler hangs."""
+
+    def __init__(self, sock_path: Path, handler: Handler,
+                 read_timeout: float = 5.0, close_timeout: float = 2.0) -> None:
         self.sock_path = sock_path
         self.handler = handler
+        self.read_timeout = read_timeout
+        self.close_timeout = close_timeout
         self._server: asyncio.AbstractServer | None = None
+        self._clients: set[asyncio.StreamWriter] = set()
+        self._tasks: set[asyncio.Task] = set()
 
     async def start(self) -> None:
-        self.sock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        try:
-            os.chmod(self.sock_path.parent, 0o700)
-        except OSError:
-            pass
+        prepare_socket_dir(self.sock_path)
         if self.sock_path.exists():
             if socket_alive(self.sock_path):
-                raise SessionError(
-                    f"a join is already running for this room ({self.sock_path}); "
-                    "use say/next/leave against it")
+                raise SessionBusy(
+                    f"a join with this identity is already running in this room "
+                    f"({self.sock_path})")
             self.sock_path.unlink()
         self._server = await asyncio.start_unix_server(self._serve, path=str(self.sock_path))
         try:
@@ -271,8 +415,12 @@ class ControlServer:
             pass
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            self._tasks.add(task)
+        self._clients.add(writer)
         try:
-            raw = await reader.readline()
+            raw = await asyncio.wait_for(reader.readline(), timeout=self.read_timeout)
             try:
                 req = json.loads(raw.decode("utf-8") or "{}")
                 if not isinstance(req, dict):
@@ -286,9 +434,12 @@ class ControlServer:
                     reply = {"ok": False, "error": repr(e)}
             writer.write((json.dumps(reply, ensure_ascii=False) + "\n").encode("utf-8"))
             await writer.drain()
-        except (ConnectionError, asyncio.CancelledError):
+        except (ConnectionError, asyncio.TimeoutError, asyncio.CancelledError):
             pass
         finally:
+            self._clients.discard(writer)
+            if task is not None:
+                self._tasks.discard(task)
             try:
                 writer.close()
             except Exception:  # noqa: BLE001
@@ -297,9 +448,21 @@ class ControlServer:
     async def close(self) -> None:
         if self._server is not None:
             self._server.close()
+            # Give in-flight replies a moment, then drop whatever is left
+            # (a client that connected but never sent, a say stuck waiting).
+            pending = [t for t in self._tasks if not t.done()]
+            if pending:
+                await asyncio.wait(pending, timeout=self.close_timeout / 2)
+            for w in list(self._clients):
+                try:
+                    w.transport.abort()
+                except Exception:  # noqa: BLE001
+                    pass
+            for t in list(self._tasks):
+                t.cancel()
             try:
-                await self._server.wait_closed()
-            except Exception:  # noqa: BLE001
+                await asyncio.wait_for(self._server.wait_closed(), timeout=self.close_timeout)
+            except (asyncio.TimeoutError, Exception):  # noqa: BLE001
                 pass
             self._server = None
         try:
