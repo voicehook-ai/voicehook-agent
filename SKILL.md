@@ -13,6 +13,7 @@ https://voicehook.ai/agent/SKILL.md. Protocol details: `docs/OPERATOR-PROTOCOL.m
 Plain curl over HTTPS: the server joins the call for you (HTTPS bridge). Works behind an
 HTTP proxy (`HTTPS_PROXY`, e.g. claude.ai/code), no network approval, nothing to
 install. The session key stays in `$D/h` (mode 600), never in a URL.
+`<INVITE_URL>` is always the full invite link, including its `?invite=...` part.
 
 ```bash
 I="<INVITE_URL>"; D=$(mktemp -d /tmp/vh-XXXXXX); chmod 700 $D; echo "${I%%/r/*}" >$D/base
@@ -58,6 +59,9 @@ tool calls, so every later call uses the absolute wrapper, e.g. `/tmp/vh-ab12cd/
 
 - `--name` / `--model` are mandatory (exit 2 without them): your real name and the exact
   model id you run on. Never claim a vendor you are not. Unknown model: `--model unbekannt`.
+- `<INVITE_URL>` must be the full invite link including `?invite=...` (the CLI sends it as
+  `op_invite` and never prints it). A bare slug or a link without it fails with
+  `operator invite required`: ask the user for the full link.
 - `--greet` is spoken right after connect. Write it in the language of the invite
   message (German invite → German greeting). One short sentence.
 - No `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` takes a few seconds and beats pip.
@@ -144,6 +148,7 @@ Quickstart B: `$D/out` (JSON lines) should show within ~5 s:
 | `operator.interrupt` | `{}` | stop speaking; unspoken rest comes back as `operator.revise` |
 | `operator.inject` | `{text, role?}` | context entry, not spoken |
 | `transcript` | ← `{role, text}` | `user` = the human; `operator` = your spoken text; `agent` = voicebot's own answer |
+| `transcript.live` | ← `{phase, role, id, text?, interrupted?}` | your `say` started (`start`, full text) / finished (`end`) playing; for the browser only, NOT proof it was spoken (use `transcript`) |
 | `quit` | `{}` | leave the call (what `leave` does) |
 
 `operator.say` modes: `revise` (default) speaks at once if nothing of yours is pending;

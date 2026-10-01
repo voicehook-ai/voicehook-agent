@@ -7,13 +7,17 @@ participant. No SDK, no MCP server, no learning curve — stdin/stdout protocol.
 ## TL;DR
 
 ```bash
-uvx voicehook-agent join https://voicehook.ai/r/<slug>?go=1 --name Claude --model opus-5.5
+uvx voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name Claude --model opus-5.5
 ```
 
 - **`--name` + `--model` are mandatory** (since 0.4.0): your self-chosen display
   name and the exact model you run on. Without both, `join` exits with code 2
   and explains what to pass. The web call UI shows them in the Agent chip as
   `Name · model` (a loading ring is shown there until you have joined).
+- **Use the full invite link**, including its `?invite=<code>` part. The CLI
+  sends that code as `op_invite` on `GET /api/token` and never prints it. A bare
+  slug or a link without `?invite=` is rejected once the server enforces operator
+  invites (`403 operator invite required`); an invalid code gives `403 invalid invite`.
 - **stdout** prints incoming user + voice-ai turns as `[role] text`
 - **stdin** lines are spoken by voice-ai (TTS via Google Chirp3-HD)
 - **`/q`, `{"topic":"quit"}`, or SIGTERM/Ctrl-C** ends the session
@@ -24,7 +28,7 @@ Start `join` once in the background, then drive the call with one-shot
 commands. No FIFO, no tmux, no `sleep; tail`:
 
 ```bash
-voicehook-agent join https://voicehook.ai/r/<slug> --name Claude --model opus-5.5 --json \
+voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name Claude --model opus-5.5 --json \
   > ~/.voicehook-agent/call.log 2>&1 &
 
 voicehook-agent say "Hallo, ich bin jetzt im Call."     # speak one line
@@ -86,7 +90,7 @@ voicehook-agent leave --say "Bis bald."                 # clean exit
 ### One-shot (per-call, recommended)
 
 ```bash
-uvx voicehook-agent join https://voicehook.ai/r/<slug>?go=1 --name Claude --model opus-5.5
+uvx voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name Claude --model opus-5.5
 ```
 
 [uv](https://github.com/astral-sh/uv) downloads the package on demand. Zero state.
@@ -106,7 +110,7 @@ pipx install voicehook-agent
 Then:
 
 ```bash
-voicehook-agent join https://voicehook.ai/r/<slug>?go=1 --name Claude --model opus-5.5
+voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name Claude --model opus-5.5
 ```
 
 ## Agent-skill registration
@@ -161,6 +165,7 @@ stdin (JSONL):
 | Topic              | Direction | Purpose                                |
 |--------------------|-----------|----------------------------------------|
 | `transcript`        | in        | Live turns, `role` = `user` / `operator` (your `operator.say`, after it was spoken) / `agent` (voice-ai's own answer) |
+| `transcript.live`   | in        | `{phase, role, id, text?, interrupted?}`: your `say` started (`start`, full text) / finished (`end`) playing; for the browser only, NOT proof it was spoken (use `transcript`) |
 | `_wake`             | out*      | Wake marker on each finalized user-turn (#12) |
 | `_meta`             | out*      | Connection / room-state events         |
 | `operator.say`        | out       | TTS push; tagged `_seq`/`_ts` (#9). `mode`: `revise` (default: if unspoken text is pending the agent stops and answers with `operator.revise`), `overwrite` (your merged answer), `append` (queue) |
