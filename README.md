@@ -188,6 +188,28 @@ Hardening flags (0.2.0) for unattended / background relay operation:
 | `--idle-say <text>` | 0.5.0 | Announcement before an idle leave (`''` = silent). |
 | `--force-persona` | 0.5.0 | Push persona/mode/graph even if another operator agent is in the room. |
 | `--no-control` | 0.5.0 | No local control socket (`say`/`next`/`leave`/`status` off). |
+| `--transport auto\|webrtc\|bridge` | 0.6.0 | How to reach the room. `auto` (default): WebRTC; the HTTPS bridge when `HTTPS_PROXY`/`ALL_PROXY` is set or the WebRTC connect fails/times out (one retry, logged). See below. |
+
+### HTTPS bridge (0.6.0): cloud sandboxes and proxy networks
+
+Some environments (claude.ai/code cloud sessions, corporate networks) only allow HTTPS
+through an HTTP CONNECT proxy. libwebrtc does not use that proxy, so the WebRTC join
+fails with `wait_pc_connection timed out`. The voicehook server then joins the room for
+you (same token and `vh.*` attributes as a WebRTC join) and relays the data channel over
+plain HTTPS: `POST /api/bridge/join|send|leave` up, Server-Sent Events
+(`GET /api/bridge/events`) down, the session key only in an `Authorization: Bearer`
+header. The HTTP client honours `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`/`NO_PROXY`.
+
+- `--transport auto` (default): proxy in the env -> bridge right away
+  (`{"text": "transport=bridge (auto: HTTPS_PROXY is set ...)", "topic": "_meta"}`);
+  otherwise WebRTC, and on a failed connect one retry via the bridge
+  (`webrtc connect failed or timed out; retrying once via the HTTPS bridge`).
+- `--transport webrtc` / `--transport bridge` force one.
+- Everything else is identical: `--json` stream, FIFO/stdin input, `say`/`next`/`leave`/
+  `status`, idle and persona guard (both still run in the CLI).
+- No install possible at all (installs blocked)? The bridge also works with plain curl,
+  see Quickstart A in [SKILL.md](SKILL.md) and the endpoint table in
+  [OPERATOR-PROTOCOL.md](https://github.com/voicehook-ai/voicehook-v4/blob/main/docs/OPERATOR-PROTOCOL.md#https-bridge-no-webrtc-no-install).
 
 ### Wake marker (JSON mode)
 
@@ -241,6 +263,7 @@ Reference: [voicehook-v4 docs/OPERATOR-PROTOCOL.md](https://github.com/voicehook
 |------------------------|-------------------------|----------------------------------|
 | `VOICEHOOK_API_BASE`   | `https://voicehook.ai`  | Token-mint endpoint base URL     |
 | `VOICEHOOK_AGENT_HOME` | `~/.voicehook-agent`    | Root of the session dirs (control sockets) |
+| `HTTPS_PROXY` / `ALL_PROXY` | unset              | Set -> `--transport auto` uses the HTTPS bridge; also used by the HTTP client |
 
 ## License
 

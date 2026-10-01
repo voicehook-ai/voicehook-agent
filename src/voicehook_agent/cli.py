@@ -28,6 +28,12 @@ Relay-hardening flags (see PR "Relay hardening …"):
     --strict-relay                   inject a strict-relay persona at connect   (#8)
     --graph <file>                   optional live-context seed (stdin updates live)
     --graph-interval <sec>           cadence of the live-context push (default 60)
+
+Transport (0.6.0):
+    --transport auto|webrtc|bridge   auto (default): WebRTC, but the HTTPS bridge
+                                     when HTTPS_PROXY/ALL_PROXY is set or WebRTC
+                                     fails to connect (cloud sandboxes). Output,
+                                     say/next/leave and the FIFO stay identical.
 """
 from __future__ import annotations
 
@@ -48,6 +54,7 @@ from livekit import rtc
 
 from . import __version__, relay
 from . import session as vsession
+from . import transport as vtransport
 
 _SLUG_RX = re.compile(r"^[a-z]+-[a-z]+-[a-z]+-[A-Z0-9]{4,8}$")
 _VERSION = __version__
@@ -91,6 +98,13 @@ def _parse_invite(url: str) -> tuple[str, str]:
         raise ValueError(f"no valid room slug in URL path: {parsed.path}")
     base = f"{parsed.scheme}://{parsed.netloc}"
     return base, m.group(1)
+
+
+def _invite_code(url: str) -> str | None:
+    """HMAC `?invite=` of an invite URL (the bridge verifies it), else None."""
+    from urllib.parse import parse_qs
+    q = parse_qs(urlparse(url).query or "")
+    return (q.get("invite") or [None])[0]
 
 
 async def _mint_token(api_base: str, slug: str, identity: str,
@@ -547,17 +561,26 @@ async def _connect_and_listen(
     model: str | None = None,
     ctl: _Control | None = None,
     force_persona: bool = False,
+    transport: str = "webrtc",
+    invite: str | None = None,
+    connect_timeout: float = 45.0,
 ) -> tuple[int, str | None]:
     """One connect→listen cycle. Returns (rc, disconnect_reason_name).
     disconnect_reason_name is None for a clean stdin-driven quit; otherwise the
     LK reason that ended the cycle (used by the reconnect loop in #6)."""
-    try:
-        tok = await _mint_token(api_base, slug, ident, name=agent_name, model=model)
-    except httpx.HTTPError as e:
-        print(f"[error] token mint failed: {e!r}", file=sys.stderr)
-        return 3, "TOKEN_MINT_FAILED"
-
-    room = rtc.Room()
+    tok: dict | None = None
+    if transport == "bridge":
+        # Server joins for us over HTTPS (same token/attributes as /api/token?invite=1).
+        room = vtransport.BridgeRoom(api_base, slug, ident, name=agent_name or "agent",
+                                     model=model or "unbekannt", invite=invite,
+                                     user_agent=_USER_AGENT)
+    else:
+        try:
+            tok = await _mint_token(api_base, slug, ident, name=agent_name, model=model)
+        except httpx.HTTPError as e:
+            print(f"[error] token mint failed: {e!r}", file=sys.stderr)
+            return 3, "TOKEN_MINT_FAILED"
+        room = rtc.Room()
     stop = asyncio.Event()
     turn_event = asyncio.Event()  # set on finalized user-turn → graph re-sync
     disconnect_reason: dict[str, str | None] = {"name": None}
@@ -671,9 +694,17 @@ async def _connect_and_listen(
     room.on("disconnected", _on_disconnected)
 
     try:
-        await room.connect(tok["url"], tok["token"])
+        if tok is None:
+            await room.connect()
+        else:
+            await asyncio.wait_for(room.connect(tok["url"], tok["token"]), timeout=connect_timeout)
     except Exception as e:
-        print(f"[error] livekit connect failed: {e!r}", file=sys.stderr)
+        what = "bridge" if transport == "bridge" else "livekit"
+        print(f"[error] {what} connect failed: {e!r}", file=sys.stderr)
+        try:
+            await room.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
         return 4, "CONNECT_FAILED"
 
     _print_event(
@@ -879,6 +910,7 @@ async def _join(
     idle_say: str | None = DEFAULT_IDLE_SAY,
     force_persona: bool = False,
     control: bool = True,
+    transport: str = "auto",
 ) -> int:
     missing = _missing_self_report(agent_name, model)
     if missing:
@@ -913,6 +945,9 @@ async def _join(
 
     _print_event(json_mode, "system",
                  f"connecting room={slug} as identity={ident} via {api_base}", topic="_meta")
+    cur_transport, why = vtransport.initial_transport(transport)
+    _print_event(json_mode, "system", f"transport={cur_transport} ({why})", topic="_meta")
+    invite = _invite_code(invite_url)
 
     # Shared state across reconnect cycles (#6): the notifier dedup, echo ring,
     # and say-seq counter persist so we don't re-wake on the same turn after a
@@ -985,7 +1020,15 @@ async def _join(
                 graph=graph, graph_interval=graph_interval,
                 strict=strict, agent_name=agent_name, model=model,
                 ctl=ctl, force_persona=force_persona,
+                transport=cur_transport, invite=invite,
             )
+            if first and vtransport.should_fallback(transport, cur_transport, reason):
+                cur_transport = "bridge"
+                msg = ("webrtc connect failed or timed out; retrying once via the HTTPS "
+                       "bridge (transport=bridge)")
+                _print_event(json_mode, "system", msg, topic="_meta")
+                print(f"[warn] {msg}", file=sys.stderr, flush=True)
+                continue
             first = False
             # Clean quit (stdin /q or {"topic":"quit"}): reason is None.
             if reason is None:
@@ -1249,6 +1292,10 @@ def main(argv: list[str] | None = None) -> None:
         help="what voice-ai says before an idle-timeout leave ('' = leave silently).",
     )
     p_join.add_argument(
+        "--transport", choices=vtransport.TRANSPORTS, default="auto",
+        help="auto (default): WebRTC, switch to the HTTPS bridge when HTTPS_PROXY/ALL_PROXY is set or WebRTC fails to connect. webrtc / bridge force one.",
+    )
+    p_join.add_argument(
         "--no-control", action="store_true", default=False,
         help="do not open the local control socket (disables say/next/leave/status).",
     )
@@ -1315,6 +1362,7 @@ def main(argv: list[str] | None = None) -> None:
                 idle_timeout=max(0.0, args.idle_timeout) * 60.0,
                 idle_say=args.idle_say or None,
                 force_persona=args.force_persona, control=not args.no_control,
+                transport=args.transport,
             ))
         except KeyboardInterrupt:
             rc = 130
