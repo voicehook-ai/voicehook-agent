@@ -18,6 +18,65 @@ uvx voicehook-agent join https://voicehook.ai/r/<slug>?go=1 --name Claude --mode
 - **stdin** lines are spoken by voice-ai (TTS via Google Chirp3-HD)
 - **`/q`, `{"topic":"quit"}`, or SIGTERM/Ctrl-C** ends the session
 
+## Agent loop without polling (0.5.0)
+
+Start `join` once in the background, then drive the call with one-shot
+commands. No FIFO, no tmux, no `sleep; tail`:
+
+```bash
+voicehook-agent join https://voicehook.ai/r/<slug> --name Claude --model opus-5.5 --json \
+  > ~/.voicehook-agent/call.log 2>&1 &
+
+voicehook-agent say "Hallo, ich bin jetzt im Call."     # speak one line
+voicehook-agent next --timeout 60                       # blocks until the user said something
+# {"ok": true, "type": "user", "role": "user", "text": "Wie geht's?", "ts": 1.0, "pending": 0}
+voicehook-agent say "Gut, danke. Woran arbeiten wir?"
+voicehook-agent next --timeout 60
+voicehook-agent leave --say "Bis bald."                 # clean exit
+```
+
+| Command | Output (one JSON line) | Exit |
+|---|---|---|
+| `say <text> [--mode revise\|overwrite\|append]` | `{"ok":true,"seq":3}` | 0 ok, 1 failed |
+| `next [--timeout SEC]` | `{"type":"user","text":...}`, `{"type":"revise","text":...,"unspoken":[...]}` (answer with `say --mode overwrite`), `{"type":"timeout"}`, `{"type":"ended"}` | 0, 3 on `ended` |
+| `leave [--say TEXT]` | `{"type":"leaving"}` | 0 |
+| `status` | room, identity, connected, pending events, idle seconds, peers | 0 |
+
+- `next` returns ONE event, oldest first; `pending` says how many more are queued.
+  Turns spoken while you were thinking are kept, never lost. `--timeout 0` only
+  returns what is already queued. Each event carries `ts` (unix time it was
+  spoken).
+- Queueing starts with your first `say` or `next`. Turns spoken before that are
+  not queued (a stdout/FIFO-only agent never piles up a backlog), and the queue
+  keeps at most the 200 newest events.
+- The commands find the running join on their own (they wait up to `--wait 30`
+  seconds for it to come up, so `say` right after starting `join` works). With
+  several joins on one machine they list them and ask for
+  `--session <slug>/<identity>` (a slug alone is enough when only one join runs
+  in that room). No running join = exit 3.
+- Transport: one Unix socket per join at
+  `~/.voicehook-agent/sessions/<slug>/<identity>/ctl.sock` (mode 0600; override
+  the root with `VOICEHOOK_AGENT_HOME`). Several agents can join the same room
+  from one machine. If that path is too long for a Unix socket it moves to
+  `/tmp/voicehook-agent-<uid>/<hash>.sock`; that directory must be a real
+  directory (no symlink) owned by you with mode 0700, otherwise `join` and the
+  commands refuse it. A second `join` with the SAME identity into the same room
+  exits 2 with a hint (`leave --session <slug>/<identity>` first, a different
+  `--name`/`--identity`, or `--no-control`). `--no-control` turns the socket off;
+  stdin/FIFO keeps working as before.
+- **Orphan guard:** `join` leaves by itself when the agent sent no `say`/`next`
+  (or stdin line) for `--idle-timeout` minutes (default 10, `0` = off). A blocked
+  `next` counts as alive. Before leaving voice-ai says `--idle-say` (German default,
+  `''` = silent). SIGTERM/SIGHUP also leave cleanly; under `nohup` (SIGHUP
+  ignored) closing the terminal does not end the call.
+- **Persona guard:** if another operator agent is already in the room (LiveKit
+  attribute `vh.role=agent`, set by the server for every operator token), `join`
+  does NOT push `--persona`/`--persona-file`/`--strict-relay`/`--graph`; it says so
+  on stdout (`_meta`) and stderr. `--force-persona` overrides. An explicit
+  `{"topic":"operator.persona"}` on stdin is still sent as you wrote it.
+- Speak the language of the call: answer in the language the user speaks
+  (the auto-greet is German).
+
 > Since 0.2.0, `--keep-alive` is the default: **stdin-EOF no longer quits** and
 > transient room-disconnects auto-reconnect. Run with a closed stdin in the
 > background without the FIFO sleep-holder hack. See [Relay flags](#relay-flags).
@@ -31,6 +90,10 @@ uvx voicehook-agent join https://voicehook.ai/r/<slug>?go=1 --name Claude --mode
 ```
 
 [uv](https://github.com/astral-sh/uv) downloads the package on demand. Zero state.
+Until the package is on PyPI use
+`uvx --from git+https://github.com/voicehook-ai/voicehook-agent voicehook-agent ...`.
+Runtime dependencies are only `livekit` and `httpx`; Python >= 3.10, Linux/macOS
+(the control socket is a Unix socket).
 
 ### Persistent (one-time install)
 
@@ -121,6 +184,10 @@ Hardening flags (0.2.0) for unattended / background relay operation:
 | `--suppress-echo` | #10 | Drop the agent's own relayed TTS (role=agent transcript matching a recent `operator.say`) from the stdout stream. voicehook v4 marks that echo as `role=operator`, so the flag currently has no effect there. |
 | `--say-ttl <sec>` | #9 | Drop a `operator.say` older than `<sec>` seconds, or superseded by a newer user-turn, instead of speaking it stale. |
 | `--strict-relay` | #8 | Inject a bundled strict-relay persona at connect: the voicebot speaks **only** pushed text and never self-generates. Reuses `--persona-file` semantics; overridden by `--persona`/`--persona-file`. |
+| `--idle-timeout <min>` | 0.5.0 | Leave when the agent sent no `say`/`next`/stdin line for `<min>` minutes (default 10, `0` off). |
+| `--idle-say <text>` | 0.5.0 | Announcement before an idle leave (`''` = silent). |
+| `--force-persona` | 0.5.0 | Push persona/mode/graph even if another operator agent is in the room. |
+| `--no-control` | 0.5.0 | No local control socket (`say`/`next`/`leave`/`status` off). |
 
 ### Wake marker (JSON mode)
 
@@ -173,6 +240,7 @@ Reference: [voicehook-v4 docs/OPERATOR-PROTOCOL.md](https://github.com/voicehook
 | Variable               | Default                 | Purpose                          |
 |------------------------|-------------------------|----------------------------------|
 | `VOICEHOOK_API_BASE`   | `https://voicehook.ai`  | Token-mint endpoint base URL     |
+| `VOICEHOOK_AGENT_HOME` | `~/.voicehook-agent`    | Root of the session dirs (control sockets) |
 
 ## License
 
