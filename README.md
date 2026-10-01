@@ -118,7 +118,7 @@ Hardening flags (0.2.0) for unattended / background relay operation:
 | `--keep-alive` / `--no-keep-alive` | #6 | stdin-EOF does **not** quit; auto-reconnect (exp. backoff, cap 30s) on transient disconnect until the host leaves / room closes / `/q` / SIGTERM. Default: on. |
 | `--notify-url <url>` | #12 | POST `{role,text,room,timestamp}` to `<url>` on each finalized user-turn. |
 | `--wake-only-user` / `--wake-all` | #12 | Only role=user wakes (default); `--wake-all` also wakes on agent turns (debug). |
-| `--suppress-echo` | #10 | Drop the agent's own relayed TTS (role=agent transcript matching a recent `operator.say`) from the stdout stream. voicehook v4 marks that echo as `role=operator`, so the flag currently has no effect there. |
+| `--suppress-echo` | #10 | Drop the echo of your own `operator.say` from the stdout stream: a `role=operator` (voicehook v4) or `role=agent` transcript that matches a say sent in the last 60s. Matching is tolerant (case, punctuation, live-mode rephrasing, interrupted prefix). Note: with the flag on you no longer see the `operator` line as proof that your push was spoken. |
 | `--say-ttl <sec>` | #9 | Drop a `operator.say` older than `<sec>` seconds, or superseded by a newer user-turn, instead of speaking it stale. |
 | `--strict-relay` | #8 | Inject a bundled strict-relay persona at connect: the voicebot speaks **only** pushed text and never self-generates. Reuses `--persona-file` semantics; overridden by `--persona`/`--persona-file`. |
 

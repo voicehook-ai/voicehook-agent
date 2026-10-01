@@ -117,6 +117,50 @@ def test_echo_disabled_passes_everything():
     assert e.should_suppress("agent", "foo") is False
 
 
+def test_echo_suppresses_v4_operator_role():
+    # voicehook v4 sends the echo of our own operator.say as role=operator.
+    e = relay.EchoSuppressor(enabled=True)
+    e.record_sent("Hallo Olli, hier ist Claude.")
+    assert e.should_suppress("operator", "Hallo Olli, hier ist Claude.") is True
+
+
+def test_echo_tolerates_live_mode_rephrasing():
+    # Gemini live mode rephrases slightly: punctuation, filler, word order.
+    e = relay.EchoSuppressor(enabled=True)
+    e.record_sent("Hallo Olli, hier ist Claude. Wie kann ich helfen?", now=100.0)
+    assert e.should_suppress(
+        "operator", "Hallo Olli, hier ist Claude! Wie kann ich dir helfen?", now=102.0
+    ) is True
+
+
+def test_echo_tolerates_interrupted_prefix():
+    # interrupted say: only the spoken prefix comes back.
+    e = relay.EchoSuppressor(enabled=True)
+    e.record_sent("Ich schaue kurz nach und melde mich gleich mit dem Ergebnis.", now=100.0)
+    assert e.should_suppress("operator", "Ich schaue kurz nach und", now=101.0) is True
+
+
+def test_echo_does_not_suppress_unrelated_operator_text():
+    e = relay.EchoSuppressor(enabled=True)
+    e.record_sent("Hallo Olli, hier ist Claude.", now=100.0)
+    assert e.should_suppress("operator", "Das Wetter in Berlin ist heute sonnig.", now=101.0) is False
+    # the sent text is still pending and matches its real echo afterwards
+    assert e.should_suppress("operator", "Hallo Olli, hier ist Claude.", now=102.0) is True
+
+
+def test_echo_outside_ttl_window_passes():
+    e = relay.EchoSuppressor(enabled=True, ttl=30.0)
+    e.record_sent("Hallo Olli, hier ist Claude.", now=100.0)
+    assert e.should_suppress("operator", "Hallo Olli, hier ist Claude.", now=131.0) is False
+
+
+def test_echo_consumes_operator_match():
+    e = relay.EchoSuppressor(enabled=True)
+    e.record_sent("repeat me please", now=100.0)
+    assert e.should_suppress("operator", "repeat me please", now=101.0) is True
+    assert e.should_suppress("operator", "repeat me please", now=102.0) is False
+
+
 # --------------------------------------------------------------------------- #
 # #9 — SayTracker
 # --------------------------------------------------------------------------- #

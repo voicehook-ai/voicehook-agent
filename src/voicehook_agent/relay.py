@@ -5,7 +5,7 @@ dependency so they can be unit-tested in isolation:
 
   * LineBuffer       — newline-tolerant stdin splitting (#11)
   * TurnNotifier      — finalized-user-turn dedup + role filtering (#12)
-  * EchoSuppressor    — drop our own relayed TTS on the operator stream (#10)
+  * EchoSuppressor    - drop our own relayed TTS echo (role operator/agent) (#10)
   * SayTracker        — seq/timestamp tagging + TTL / supersede drop (#9)
   * backoff_delays    — reconnect backoff schedule (#6)
 
@@ -14,6 +14,7 @@ Keeping these here means a test suite can exercise the tricky edge cases
 """
 from __future__ import annotations
 
+import difflib
 import hashlib
 import time
 from dataclasses import dataclass, field
@@ -143,40 +144,71 @@ class TurnNotifier:
 # #10 — echo suppression
 # --------------------------------------------------------------------------- #
 class EchoSuppressor:
-    """Suppresses the operator-stream echo of text we just pushed via operator.say.
+    """Suppresses the transcript echo of text we just pushed via operator.say.
 
-    When ``--suppress-echo`` is on, an incoming ``role=agent`` transcript whose
-    text matches something we recently sent is dropped (it's our own relayed
-    TTS coming back). A small ring of recent sends is kept; matches are
-    consumed so a genuine repeat later still shows.
+    When ``--suppress-echo`` is on, an incoming transcript with ``role=operator``
+    (voicehook v4 marks our spoken operator.say like that) or ``role=agent``
+    (older servers) whose text matches something we sent within the last
+    ``ttl`` seconds is dropped: it is our own relayed TTS coming back.
+
+    The comparison is tolerant because the echo is not always verbatim:
+      * the live model (Gemini) may rephrase the sentence slightly,
+      * an interrupted say only echoes the part that was actually spoken.
+    Texts are normalized (case, punctuation, whitespace) and then match on
+    equality, on a prefix relation (interrupt) or on a similarity ratio.
+    Matches are consumed so a genuine repeat later still shows.
     """
 
-    def __init__(self, enabled: bool, window: int = 16) -> None:
+    ROLES = frozenset({"operator", "agent"})
+
+    def __init__(self, enabled: bool, window: int = 16, ttl: float = 60.0,
+                 min_ratio: float = 0.75, min_prefix_chars: int = 12) -> None:
         self.enabled = enabled
         self._window = window
-        self._recent: list[str] = []
+        self.ttl = ttl
+        self.min_ratio = min_ratio
+        self.min_prefix_chars = min_prefix_chars
+        self._recent: list[tuple[str, float]] = []
 
     @staticmethod
     def _norm(text: str) -> str:
-        return " ".join((text or "").split()).lower()
+        cleaned = "".join(ch if ch.isalnum() else " " for ch in (text or "").lower())
+        return " ".join(cleaned.split())
 
-    def record_sent(self, text: str) -> None:
+    def _prune(self, now: float) -> None:
+        self._recent = [(n, ts) for n, ts in self._recent if now - ts <= self.ttl]
+
+    def _matches(self, sent: str, heard: str) -> bool:
+        if sent == heard:
+            return True
+        short, long_ = (heard, sent) if len(heard) <= len(sent) else (sent, heard)
+        if len(short) >= self.min_prefix_chars and long_.startswith(short):
+            return True
+        return difflib.SequenceMatcher(None, sent, heard).ratio() >= self.min_ratio
+
+    def record_sent(self, text: str, now: float | None = None) -> None:
         if not self.enabled:
             return
         n = self._norm(text)
         if not n:
             return
-        self._recent.append(n)
+        ts = now if now is not None else time.time()
+        self._prune(ts)
+        self._recent.append((n, ts))
         if len(self._recent) > self._window:
             self._recent.pop(0)
 
-    def should_suppress(self, role: str, text: str) -> bool:
-        if not self.enabled or role != "agent":
+    def should_suppress(self, role: str, text: str, now: float | None = None) -> bool:
+        if not self.enabled or role not in self.ROLES:
             return False
         n = self._norm(text)
-        if n in self._recent:
-            self._recent.remove(n)  # consume one match
-            return True
+        if not n:
+            return False
+        self._prune(now if now is not None else time.time())
+        for i, (sent, _ts) in enumerate(self._recent):
+            if self._matches(sent, n):
+                del self._recent[i]  # consume one match
+                return True
         return False
 
 

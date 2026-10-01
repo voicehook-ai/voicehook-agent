@@ -887,7 +887,7 @@ def main(argv: list[str] | None = None) -> None:
     # #10 echo suppression
     p_join.add_argument(
         "--suppress-echo", action="store_true", default=False,
-        help="drop the agent's own relayed TTS (role=agent transcript matching a recent operator.say) from the operator stream. [#10]",
+        help="drop the echo of our own operator.say (role=operator or role=agent transcript that matches a say sent in the last 60s; tolerant to rephrasing and interrupts) from the stream. [#10]",
     )
     # #9 say TTL
     p_join.add_argument(
