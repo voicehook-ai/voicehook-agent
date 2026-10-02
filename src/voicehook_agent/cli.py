@@ -36,9 +36,11 @@ Transport (0.6.0):
                                      say/next/leave and the FIFO stay identical.
 
 Status board (0.7.0):
-    status [TEXT] [--doing T] [--open T]... [--done T]... [-f board.json]
+    status [TEXT] [--doing T] [--open T]... [--done T]... [--faq 'F::A']... [-f board.json]
                                      send operator.status {doing, open[], done[]};
                                      replaces the last board, never spoken; '' clears.
+                                     0.10.0: --faq 'Frage::Antwort' (max 6) adds faq[{q, a}]:
+                                     the user's likely next questions, answered in advance.
     next                             also yields {type:"status_request"} (the user asked
                                      what you are doing: send `status` at once) and adds
                                      status_stale / latency_warning hints.
@@ -60,6 +62,13 @@ Say receipts (0.9.0, voicebot sends operator.say_status {seq, state, spoken_char
     says                             last state of every own say (sent until the first
                                      receipt): {"type":"says","says":[{seq,state,...}]}
     join --username NAME             also sent to the server (vh.user): Delta knows the user.
+
+Activity feed (0.10.0): Delta sees what you are doing, one line per tool call.
+    hook install [--settings PATH]   add the Claude Code PostToolUse hook to settings.json
+    hook print                       print the settings.json snippet
+    hook post-tool-use               the hook itself (fast path: voicehook-agent-hook)
+                                     join publishes the newest 15 lines as operator.activity
+                                     {lines, ts}, on change, at most every 5 s.
 """
 from __future__ import annotations
 
@@ -80,6 +89,7 @@ import httpx
 from livekit import rtc
 
 from . import __version__, relay
+from . import activity as vactivity
 from . import session as vsession
 from . import transport as vtransport
 
@@ -106,6 +116,7 @@ KNOWN_OUT_TOPICS = frozenset({
     "operator.inject",
     "operator.backchannel",  # operator <-> agent silent side-channel (#10/F8)
     "operator.alive",        # 0.8.0: sign of life while the brain serves say/next
+    "operator.activity",     # 0.10.0: newest tool-call lines of the coding agent
 })
 
 
@@ -394,6 +405,11 @@ class _Control:
         self.room_ready = asyncio.Event()
         self.alive_interval = ALIVE_INTERVAL
         self.alive_window = ALIVE_WINDOW
+        # 0.10.0 activity feed: poll activity.log, publish at most once per window
+        self.activity_interval = vactivity.POLL_INTERVAL
+        self.activity_window = vactivity.PUBLISH_WINDOW
+        self.activity_lines = vactivity.PUBLISH_LINES
+        self.activity_clock = time.monotonic
         self.leaving = False
         # 0.7.0: latency_warning + status_stale; 0.9.0: status_due + hint for `next`
         self.clock = relay.TurnClock(due_s=relay.status_due_seconds())
@@ -560,6 +576,45 @@ async def _alive_loop(ctl: _Control) -> None:
         was_active = active
         try:
             await asyncio.wait_for(ctl.quit.wait(), timeout=tick)
+            return
+        except asyncio.TimeoutError:
+            pass
+
+
+async def _publish_activity(ctl: _Control, lines: list[str]) -> bool:
+    """One `operator.activity` packet {lines, ts}; best effort (never raises)."""
+    room = ctl.room
+    if room is None:
+        return False
+    payload = {"lines": lines, "ts": time.time()}
+    try:
+        await room.local_participant.publish_data(
+            json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            reliable=True, topic=vactivity.TOPIC)
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] operator.activity publish failed: {e!r}", file=sys.stderr, flush=True)
+        return False
+
+
+async def _activity_loop(ctl: _Control, path: Path) -> None:
+    """0.10.0: publish the newest `activity_lines` lines of activity.log (written by
+    the Claude Code PostToolUse hook) as `operator.activity`. Only on change, at
+    most once per `activity_window` s; a change inside the window goes out when
+    it ends (last one wins). Never crashes the join."""
+    pub = vactivity.ActivityPublisher(ctl.activity_window)
+    while not ctl.quit.is_set():
+        try:
+            pub.window = ctl.activity_window
+            lines = vactivity.read_tail(path, ctl.activity_lines)
+            now = ctl.activity_clock()
+            if ctl.room is not None and not ctl.leaving and pub.due(lines, now):
+                if await _publish_activity(ctl, lines):
+                    pub.sent(lines, now)
+        except Exception as e:  # noqa: BLE001
+            print(f"[warn] activity loop: {e!r}", file=sys.stderr, flush=True)
+        try:
+            await asyncio.wait_for(ctl.quit.wait(), timeout=max(0.01, ctl.activity_interval))
             return
         except asyncio.TimeoutError:
             pass
@@ -1274,6 +1329,7 @@ async def _join(
                                            "started": time.time()})
             _print_event(json_mode, "system",
                          f"control socket ready: {server.sock_path}", topic="_meta")
+    vactivity.clear(sess_dir)  # 0.10.0: no activity lines of a previous call leak in
     loop = asyncio.get_running_loop()
     for sig in _quit_signals():
         try:
@@ -1286,7 +1342,8 @@ async def _join(
         _print_event(json_mode, "system", f"owner guard: leaving when pid(s) {watched} end",
                      topic="_meta")
     guard_tasks = [asyncio.create_task(_owner_loop(ctl, watched, json_mode, owner_say)),
-                   asyncio.create_task(_alive_loop(ctl))]
+                   asyncio.create_task(_alive_loop(ctl)),
+                   asyncio.create_task(_activity_loop(ctl, sess_dir / vactivity.ACTIVITY_NAME))]
 
     rc = 0
     try:
@@ -1349,6 +1406,7 @@ async def _join(
             await asyncio.sleep(0.05)
             await server.close()
             vsession.remove_info(sess_dir)
+            vactivity.clear(sess_dir)
             try:
                 sess_dir.rmdir()
             except OSError:
@@ -1470,13 +1528,16 @@ def _client_request(args) -> dict:
         return {"cmd": "says"}
     if args.cmd == "leave":
         return {"cmd": "leave", "say": args.say} if args.say else {"cmd": "leave"}
-    if args.text is not None or args.doing is not None or args.open or args.done or args.file:
+    faq_raw = getattr(args, "faq", None) or []
+    if (args.text is not None or args.doing is not None or args.open or args.done or args.file
+            or faq_raw):
         file_obj = None
         if args.file:
             with open(args.file, encoding="utf-8") as fh:
                 file_obj = json.load(fh)
+        faq = relay.parse_faq(faq_raw, warn=lambda m: print(m, file=sys.stderr, flush=True))
         return {"cmd": "board", "board": relay.build_board(
-            args.text, args.doing, args.open, args.done, file_obj)}
+            args.text, args.doing, args.open, args.done, file_obj, faq=faq)}
     return {"cmd": "status"}
 
 
@@ -1635,6 +1696,10 @@ def main(argv: list[str] | None = None) -> None:
     p_status.add_argument("--doing", default=None, help="current task (same as TEXT)")
     p_status.add_argument("--open", action="append", default=[], metavar="TASK", help="open task (repeatable)")
     p_status.add_argument("--done", action="append", default=[], metavar="TASK", help="finished task (repeatable)")
+    p_status.add_argument("--faq", action="append", default=[], metavar="'FRAGE::ANTWORT'",
+                          help="0.10.0: a question the user will likely ask next + your answer, "
+                          "split on the first '::' (repeatable, max 6, 200 chars each). Sent as "
+                          "board field faq[{q, a}]; refresh it on every board update.")
     p_status.add_argument("-f", "--file", default=None, metavar="JSON",
                           help="board file {doing, open[], done[]}; flags add to it")
     _add_session(p_status)
@@ -1658,7 +1723,16 @@ def main(argv: list[str] | None = None) -> None:
                        help="Ollama request timeout (default 30).")
     p_sum.add_argument("--from-start", action="store_true", default=False,
                        help="process existing log content too (default: tail from end).")
+    # 0.10.0 activity feed (Claude Code PostToolUse hook); the fast path without the
+    # livekit import is the `voicehook-agent-hook` console script.
+    p_hook = sub.add_parser("hook", help="activity feed: Claude Code PostToolUse hook (post-tool-use | print | install [--settings PATH])")
+    p_hook.add_argument("action", choices=["post-tool-use", "print", "install"])
+    p_hook.add_argument("--settings", default=None, metavar="PATH",
+                        help="install: settings.json to merge into (default ~/.claude/settings.json)")
     args = ap.parse_args(argv)
+    if args.cmd == "hook":
+        hook_argv = [args.action] + (["--settings", args.settings] if args.settings else [])
+        sys.exit(vactivity.main(hook_argv))
     if args.cmd == "join":
         missing = _missing_self_report(args.name, args.model)
         if missing:
