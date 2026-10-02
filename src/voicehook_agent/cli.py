@@ -42,6 +42,24 @@ Status board (0.7.0):
     next                             also yields {type:"status_request"} (the user asked
                                      what you are doing: send `status` at once) and adds
                                      status_stale / latency_warning hints.
+
+Keep the board fresh (0.9.0): Delta answers the user from your board while you work.
+    next                             adds status_due:true + status_reason + hint (the exact
+                                     command) when the board is empty, a status_request is
+                                     open (that event comes first in line), or the board is
+                                     older than --status-due SEC (default 45, env
+                                     VOICEHOOK_STATUS_DUE) while doing/open is set.
+    say                              a progress line ("fertig", "live", "deploye") without a
+                                     board push since the last say returns the same hint.
+
+Say receipts (0.9.0, voicebot sends operator.say_status {seq, state, spoken_chars}):
+    say                              returns {"ok":true,"seq":N}
+    next                             adds "say_status": [{"seq":N,"state":"spoken"}, ...]
+                                     (changes since the last next) and "say_hint" when a
+                                     say sits in queued/requeued for more than 20 s.
+    says                             last state of every own say (sent until the first
+                                     receipt): {"type":"says","says":[{seq,state,...}]}
+    join --username NAME             also sent to the server (vh.user): Delta knows the user.
 """
 from __future__ import annotations
 
@@ -146,7 +164,7 @@ def _operator_invite(url: str) -> str | None:
 
 async def _mint_token(api_base: str, slug: str, identity: str,
                       name: str | None = None, model: str | None = None,
-                      op_invite: str | None = None) -> dict:
+                      op_invite: str | None = None, username: str | None = None) -> dict:
     """Calls /api/token?room=...&identity=...&invite=1 — invite=1 prevents
     a second voice-ai dispatch (voice-ai is presumably already in the room
     if a user is talking to it; we join as the additional agent participant).
@@ -169,6 +187,8 @@ async def _mint_token(api_base: str, slug: str, identity: str,
         params["model"] = model
     if op_invite:
         params["op_invite"] = op_invite
+    if username:  # 0.9.0: lands as participant attribute vh.user (Delta's core knows the user)
+        params["username"] = username
     async with httpx.AsyncClient(timeout=10.0, headers={"user-agent": _USER_AGENT}) as cli:
         r = await cli.get(url, params=params)
         if r.status_code >= 400:
@@ -375,8 +395,10 @@ class _Control:
         self.alive_interval = ALIVE_INTERVAL
         self.alive_window = ALIVE_WINDOW
         self.leaving = False
-        self.clock = relay.TurnClock()  # 0.7.0: latency_warning + status_stale for `next`
+        # 0.7.0: latency_warning + status_stale; 0.9.0: status_due + hint for `next`
+        self.clock = relay.TurnClock(due_s=relay.status_due_seconds())
         self.agent_said = relay.AgentSaid()  # 0.7.0: Delta's own lines for `next`
+        self.say_status = relay.SayStatus()  # 0.9.0: operator.say_status per own say
 
     def attach(self, room: rtc.Room) -> None:
         self.room = room
@@ -429,11 +451,14 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
             if mode not in _SAY_MODES:
                 return {"ok": False, "error": f"mode must be one of {_SAY_MODES}"}
             extra["mode"] = mode
-        ctl.clock.said()
+        nudge = ctl.clock.said(text=text)  # 0.9.0: progress said, board older -> hint
         room = await ctl.wait_room(10.0)
         if room is None:
             return {"ok": False, "error": "not connected to the room (yet)"}
-        return await _publish_say(room, text, extra, ctl.say_tracker, ctl.echo)
+        res = await _publish_say(room, text, extra, ctl.say_tracker, ctl.echo)
+        if res.get("ok"):
+            ctl.say_status.sent(res["seq"], text)
+        return {**res, **nudge} if res.get("ok") else res
     if cmd == "board":
         ctl.watchdog.touch()
         board = req.get("board")
@@ -444,7 +469,7 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
             return {"ok": False, "error": "not connected to the room (yet)"}
         data = json.dumps(board, ensure_ascii=False).encode("utf-8")
         await room.local_participant.publish_data(data, reliable=True, topic="operator.status")
-        ctl.clock.board()
+        ctl.clock.board(board=board)
         return {"ok": True, "type": "board", "board": board}
     if cmd == "next":
         try:
@@ -463,6 +488,7 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         hints = ctl.clock.hints()
         if ev is None or ev.get("type") != "ended":
             hints.update(ctl.agent_said.take())
+            hints.update(ctl.say_status.take())
         if ev is None:
             return {"ok": True, "type": "timeout", "pending": 0, **hints}
         if ev.get("type") == "user":
@@ -481,6 +507,9 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
                 print(f"[error] leave say failed: {e!r}", file=sys.stderr, flush=True)
         ctl.quit.set()
         return {"ok": True, "type": "leaving"}
+    if cmd == "says":
+        return {"ok": True, "type": "says", "says": ctl.say_status.table(),
+                **({"say_hint": h} if (h := ctl.say_status.stuck()) else {})}
     if cmd == "status":
         room = ctl.room
         peers = []
@@ -782,6 +811,7 @@ async def _connect_and_listen(
     transport: str = "webrtc",
     invite: str | None = None,
     connect_timeout: float = 45.0,
+    username: str | None = None,
 ) -> tuple[int, str | None]:
     """One connect→listen cycle. Returns (rc, disconnect_reason_name).
     disconnect_reason_name is None for a clean stdin-driven quit; otherwise the
@@ -791,11 +821,11 @@ async def _connect_and_listen(
         # Server joins for us over HTTPS (same token/attributes as /api/token?invite=1).
         room = vtransport.BridgeRoom(api_base, slug, ident, name=agent_name or "agent",
                                      model=model or "unbekannt", invite=invite,
-                                     user_agent=_USER_AGENT)
+                                     user_agent=_USER_AGENT, username=username)
     else:
         try:
             tok = await _mint_token(api_base, slug, ident, name=agent_name, model=model,
-                                    op_invite=invite)
+                                    op_invite=invite, username=username)
         except TokenMintError as e:
             if e.status == 403 and "operator invite required" in e.detail.lower():
                 print(OPERATOR_INVITE_REQUIRED_ERROR, file=sys.stderr, flush=True)
@@ -855,11 +885,18 @@ async def _connect_and_listen(
         elif topic.startswith("operator."):
             if topic == "operator.revise" and ctl is not None:
                 ctl.events.put_nowait(relay.revise_event(payload))
+            elif topic == "operator.say_status":
+                if ctl is not None:
+                    ctl.say_status.update(payload)
             elif topic == "operator.status_request" and ctl is not None:
-                ctl.events.put_nowait(relay.status_request_event(payload))
+                # 0.9.0: first in line for `next`, status_due until the next board
+                ctl.events.put_front_nowait(relay.status_request_event(payload))
+                ctl.clock.requested()
             sender = getattr(pkt.participant, "identity", "?") if pkt.participant else "?"
-            _print_event(json_mode, "system",
-                         f"({topic} from {sender}) {payload.get('text','')}", topic=topic)
+            line = payload.get("text", "")
+            if topic == "operator.say_status":
+                line = f"seq={payload.get('seq')} state={payload.get('state')}"
+            _print_event(json_mode, "system", f"({topic} from {sender}) {line}", topic=topic)
 
     room.on("data_received", _on_data)
 
@@ -1147,6 +1184,7 @@ async def _join(
     force_persona: bool = False,
     control: bool = True,
     transport: str = "auto",
+    status_due: float | None = None,
 ) -> int:
     missing = _missing_self_report(agent_name, model)
     if missing:
@@ -1204,6 +1242,8 @@ async def _join(
 
     # Local control socket for `say` / `next` / `leave` / `status` + idle guard.
     ctl = _Control(slug, ident, say_tracker, echo, idle_timeout)
+    if status_due is not None:
+        ctl.clock.due_s = status_due
     server: vsession.ControlServer | None = None
     sess_dir = vsession.session_dir(slug, ident)
     if control and hasattr(asyncio, "start_unix_server"):
@@ -1262,7 +1302,7 @@ async def _join(
                 graph=graph, graph_interval=graph_interval,
                 strict=strict, agent_name=agent_name, model=model,
                 ctl=ctl, force_persona=force_persona,
-                transport=cur_transport, invite=invite,
+                transport=cur_transport, invite=invite, username=username,
             )
             if first and vtransport.should_fallback(transport, cur_transport, reason):
                 cur_transport = "bridge"
@@ -1426,6 +1466,8 @@ def _client_request(args) -> dict:
         return req
     if args.cmd == "next":
         return {"cmd": "next", "timeout": args.timeout}
+    if args.cmd == "says":
+        return {"cmd": "says"}
     if args.cmd == "leave":
         return {"cmd": "leave", "say": args.say} if args.say else {"cmd": "leave"}
     if args.text is not None or args.doing is not None or args.open or args.done or args.file:
@@ -1475,7 +1517,7 @@ def main(argv: list[str] | None = None) -> None:
     p_join.add_argument("--identity", default=None, help="explicit full identity (overrides --name)")
     p_join.add_argument("--model", default=None, help="REQUIRED. Self-report: the exact model you run on (e.g. 'opus-5.5', 'deepseek-v4-pro'). Shown in the web Agent chip.")
     p_join.add_argument("--topic", default=None, help="self-report: what the call is about (<=5 words), spoken as 'wir waren gerade dabei {topic}'.")
-    p_join.add_argument("--username", default=None, help="the host's name, spoken in the salutation ('Hallo {username},'). Omitted if unknown.")
+    p_join.add_argument("--username", default=None, help="the user's first name: spoken in the salutation ('Hallo {username},') and, since 0.9.0, sent to the server (token `username=` / bridge join `username`) so the voicebot knows whom it talks to (participant attribute vh.user). Omitted if unknown.")
     p_join.add_argument("--prompt", default=None, help="extra sentence appended after the auto-greet.")
     p_join.add_argument("--greet", default=None, help="full custom greeting (overrides the composed template).")
     p_join.add_argument("--no-greet", action="store_true", default=False, help="disable the auto-greet entirely.")
@@ -1556,6 +1598,10 @@ def main(argv: list[str] | None = None) -> None:
         help="auto (default): WebRTC, switch to the HTTPS bridge when HTTPS_PROXY/ALL_PROXY is set or WebRTC fails to connect. webrtc / bridge force one.",
     )
     p_join.add_argument(
+        "--status-due", type=float, default=None, metavar="SEC",
+        help=f"`next` adds status_due + hint when your board is older than SEC seconds while work is in progress (default {relay.STATUS_DUE_S:g}, env {relay.STATUS_DUE_ENV}; 0 = age rule off). Empty board and status_request always count.",
+    )
+    p_join.add_argument(
         "--no-control", action="store_true", default=False,
         help="do not open the local control socket (disables say/next/leave/status).",
     )
@@ -1574,6 +1620,10 @@ def main(argv: list[str] | None = None) -> None:
     p_next.add_argument("--timeout", type=float, default=60.0, metavar="SEC",
                         help="give up after SEC seconds and print {\"type\":\"timeout\"} (default 60; 0 = only return what is queued).")
     _add_session(p_next)
+    p_says = sub.add_parser(
+        "says", help="last state of your own says (operator.say_status from the voicebot: "
+        "sent/queued/spoken/interrupted/requeued/replaced) as JSON")
+    _add_session(p_says)
     p_leave = sub.add_parser("leave", help="end the running join cleanly")
     p_leave.add_argument("--say", default=None, metavar="TEXT", help="goodbye line spoken before leaving")
     _add_session(p_leave)
@@ -1632,12 +1682,12 @@ def main(argv: list[str] | None = None) -> None:
                 idle_say=args.idle_say or None,
                 owner_pids=args.owner_pid,
                 force_persona=args.force_persona, control=not args.no_control,
-                transport=args.transport,
+                transport=args.transport, status_due=args.status_due,
             ))
         except KeyboardInterrupt:
             rc = 130
         sys.exit(rc)
-    if args.cmd in ("say", "next", "leave", "status"):
+    if args.cmd in ("say", "next", "says", "leave", "status"):
         sys.exit(_run_client(args))
     if args.cmd == "log-summary":
         try:

@@ -59,6 +59,8 @@ tool calls, so every later call uses the absolute wrapper, e.g. `/tmp/vh-ab12cd/
 
 - `--name` / `--model` are mandatory (exit 2 without them): your real name and the exact
   model id you run on. Never claim a vendor you are not. Unknown model: `--model unbekannt`.
+- `--username <Vorname>` (optional, CLI 0.9.0 sends it to the server as `vh.user`): Delta knows
+  whom it talks to and addresses the user directly.
 - `<INVITE_URL>` must be the full invite link including `?invite=...` (the CLI sends it as
   `op_invite` and never prints it). A bare slug or a link without it fails with
   `operator invite required`: ask the user for the full link.
@@ -78,13 +80,15 @@ tool calls, so every later call uses the absolute wrapper, e.g. `/tmp/vh-ab12cd/
 ```
 
 `next` prints ONE JSON line (exit 3 once the call is over), with `agent_said` = Delta's own lines
-since the last `next`, `status_stale: true` = resend your board:
+since the last `next`, `status_stale: true` = resend your board, `status_due: true` + `hint` (CLI
+0.9.0) = run the command in `hint` NOW, before anything else, `say_status` = what Delta did with
+your says (`vh says` = all), `say_hint` = a say waits > 20 s:
 
 | `type` | meaning | do |
 |---|---|---|
 | `user` | `text` = what the user just said | answer with one `say` |
 | `revise` | your `say` overlapped unspoken text | merge, `say --mode overwrite "…"` within 8 s |
-| `status_request` | the user asked what you are doing | send `vh status` at once (below) |
+| `status_request` | the user asked what you are doing (comes first in line, CLI 0.9.0) | send `vh status` at once (below) |
 | `timeout` | 60 s silence (`--timeout SEC`) | call `next` again |
 | `ended` | the call is over | stop, the join already left |
 
@@ -99,7 +103,19 @@ since the last `next`, `status_stale: true` = resend your board:
   edits, builds, lookups) goes to a background agent/subtask; meanwhile `say` a short holding line
   and `status` the board. Answer each turn within ~3 s (`next` warns: `latency_warning`).
 - Status board (CLI 0.7.0): on every task change `vh status --doing "baut den Fix" --open "Tests"
-  --done "Analyse"` (whole board, replaces the last, never spoken); `vh status ""` when finished.
+  --done "Analyse"` (whole board, replaces the last, never spoken).
+
+### Statusboard dicht halten (CLI 0.9.0)
+
+Delta answers the user from your board while you work in the background. Stale board = wrong answer.
+- Set the board on EVERY request, delegation, result and deploy step, not only on task change.
+- `doing` = interim state + ETA, one sentence, max 120 chars ("deployt den Worker, ETA 2 min").
+- `next` adds `status_due: true` + `status_reason` (`empty`, `status_request`, `stale` = older than
+  45 s while `doing`/`open` is set, `--status-due SEC` / env `VOICEHOOK_STATUS_DUE`) + `hint` with the
+  exact command. Run it before your `say`.
+- A `say` with progress words ("fertig", "live", "deploye") without a board since your last `say`
+  returns `status_reason: "say_progress"`: push the board too.
+- Only ONE `say` per turn. Finished: `--done "..."` instead of `vh status ""` (empty = due).
 - Idle guard: no `say`/`next` for 10 min (`--idle-timeout MIN`, 0 = off) = join leaves, also across
   reconnects. `--owner-pid $PPID` (CLI 0.8.0) leaves as soon as your session ends; a dead FIFO holder too.
 - Sign of life (CLI 0.8.0): while you serve `next`/`say` the join sends `operator.alive` every 10 s.
@@ -156,6 +172,7 @@ Quickstart B: `$D/out` (JSON lines) should show within ~5 s:
 | `operator.interrupt` | `{}` | stop speaking; unspoken rest comes back as `operator.revise` |
 | `operator.inject` | `{text, role?}` | context entry, not spoken |
 | `operator.status` | `{doing, open[], done[]}` | your status board (`vh status`), replaces the last one, never spoken |
+| `operator.say_status` | ← `{seq, state, spoken_chars}` | CLI 0.9.0: fate of your say (`queued`/`spoken`/`interrupted`/`requeued`/`replaced`); `next` carries `say_status`, `vh says` the last state, `say_hint` = stuck > 20 s |
 | `operator.alive` | `{alive, ts, idle_s}` | sent by the CLI itself (0.8.0) every 10 s while you serve `next`/`say`; `alive:false` on leave |
 | `transcript` | ← `{role, text}` | `user` = the human; `operator` = your spoken text; `agent` = voicebot's own answer |
 | `transcript.live` | ← `{phase, role, id, text?, interrupted?}` | your `say` started (`start`, full text) / finished (`end`) playing; for the browser only, NOT proof it was spoken (use `transcript`) |

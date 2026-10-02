@@ -308,6 +308,20 @@ class EventQueue:
             if self._append(event):
                 self._cond.notify_all()
 
+    def put_front_nowait(self, event: dict) -> None:
+        """Like put_nowait, but first in line (0.9.0: status_request). An older
+        queued event of the same type is replaced, not duplicated."""
+        if not self.armed:
+            return
+        typ = event.get("type")
+        for old in [e for e in self._q if e.get("type") == typ]:
+            self._q.remove(old)
+        if len(self._q) == self._q.maxlen:
+            self.dropped += 1
+            self._q.pop()
+        self._q.appendleft(event)
+        asyncio.get_running_loop().create_task(self._notify())
+
     def put_nowait(self, event: dict) -> None:
         """Sync push from LiveKit callbacks (same loop)."""
         if self._append(event):
