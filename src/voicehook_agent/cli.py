@@ -360,6 +360,7 @@ class _Control:
         self.room: rtc.Room | None = None
         self.room_ready = asyncio.Event()
         self.clock = relay.TurnClock()  # 0.7.0: latency_warning + status_stale for `next`
+        self.agent_said = relay.AgentSaid()  # 0.7.0: Delta's own lines for `next`
 
     def attach(self, room: rtc.Room) -> None:
         self.room = room
@@ -440,6 +441,8 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         finally:
             ctl.watchdog.leave()
         hints = ctl.clock.hints()
+        if ev is None or ev.get("type") != "ended":
+            hints.update(ctl.agent_said.take())
         if ev is None:
             return {"ok": True, "type": "timeout", "pending": 0, **hints}
         if ev.get("type") == "user":
@@ -684,6 +687,8 @@ async def _connect_and_listen(
                 return
             _print_event(json_mode, role, text, topic=topic)
             # `voicehook-agent next` — queue finalized user turns.
+            if ctl is not None and role == "agent" and relay.TurnNotifier._is_final(payload):
+                ctl.agent_said.add(text)  # Delta's own answer (not an echo of our say)
             if ctl is not None:
                 ev = relay.user_turn_event(role, text, payload)
                 if ev is not None:

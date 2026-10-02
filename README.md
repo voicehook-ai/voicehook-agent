@@ -81,6 +81,10 @@ voicehook-agent leave --say "Bis bald."                 # clean exit
   `{"topic":"operator.persona"}` on stdin is still sent as you wrote it.
 - Speak the language of the call: answer in the language the user speaks
   (the auto-greet is German).
+- **Read `agent_said` (0.7.0):** `next` carries `agent_said: [..]`, the voicebot's own
+  lines since the last `next` (transcript role `agent`, never echoes of your `say`; oldest
+  first, max 3 lines / 400 chars). Never repeat what it already said; correct it in one
+  sentence if it was wrong; if it already answered fully, `say` nothing or only the missing fact.
 - **Keep the main loop free (0.7.0):** between `next` and `say` do nothing slow.
   Anything over ~3 s (shell, web, file edits, builds, lookups) goes to a background
   agent/subtask; meanwhile `say` a short holding line and `status` the board. The CLI

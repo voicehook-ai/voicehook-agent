@@ -144,3 +144,42 @@ def test_next_carries_latency_warning(monkeypatch):
     first, second = asyncio.run(go())
     assert first["type"] == "user" and "latency_warning" not in first
     assert second["type"] == "timeout" and second["latency_warning"]["seconds"] == 12.0
+
+
+# ----- agent_said: Delta's own lines since the last `next` --------------------------
+def test_agent_said_order_and_caps():
+    a = relay.AgentSaid()
+    assert a.take() == {}
+    for t in ("eins", "zwei", "drei", "vier"):
+        a.add(t)
+    assert a.take() == {"agent_said": ["zwei", "drei", "vier"]}   # max 3, oldest dropped
+    assert a.take() == {}                                         # reset after `next`
+    a.add("x" * 300)
+    a.add("y" * 300)
+    out = a.take()["agent_said"]
+    assert out == ["y" * 300] and sum(map(len, out)) <= 400       # char budget
+
+
+def test_next_carries_agent_said_without_operator_echo():
+    async def go():
+        ctl = _ctl()
+        ctl.events.arm()
+        ctl.agent_said.add("Gern geschehen!")
+        ctl.events.put_nowait({"type": "user", "role": "user", "text": "Danke", "ts": 1.0})
+        first = await cli._control_handler(ctl, {"cmd": "next", "timeout": 0})
+        second = await cli._control_handler(ctl, {"cmd": "next", "timeout": 0})
+        ctl.agent_said.add("Moment, Claude ist dran.")
+        third = await cli._control_handler(ctl, {"cmd": "next", "timeout": 0})
+        return first, second, third
+    first, second, third = asyncio.run(go())
+    assert first["type"] == "user" and first["agent_said"] == ["Gern geschehen!"]
+    assert "agent_said" not in second
+    assert third["type"] == "timeout" and third["agent_said"] == ["Moment, Claude ist dran."]
+
+
+def test_on_data_feeds_only_agent_role():
+    # cli._on_data: only transcript role=agent goes to agent_said (operator = your echo)
+    import inspect
+    src = inspect.getsource(cli)
+    assert 'role == "agent" and relay.TurnNotifier._is_final(payload)' in src
+    assert "ctl.agent_said.add(text)" in src
