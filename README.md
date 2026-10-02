@@ -71,7 +71,12 @@ voicehook-agent leave --say "Bis bald."                 # clean exit
   stdin/FIFO keeps working as before.
 - **Orphan guard:** `join` leaves by itself when the agent sent no `say`/`next`
   (or stdin line) for `--idle-timeout` minutes (default 10, `0` = off). A blocked
-  `next` counts as alive. Before leaving voice-ai says `--idle-say` (German default,
+  `next` counts as alive, but at most `--idle-timeout` long (0.8.0). The timer spans
+  reconnects: a reconnect is no sign of life. `--owner-pid PID` (0.8.0, e.g.
+  `$PPID`) leaves as soon as that process ends; `$VOICEHOOK_AGENT_HOME/holder` (the
+  FIFO holder of the skill quickstart) is watched the same way. An ended join exits
+  at once even while the FIFO holder keeps stdin open (before 0.8.0 it hung up to
+  24 h). Before leaving voice-ai says `--idle-say` (German default,
   `''` = silent). SIGTERM/SIGHUP also leave cleanly; under `nohup` (SIGHUP
   ignored) closing the terminal does not end the call.
 - **Persona guard:** if another operator agent is already in the room (LiveKit
@@ -195,6 +200,7 @@ stdin (JSONL):
 | `operator.inject`     | out       | force voice-ai to react (user-role)    |
 | `operator.backchannel`| out       | silent operator↔agent side-channel, relayed as-is (#10) |
 | `operator.status`     | out       | your status board `{doing, open[], done[]}` (0.7.0, `status` command); replaces the last one, never spoken |
+| `operator.alive`     | room      | 0.8.0: `{alive, ts, idle_s}` every 10 s while the agent serves `next`/`say` (within 15 s); nothing while orphaned; `alive:false` on leave. The web UI dims the operator after ~20 s without it |
 | `operator.status_request` | in    | the user asked what you are doing; `next` yields `{"type":"status_request"}` |
 
 *`out` here = emitted on the CLI's **stdout** (not published to the room).
@@ -212,6 +218,7 @@ Hardening flags (0.2.0) for unattended / background relay operation:
 | `--say-ttl <sec>` | #9 | Drop a `operator.say` older than `<sec>` seconds, or superseded by a newer user-turn, instead of speaking it stale. |
 | `--strict-relay` | #8 | Inject a bundled strict-relay persona at connect: the voicebot speaks **only** pushed text and never self-generates. Reuses `--persona-file` semantics; overridden by `--persona`/`--persona-file`. |
 | `--idle-timeout <min>` | 0.5.0 | Leave when the agent sent no `say`/`next`/stdin line for `<min>` minutes (default 10, `0` off). |
+| `--owner-pid <pid>` | 0.8.0 | Leave (with an announcement) as soon as `<pid>` ends, e.g. `--owner-pid $PPID`; repeatable; env `VOICEHOOK_OWNER_PID`. `$VOICEHOOK_AGENT_HOME/holder` is watched too. |
 | `--idle-say <text>` | 0.5.0 | Announcement before an idle leave (`''` = silent). |
 | `--force-persona` | 0.5.0 | Push persona/mode/graph even if another operator agent is in the room. |
 | `--no-control` | 0.5.0 | No local control socket (`say`/`next`/`leave`/`status` off). |

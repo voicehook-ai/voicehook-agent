@@ -48,7 +48,7 @@ command -v voicehook-agent || uv tool install -q $R || pip install -q --user $R
 D=$(mktemp -d /tmp/vh-XXXXXX); mkfifo $D/in; (setsid sleep 86400 >$D/in & echo $! >$D/holder)
 printf '#!/bin/sh\nexport VOICEHOOK_AGENT_HOME=%s\n[ "$1" = leave ] || exec "%s" "$@"\n"%s" "$@"; rc=$?; kill $(cat %s/holder) 2>/dev/null; exit $rc\n' \
   $D "$(command -v voicehook-agent)" "$(command -v voicehook-agent)" $D >$D/vh; chmod +x $D/vh
-(setsid nohup $D/vh join "<INVITE_URL>" --name Claude --model <your-model-id> --json --greet "Hallo, hier ist Claude. Worum geht's?" <$D/in >$D/out 2>&1 &)
+(setsid nohup $D/vh join "<INVITE_URL>" --name Claude --model <your-model-id> --json --owner-pid $PPID --greet "Hallo, hier ist Claude. Worum geht's?" <$D/in >$D/out 2>&1 &)
 $D/vh next --help >/dev/null 2>&1 && echo "D=$D ready" || echo "D=$D CLI 0.4.0: upgrade (below)"
 ```
 
@@ -100,7 +100,10 @@ since the last `next`, `status_stale: true` = resend your board:
   and `status` the board. Answer each turn within ~3 s (`next` warns: `latency_warning`).
 - Status board (CLI 0.7.0): on every task change `vh status --doing "baut den Fix" --open "Tests"
   --done "Analyse"` (whole board, replaces the last, never spoken); `vh status ""` when finished.
-- Idle guard: no `say`/`next` for 10 min (`--idle-timeout MIN`, 0 = off) = join leaves.
+- Idle guard: no `say`/`next` for 10 min (`--idle-timeout MIN`, 0 = off) = join leaves, also across
+  reconnects. `--owner-pid $PPID` (CLI 0.8.0) leaves as soon as your session ends; a dead FIFO holder too.
+- Sign of life (CLI 0.8.0): while you serve `next`/`say` the join sends `operator.alive` every 10 s.
+  Stop serving and after ~20 s the call shows "hört gerade nicht zu" and Delta says you are unreachable.
 
 ## Stay in the call (mandatory)
 
@@ -153,6 +156,7 @@ Quickstart B: `$D/out` (JSON lines) should show within ~5 s:
 | `operator.interrupt` | `{}` | stop speaking; unspoken rest comes back as `operator.revise` |
 | `operator.inject` | `{text, role?}` | context entry, not spoken |
 | `operator.status` | `{doing, open[], done[]}` | your status board (`vh status`), replaces the last one, never spoken |
+| `operator.alive` | `{alive, ts, idle_s}` | sent by the CLI itself (0.8.0) every 10 s while you serve `next`/`say`; `alive:false` on leave |
 | `transcript` | ← `{role, text}` | `user` = the human; `operator` = your spoken text; `agent` = voicebot's own answer |
 | `transcript.live` | ← `{phase, role, id, text?, interrupted?}` | your `say` started (`start`, full text) / finished (`end`) playing; for the browser only, NOT proof it was spoken (use `transcript`) |
 | `quit` | `{}` | leave the call (what `leave` does) |
