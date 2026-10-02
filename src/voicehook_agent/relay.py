@@ -410,3 +410,117 @@ def revise_event(payload: dict, now: float | None = None) -> dict:
         if k in payload:
             ev[k] = payload[k]
     return ev
+
+
+# ----- 0.7.0: status board, status_request, latency hint ---------------------------
+STATUS_STALE_S = 300.0     # board older than this and the user spoke since -> status_stale
+LATENCY_WARN_S = 8.0       # user turn delivered by `next` -> next `say` slower -> latency_warning
+LATENCY_HINT = "delegate slow work, keep main loop free"
+
+
+def status_request_event(payload: dict, now: float | None = None) -> dict:
+    """Queue event for operator.status_request: the user asked what you are doing;
+    answer at once with `voicehook-agent status --doing ...`."""
+    return {"type": "status_request", "role": "system",
+            "text": str((payload or {}).get("text", ""))[:200],
+            "ts": now if now is not None else time.time()}
+
+
+def build_board(text: str | None = None, doing: str | None = None,
+                open_: list[str] | None = None, done: list[str] | None = None,
+                file_obj: dict | None = None) -> dict:
+    """operator.status payload {doing, open[], done[]}. The server caps it (600 chars)."""
+    if file_obj is not None:
+        if not isinstance(file_obj, dict):
+            raise ValueError("board file must hold a JSON object {doing, open, done}")
+        base = {"doing": str(file_obj.get("doing", "") or ""),
+                "open": [str(x) for x in file_obj.get("open") or []],
+                "done": [str(x) for x in file_obj.get("done") or []]}
+    else:
+        base = {"doing": "", "open": [], "done": []}
+    if text is not None:
+        base["doing"] = text
+    if doing is not None:
+        base["doing"] = doing
+    base["open"] += list(open_ or [])
+    base["done"] += list(done or [])
+    base["doing"] = base["doing"].strip()
+    return base
+
+
+class TurnClock:
+    """Measures how fast the agent answers and whether its board is stale.
+
+    `delivered()` when `next` hands out a user turn, `said()` on every `say`,
+    `board()` on every status push, `user()` on every queued user turn.
+    `hints()` (called by `next`) returns the extra keys for that reply."""
+
+    def __init__(self, now: float | None = None) -> None:
+        t = time.monotonic() if now is None else now
+        self.delivered_at: float | None = None
+        self.board_at = t          # join counts as the start
+        self.user_at: float | None = None
+        self._warn: float | None = None
+
+    @staticmethod
+    def _t(now: float | None) -> float:
+        return time.monotonic() if now is None else now
+
+    def delivered(self, now: float | None = None) -> None:
+        self.delivered_at = self._t(now)
+
+    def said(self, now: float | None = None) -> None:
+        if self.delivered_at is not None:
+            took = self._t(now) - self.delivered_at
+            if took > LATENCY_WARN_S:
+                self._warn = took
+            self.delivered_at = None
+
+    def board(self, now: float | None = None) -> None:
+        self.board_at = self._t(now)
+
+    def user(self, now: float | None = None) -> None:
+        self.user_at = self._t(now)
+
+    def hints(self, now: float | None = None) -> dict:
+        t = self._t(now)
+        out: dict = {}
+        if self.delivered_at is not None and t - self.delivered_at > LATENCY_WARN_S:
+            self._warn = t - self.delivered_at   # turn never answered with a say
+            self.delivered_at = None
+        if self._warn is not None:
+            out["latency_warning"] = {"seconds": round(self._warn, 1), "hint": LATENCY_HINT}
+            self._warn = None
+        if self.user_at is not None and self.user_at > self.board_at \
+                and t - self.board_at > STATUS_STALE_S:
+            out["status_stale"] = True
+        return out
+
+
+AGENT_SAID_MAX = 3          # entries in `agent_said`
+AGENT_SAID_CHARS = 400      # total chars in `agent_said`
+
+
+class AgentSaid:
+    """What the voicebot (Delta) said on its own since the last `next` (transcript
+    role=agent, never echoes of your own say). `next` hands it out as `agent_said`
+    so you do not repeat it and can correct it. Oldest entries drop first."""
+
+    def __init__(self) -> None:
+        self._items: list[str] = []
+
+    def add(self, text: str) -> None:
+        text = " ".join(str(text or "").split())
+        if not text:
+            return
+        self._items.append(text[:AGENT_SAID_CHARS])
+        del self._items[:-AGENT_SAID_MAX]
+        while sum(map(len, self._items)) > AGENT_SAID_CHARS and len(self._items) > 1:
+            self._items.pop(0)
+
+    def take(self) -> dict:
+        """{"agent_said": [...]} (chronological) and reset, or {} when nothing new."""
+        if not self._items:
+            return {}
+        out, self._items = self._items, []
+        return {"agent_said": out}

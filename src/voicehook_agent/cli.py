@@ -34,6 +34,14 @@ Transport (0.6.0):
                                      when HTTPS_PROXY/ALL_PROXY is set or WebRTC
                                      fails to connect (cloud sandboxes). Output,
                                      say/next/leave and the FIFO stay identical.
+
+Status board (0.7.0):
+    status [TEXT] [--doing T] [--open T]... [--done T]... [-f board.json]
+                                     send operator.status {doing, open[], done[]};
+                                     replaces the last board, never spoken; '' clears.
+    next                             also yields {type:"status_request"} (the user asked
+                                     what you are doing: send `status` at once) and adds
+                                     status_stale / latency_warning hints.
 """
 from __future__ import annotations
 
@@ -351,6 +359,8 @@ class _Control:
         self.quit = asyncio.Event()
         self.room: rtc.Room | None = None
         self.room_ready = asyncio.Event()
+        self.clock = relay.TurnClock()  # 0.7.0: latency_warning + status_stale for `next`
+        self.agent_said = relay.AgentSaid()  # 0.7.0: Delta's own lines for `next`
 
     def attach(self, room: rtc.Room) -> None:
         self.room = room
@@ -403,10 +413,23 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
             if mode not in _SAY_MODES:
                 return {"ok": False, "error": f"mode must be one of {_SAY_MODES}"}
             extra["mode"] = mode
+        ctl.clock.said()
         room = await ctl.wait_room(10.0)
         if room is None:
             return {"ok": False, "error": "not connected to the room (yet)"}
         return await _publish_say(room, text, extra, ctl.say_tracker, ctl.echo)
+    if cmd == "board":
+        ctl.watchdog.touch()
+        board = req.get("board")
+        if not isinstance(board, dict):
+            return {"ok": False, "error": "board must be an object {doing, open, done}"}
+        room = await ctl.wait_room(10.0)
+        if room is None:
+            return {"ok": False, "error": "not connected to the room (yet)"}
+        data = json.dumps(board, ensure_ascii=False).encode("utf-8")
+        await room.local_participant.publish_data(data, reliable=True, topic="operator.status")
+        ctl.clock.board()
+        return {"ok": True, "type": "board", "board": board}
     if cmd == "next":
         try:
             timeout = float(req.get("timeout", 60))
@@ -417,9 +440,14 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
             ev = await ctl.events.get(timeout)
         finally:
             ctl.watchdog.leave()
+        hints = ctl.clock.hints()
+        if ev is None or ev.get("type") != "ended":
+            hints.update(ctl.agent_said.take())
         if ev is None:
-            return {"ok": True, "type": "timeout", "pending": 0}
-        return {"ok": True, **ev, "pending": len(ctl.events)}
+            return {"ok": True, "type": "timeout", "pending": 0, **hints}
+        if ev.get("type") == "user":
+            ctl.clock.delivered()
+        return {"ok": True, **ev, "pending": len(ctl.events), **hints}
     if cmd == "leave":
         ctl.watchdog.touch()
         text = str(req.get("say") or "").strip()
@@ -659,10 +687,13 @@ async def _connect_and_listen(
                 return
             _print_event(json_mode, role, text, topic=topic)
             # `voicehook-agent next` — queue finalized user turns.
+            if ctl is not None and role == "agent" and relay.TurnNotifier._is_final(payload):
+                ctl.agent_said.add(text)  # Delta's own answer (not an echo of our say)
             if ctl is not None:
                 ev = relay.user_turn_event(role, text, payload)
                 if ev is not None:
                     ctl.events.put_nowait(ev)
+                    ctl.clock.user()
             # #9 — a fresh user turn supersedes any older queued say.
             if role == "user":
                 say_tracker.note_user_turn()
@@ -676,6 +707,8 @@ async def _connect_and_listen(
         elif topic.startswith("operator."):
             if topic == "operator.revise" and ctl is not None:
                 ctl.events.put_nowait(relay.revise_event(payload))
+            elif topic == "operator.status_request" and ctl is not None:
+                ctl.events.put_nowait(relay.status_request_event(payload))
             sender = getattr(pkt.participant, "identity", "?") if pkt.participant else "?"
             _print_event(json_mode, "system",
                          f"({topic} from {sender}) {payload.get('text','')}", topic=topic)
@@ -1238,13 +1271,24 @@ def _client_request(args) -> dict:
         return {"cmd": "next", "timeout": args.timeout}
     if args.cmd == "leave":
         return {"cmd": "leave", "say": args.say} if args.say else {"cmd": "leave"}
+    if args.text is not None or args.doing is not None or args.open or args.done or args.file:
+        file_obj = None
+        if args.file:
+            with open(args.file, encoding="utf-8") as fh:
+                file_obj = json.load(fh)
+        return {"cmd": "board", "board": relay.build_board(
+            args.text, args.doing, args.open, args.done, file_obj)}
     return {"cmd": "status"}
 
 
 def _run_client(args) -> int:
     """say / next / leave / status: one JSON line out. Exit 0 = ok (incl.
     next timeout), 1 = request failed, 3 = no running join / join ended."""
-    req = _client_request(args)
+    try:
+        req = _client_request(args)
+    except (OSError, ValueError) as e:
+        print(json.dumps({"ok": False, "type": "error", "error": str(e)}, ensure_ascii=False), flush=True)
+        return 1
     try:
         sock = vsession.resolve_socket(args.session, wait=args.wait)
         sock_timeout = None if args.cmd == "next" else 30.0
@@ -1372,7 +1416,16 @@ def main(argv: list[str] | None = None) -> None:
     p_leave = sub.add_parser("leave", help="end the running join cleanly")
     p_leave.add_argument("--say", default=None, metavar="TEXT", help="goodbye line spoken before leaving")
     _add_session(p_leave)
-    p_status = sub.add_parser("status", help="show the running join's state as JSON")
+    p_status = sub.add_parser(
+        "status", help="no args: show the running join's state as JSON; with text/flags: send "
+        "your status board (operator.status, replaces the last one, never spoken)")
+    p_status.add_argument("text", nargs="?", default=None,
+                          help="what you are doing right now, one sentence ('' = finished, clears)")
+    p_status.add_argument("--doing", default=None, help="current task (same as TEXT)")
+    p_status.add_argument("--open", action="append", default=[], metavar="TASK", help="open task (repeatable)")
+    p_status.add_argument("--done", action="append", default=[], metavar="TASK", help="finished task (repeatable)")
+    p_status.add_argument("-f", "--file", default=None, metavar="JSON",
+                          help="board file {doing, open[], done[]}; flags add to it")
     _add_session(p_status)
     # log-summary: the 2nd micro agent (digests the call log into operator.graph)
     p_sum = sub.add_parser("log-summary", help="watch a call log and emit operator.graph digests")

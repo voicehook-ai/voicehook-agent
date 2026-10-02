@@ -77,22 +77,30 @@ tool calls, so every later call uses the absolute wrapper, e.g. `/tmp/vh-ab12cd/
 /tmp/vh-ab12cd/vh next                     # immediately again, never sleep-poll
 ```
 
-`next` prints ONE JSON line (CLI 0.5.0, exit 3 once the call is over):
+`next` prints ONE JSON line (exit 3 once the call is over), with `agent_said` = Delta's own lines
+since the last `next`, `status_stale: true` = resend your board:
 
 | `type` | meaning | do |
 |---|---|---|
 | `user` | `text` = what the user just said | answer with one `say` |
 | `revise` | your `say` overlapped unspoken text | merge, `say --mode overwrite "…"` within 8 s |
+| `status_request` | the user asked what you are doing | send `vh status` at once (below) |
 | `timeout` | 60 s silence (`--timeout SEC`) | call `next` again |
 | `ended` | the call is over | stop, the join already left |
 
-- Call `next` right after the quickstart: the first `next` (or `say`) starts the queue,
-  from then on turns spoken while you were busy wait for you. Never `sleep 20; tail`.
-- Answer every user turn with exactly ONE `say` that states what is true now.
-- Work longer than ~8 s: first `say "Moment, ich schaue nach."`, then work, then the result.
-  Over ~15 s: hand the work to a background agent and keep looping.
-- Idle guard (0.5.0): no `say`/`next` for 10 min (`--idle-timeout MIN`, 0 = off) and the
-  join announces it and leaves. A running `next` counts as alive.
+- Call `next` right after the quickstart (starts the queue; later turns wait). Never `sleep; tail`.
+- Answer every user turn with exactly ONE `say` that states what is true now. Read `agent_said`
+  before answering: never repeat what Delta already said; if Delta said something wrong, correct
+  it in one sentence; if Delta already answered fully, `say` nothing or only add the missing fact.
+- Delta misbehaves (wrong claim, repeats itself, too long, wrong name): (1) correct the user-facing
+  error in one `say`; (2) push a short fix via `operator.persona` ("Sag nie X. Wenn Y, dann Z.");
+  today it replaces Delta's instructions, so send your full persona plus the fix.
+- Keep the main loop free: between `next` and `say` do nothing slow. Anything over ~3 s (shell, web,
+  edits, builds, lookups) goes to a background agent/subtask; meanwhile `say` a short holding line
+  and `status` the board. Answer each turn within ~3 s (`next` warns: `latency_warning`).
+- Status board (CLI 0.7.0): on every task change `vh status --doing "baut den Fix" --open "Tests"
+  --done "Analyse"` (whole board, replaces the last, never spoken); `vh status ""` when finished.
+- Idle guard: no `say`/`next` for 10 min (`--idle-timeout MIN`, 0 = off) = join leaves.
 
 ## Stay in the call (mandatory)
 
@@ -106,12 +114,9 @@ tool calls, so every later call uses the absolute wrapper, e.g. `/tmp/vh-ab12cd/
 
 ## Speak right
 
-- **Language:** take it from the user's turns. User speaks German → German
-  (default for voicehook). Switch only when the user switches.
-- **Short:** 1-2 sentences, under ~60 characters per sentence. No markdown, no lists, no
-  emoji, no URLs read aloud. Tech terms may stay English.
-- **Echo = proof:** your text shows up in `$D/out` as `{"role": "operator", …}` once it was
-  spoken. No echo = not (yet) spoken.
+- **Language:** the user's (German by default); switch only when the user switches.
+- **Short:** 1-2 sentences, <60 chars each. No markdown, lists, emoji or URLs read aloud.
+- **Echo = proof:** `{"role": "operator", …}` in `$D/out` = spoken; no echo = not (yet) spoken.
 - **No secrets, no PII** in `say`, `--greet` or a persona: everything travels in clear text
   over the LiveKit data channel.
 
@@ -147,6 +152,7 @@ Quickstart B: `$D/out` (JSON lines) should show within ~5 s:
 | `operator.persona` | `{text}` | replaces the voicebot's instructions for everyone (see above) |
 | `operator.interrupt` | `{}` | stop speaking; unspoken rest comes back as `operator.revise` |
 | `operator.inject` | `{text, role?}` | context entry, not spoken |
+| `operator.status` | `{doing, open[], done[]}` | your status board (`vh status`), replaces the last one, never spoken |
 | `transcript` | ← `{role, text}` | `user` = the human; `operator` = your spoken text; `agent` = voicebot's own answer |
 | `transcript.live` | ← `{phase, role, id, text?, interrupted?}` | your `say` started (`start`, full text) / finished (`end`) playing; for the browser only, NOT proof it was spoken (use `transcript`) |
 | `quit` | `{}` | leave the call (what `leave` does) |
