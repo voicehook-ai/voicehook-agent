@@ -197,7 +197,8 @@ def test_say_next_leave_loop(fake_env):
     assert r_say["ok"] and any(s["text"] == "Hallo Oliver" and s["mode"] == "append" for s in says)
     assert r_next["type"] == "user" and r_next["text"] == "Wie geht's?"
     assert r_rev["type"] == "revise" and r_rev["unspoken"] == ["x"]
-    assert r_timeout == {"ok": True, "type": "timeout", "pending": 0}
+    assert {k: r_timeout[k] for k in ("ok", "type", "pending")} == {"ok": True, "type": "timeout", "pending": 0}
+    assert r_timeout["status_reason"] == "empty"            # 0.9.0: no board yet
     assert r_status["connected"] is True and r_status["room"] == SLUG
     assert r_leave["type"] == "leaving" and says[-1]["text"] == "Tschuess"
     assert rc == 0

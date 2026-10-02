@@ -42,6 +42,15 @@ Status board (0.7.0):
     next                             also yields {type:"status_request"} (the user asked
                                      what you are doing: send `status` at once) and adds
                                      status_stale / latency_warning hints.
+
+Keep the board fresh (0.9.0): Delta answers the user from your board while you work.
+    next                             adds status_due:true + status_reason + hint (the exact
+                                     command) when the board is empty, a status_request is
+                                     open (that event comes first in line), or the board is
+                                     older than --status-due SEC (default 45, env
+                                     VOICEHOOK_STATUS_DUE) while doing/open is set.
+    say                              a progress line ("fertig", "live", "deploye") without a
+                                     board push since the last say returns the same hint.
 """
 from __future__ import annotations
 
@@ -375,7 +384,8 @@ class _Control:
         self.alive_interval = ALIVE_INTERVAL
         self.alive_window = ALIVE_WINDOW
         self.leaving = False
-        self.clock = relay.TurnClock()  # 0.7.0: latency_warning + status_stale for `next`
+        # 0.7.0: latency_warning + status_stale; 0.9.0: status_due + hint for `next`
+        self.clock = relay.TurnClock(due_s=relay.status_due_seconds())
         self.agent_said = relay.AgentSaid()  # 0.7.0: Delta's own lines for `next`
 
     def attach(self, room: rtc.Room) -> None:
@@ -429,11 +439,12 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
             if mode not in _SAY_MODES:
                 return {"ok": False, "error": f"mode must be one of {_SAY_MODES}"}
             extra["mode"] = mode
-        ctl.clock.said()
+        nudge = ctl.clock.said(text=text)  # 0.9.0: progress said, board older -> hint
         room = await ctl.wait_room(10.0)
         if room is None:
             return {"ok": False, "error": "not connected to the room (yet)"}
-        return await _publish_say(room, text, extra, ctl.say_tracker, ctl.echo)
+        res = await _publish_say(room, text, extra, ctl.say_tracker, ctl.echo)
+        return {**res, **nudge} if res.get("ok") else res
     if cmd == "board":
         ctl.watchdog.touch()
         board = req.get("board")
@@ -444,7 +455,7 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
             return {"ok": False, "error": "not connected to the room (yet)"}
         data = json.dumps(board, ensure_ascii=False).encode("utf-8")
         await room.local_participant.publish_data(data, reliable=True, topic="operator.status")
-        ctl.clock.board()
+        ctl.clock.board(board=board)
         return {"ok": True, "type": "board", "board": board}
     if cmd == "next":
         try:
@@ -856,7 +867,9 @@ async def _connect_and_listen(
             if topic == "operator.revise" and ctl is not None:
                 ctl.events.put_nowait(relay.revise_event(payload))
             elif topic == "operator.status_request" and ctl is not None:
-                ctl.events.put_nowait(relay.status_request_event(payload))
+                # 0.9.0: first in line for `next`, status_due until the next board
+                ctl.events.put_front_nowait(relay.status_request_event(payload))
+                ctl.clock.requested()
             sender = getattr(pkt.participant, "identity", "?") if pkt.participant else "?"
             _print_event(json_mode, "system",
                          f"({topic} from {sender}) {payload.get('text','')}", topic=topic)
@@ -1147,6 +1160,7 @@ async def _join(
     force_persona: bool = False,
     control: bool = True,
     transport: str = "auto",
+    status_due: float | None = None,
 ) -> int:
     missing = _missing_self_report(agent_name, model)
     if missing:
@@ -1204,6 +1218,8 @@ async def _join(
 
     # Local control socket for `say` / `next` / `leave` / `status` + idle guard.
     ctl = _Control(slug, ident, say_tracker, echo, idle_timeout)
+    if status_due is not None:
+        ctl.clock.due_s = status_due
     server: vsession.ControlServer | None = None
     sess_dir = vsession.session_dir(slug, ident)
     if control and hasattr(asyncio, "start_unix_server"):
@@ -1556,6 +1572,10 @@ def main(argv: list[str] | None = None) -> None:
         help="auto (default): WebRTC, switch to the HTTPS bridge when HTTPS_PROXY/ALL_PROXY is set or WebRTC fails to connect. webrtc / bridge force one.",
     )
     p_join.add_argument(
+        "--status-due", type=float, default=None, metavar="SEC",
+        help=f"`next` adds status_due + hint when your board is older than SEC seconds while work is in progress (default {relay.STATUS_DUE_S:g}, env {relay.STATUS_DUE_ENV}; 0 = age rule off). Empty board and status_request always count.",
+    )
+    p_join.add_argument(
         "--no-control", action="store_true", default=False,
         help="do not open the local control socket (disables say/next/leave/status).",
     )
@@ -1632,7 +1652,7 @@ def main(argv: list[str] | None = None) -> None:
                 idle_say=args.idle_say or None,
                 owner_pids=args.owner_pid,
                 force_persona=args.force_persona, control=not args.no_control,
-                transport=args.transport,
+                transport=args.transport, status_due=args.status_due,
             ))
         except KeyboardInterrupt:
             rc = 130

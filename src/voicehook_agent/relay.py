@@ -15,6 +15,8 @@ Keeping these here means a test suite can exercise the tricky edge cases
 from __future__ import annotations
 
 import hashlib
+import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -414,6 +416,42 @@ def revise_event(payload: dict, now: float | None = None) -> dict:
 
 # ----- 0.7.0: status board, status_request, latency hint ---------------------------
 STATUS_STALE_S = 300.0     # board older than this and the user spoke since -> status_stale
+STATUS_DUE_S = 45.0        # 0.9.0: board older than this (work in progress) -> status_due
+STATUS_DUE_ENV = "VOICEHOOK_STATUS_DUE"
+STATUS_CMD = 'voicehook-agent status --doing "<Zwischenstand, ETA>" --open "<offen>" --done "<erledigt>"'
+STATUS_HINTS = {
+    "status_request": "Nutzer fragt nach Stand: Board jetzt aktualisieren: " + STATUS_CMD,
+    "empty": "Board leer, Delta weiss nichts: jetzt setzen: " + STATUS_CMD,
+    "stale": "Board veraltet, Delta antwortet sonst falsch: jetzt aktualisieren: " + STATUS_CMD,
+}
+SAY_PROGRESS_HINT = ("Fortschritt angesagt, Board ist aelter: Delta kennt ihn sonst nicht. "
+                     "Jetzt: " + STATUS_CMD)
+_PROGRESS_RX = re.compile(
+    r"\b(fertig|erledigt|abgeschlossen|live|deploy\w*|gemerged|merged|done|finished|shipped)\b",
+    re.IGNORECASE)
+
+
+def status_due_seconds(value: float | str | None = None) -> float:
+    """N for status_due: explicit value (--status-due), else $VOICEHOOK_STATUS_DUE,
+    else STATUS_DUE_S. 0 or less switches the age rule off."""
+    for v in (value, os.environ.get(STATUS_DUE_ENV)):
+        if v is None or v == "":
+            continue
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            continue
+    return STATUS_DUE_S
+
+
+def mentions_progress(text: str) -> bool:
+    """`say` text that reports progress (fertig, live, deploye ...)."""
+    return bool(_PROGRESS_RX.search(text or ""))
+
+
+def board_is_empty(board: dict | None) -> bool:
+    b = board or {}
+    return not (str(b.get("doing") or "").strip() or b.get("open") or b.get("done"))
 LATENCY_WARN_S = 8.0       # user turn delivered by `next` -> next `say` slower -> latency_warning
 LATENCY_HINT = "delegate slow work, keep main loop free"
 
@@ -423,7 +461,8 @@ def status_request_event(payload: dict, now: float | None = None) -> dict:
     answer at once with `voicehook-agent status --doing ...`."""
     return {"type": "status_request", "role": "system",
             "text": str((payload or {}).get("text", ""))[:200],
-            "ts": now if now is not None else time.time()}
+            "ts": now if now is not None else time.time(),
+            "hint": STATUS_HINTS["status_request"]}
 
 
 def build_board(text: str | None = None, doing: str | None = None,
@@ -455,12 +494,19 @@ class TurnClock:
     `board()` on every status push, `user()` on every queued user turn.
     `hints()` (called by `next`) returns the extra keys for that reply."""
 
-    def __init__(self, now: float | None = None) -> None:
+    def __init__(self, now: float | None = None, due_s: float | None = None) -> None:
         t = time.monotonic() if now is None else now
         self.delivered_at: float | None = None
         self.board_at = t          # join counts as the start
         self.user_at: float | None = None
         self._warn: float | None = None
+        # 0.9.0 status_due
+        self.due_s = STATUS_DUE_S if due_s is None else due_s
+        self.board_set_at: float | None = None   # last real `status` push (None = never)
+        self.board_empty = True
+        self.board_live = False                  # doing or open set = work in progress
+        self.request_at: float | None = None     # open status_request
+        self.said_at: float | None = None
 
     @staticmethod
     def _t(now: float | None) -> float:
@@ -469,15 +515,62 @@ class TurnClock:
     def delivered(self, now: float | None = None) -> None:
         self.delivered_at = self._t(now)
 
-    def said(self, now: float | None = None) -> None:
+    def said(self, now: float | None = None, text: str = "") -> dict:
+        """Records a `say`; returns {"hint": ...} when the line reports progress
+        (fertig, live, deploye ...) but the board was not pushed since the last say
+        or is older than due_s."""
+        t = self._t(now)
+        out: dict = {}
+        prev, self.said_at = self.said_at, t
+        if mentions_progress(text) and (
+                self.board_set_at is None
+                or (prev is not None and self.board_set_at < prev)
+                or (self.due_s > 0 and t - self.board_set_at > self.due_s)):
+            out = {"status_due": True, "status_reason": "say_progress", "hint": SAY_PROGRESS_HINT}
+        self._said(t)
+        return out
+
+    def _said(self, now: float) -> None:
         if self.delivered_at is not None:
             took = self._t(now) - self.delivered_at
             if took > LATENCY_WARN_S:
                 self._warn = took
             self.delivered_at = None
 
-    def board(self, now: float | None = None) -> None:
-        self.board_at = self._t(now)
+    def board(self, now: float | None = None, board: dict | None = None) -> None:
+        t = self._t(now)
+        self.board_at = t
+        self.board_set_at = t
+        self.board_empty = board_is_empty(board)
+        b = board or {}
+        self.board_live = bool(str(b.get("doing") or "").strip() or b.get("open"))
+        self.request_at = None
+
+    def requested(self, now: float | None = None) -> None:
+        """operator.status_request arrived: status_due until the next board."""
+        self.request_at = self._t(now)
+
+    def status_due(self, now: float | None = None) -> dict:
+        """{"status_due": True, "status_reason", "board_age_s", "hint"} or {}.
+
+        Due when a status_request is open, when the board is empty/never set, or
+        when it is older than due_s while work is in progress (doing/open set) or
+        the user spoke after it. A finished board (only done) does not nag by age."""
+        t = self._t(now)
+        age = None if self.board_set_at is None else round(t - self.board_set_at, 1)
+        if self.request_at is not None:
+            reason = "status_request"
+        elif self.board_empty:
+            reason = "empty"
+        elif self.due_s > 0 and age is not None and age > self.due_s and (
+                self.board_live or (self.user_at is not None and self.user_at > self.board_set_at)):
+            reason = "stale"
+        else:
+            return {}
+        out: dict = {"status_due": True, "status_reason": reason, "hint": STATUS_HINTS[reason]}
+        if age is not None:
+            out["board_age_s"] = age
+        return out
 
     def user(self, now: float | None = None) -> None:
         self.user_at = self._t(now)
@@ -494,6 +587,7 @@ class TurnClock:
         if self.user_at is not None and self.user_at > self.board_at \
                 and t - self.board_at > STATUS_STALE_S:
             out["status_stale"] = True
+        out.update(self.status_due(t))
         return out
 
 

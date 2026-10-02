@@ -105,6 +105,30 @@ voicehook-agent leave --say "Bis bald."                 # clean exit
   When the user asks, `next` yields `{"type":"status_request"}`: send `status` at once.
   `next` adds `"status_stale": true` when your board is older than 5 min and the user
   spoke since.
+- **Keep the board fresh (0.9.0):** the voicebot (Delta) answers the user from your
+  board while you work in the background; a stale board makes it answer wrong. `next`
+  therefore adds `"status_due": true`, `"status_reason"`, `"board_age_s"` and a `"hint"`
+  with the exact command when
+  - the board is empty or was never set (`empty`),
+  - the user asked for the status (`status_request`; that event is also put first in
+    line, carries `"hint": "Nutzer fragt nach Stand: Board jetzt aktualisieren: ..."`
+    and stays due until your next board),
+  - the board is older than `--status-due SEC` (default 45, env
+    `VOICEHOOK_STATUS_DUE`, 0 = off) while `doing`/`open` is set, or the user spoke
+    after it (`stale`). A finished board (only `done`) does not nag by age.
+
+  A `say` that reports progress ("fertig", "live", "deploye", "merged" ...) without a
+  board push since your previous `say` returns `"status_reason": "say_progress"` and
+  the same `hint`. Set the board on every request, delegation, result and deploy step;
+  `doing` may hold the interim state and an ETA ("deployt Worker, ETA 2 min"), but the
+  worker keeps at most 120 chars per entry. When finished, send `--done` items instead
+  of clearing (an empty board counts as due). Example:
+
+  ```json
+  {"ok": true, "type": "timeout", "pending": 0, "status_due": true,
+   "status_reason": "stale", "board_age_s": 61.2,
+   "hint": "Board veraltet, Delta antwortet sonst falsch: jetzt aktualisieren: voicehook-agent status --doing \"<Zwischenstand, ETA>\" --open \"<offen>\" --done \"<erledigt>\""}
+  ```
 
 > Since 0.2.0, `--keep-alive` is the default: **stdin-EOF no longer quits** and
 > transient room-disconnects auto-reconnect. Run with a closed stdin in the
@@ -221,6 +245,7 @@ Hardening flags (0.2.0) for unattended / background relay operation:
 | `--owner-pid <pid>` | 0.8.0 | Leave (with an announcement) as soon as `<pid>` ends, e.g. `--owner-pid $PPID`; repeatable; env `VOICEHOOK_OWNER_PID`. `$VOICEHOOK_AGENT_HOME/holder` is watched too. |
 | `--idle-say <text>` | 0.5.0 | Announcement before an idle leave (`''` = silent). |
 | `--force-persona` | 0.5.0 | Push persona/mode/graph even if another operator agent is in the room. |
+| `--status-due <sec>` | 0.9.0 | `next` adds `status_due` + `hint` once the board is older than `<sec>` while work is in progress (default 45, env `VOICEHOOK_STATUS_DUE`, 0 = age rule off). |
 | `--no-control` | 0.5.0 | No local control socket (`say`/`next`/`leave`/`status` off). |
 | `--transport auto\|webrtc\|bridge` | 0.6.0 | How to reach the room. `auto` (default): WebRTC; the HTTPS bridge when `HTTPS_PROXY`/`ALL_PROXY` is set or the WebRTC connect fails/times out (one retry, logged). See below. |
 

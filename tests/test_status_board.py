@@ -78,7 +78,8 @@ def test_control_board_publishes_operator_status():
 # ----- status_request round trip ----------------------------------------------------
 def test_status_request_event_shape():
     ev = relay.status_request_event({"text": "was macht Claude gerade?"}, now=1.0)
-    assert ev == {"type": "status_request", "role": "system", "text": "was macht Claude gerade?", "ts": 1.0}
+    assert ev == {"type": "status_request", "role": "system", "text": "was macht Claude gerade?", "ts": 1.0,
+                  "hint": relay.STATUS_HINTS["status_request"]}
 
 
 def test_status_request_reaches_next_and_answer_goes_out():
@@ -108,7 +109,7 @@ def test_turn_clock_fast_say_no_warning():
     c = relay.TurnClock(now=0.0)
     c.delivered(now=10.0)
     c.said(now=12.0)
-    assert c.hints(now=12.5) == {}
+    assert "latency_warning" not in c.hints(now=12.5)
 
 
 def test_turn_clock_unanswered_turn_warns():
@@ -118,14 +119,16 @@ def test_turn_clock_unanswered_turn_warns():
 
 
 def test_turn_clock_status_stale_only_after_user_spoke():
+    def stale(h):
+        return "status_stale" in h
     c = relay.TurnClock(now=0.0)
-    assert c.hints(now=1000.0) == {}               # nobody spoke
+    assert not stale(c.hints(now=1000.0))          # nobody spoke
     c.user(now=500.0)
-    assert c.hints(now=1000.0) == {"status_stale": True}
+    assert stale(c.hints(now=1000.0))
     c.board(now=1001.0)
-    assert c.hints(now=1002.0) == {}               # fresh board
+    assert not stale(c.hints(now=1002.0))          # fresh board
     c.user(now=1100.0)
-    assert c.hints(now=1200.0) == {}               # board younger than 5 min
+    assert not stale(c.hints(now=1200.0))          # board younger than 5 min
 
 
 def test_next_carries_latency_warning(monkeypatch):
