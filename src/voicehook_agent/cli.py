@@ -52,6 +52,7 @@ import os
 import re
 import signal
 import sys
+import threading
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -86,6 +87,7 @@ KNOWN_OUT_TOPICS = frozenset({
     "operator.interrupt",
     "operator.inject",
     "operator.backchannel",  # operator <-> agent silent side-channel (#10/F8)
+    "operator.alive",        # 0.8.0: sign of life while the brain serves say/next
 })
 
 
@@ -326,6 +328,17 @@ DEFAULT_IDLE_SAY = (
     "Ich verlasse den Call jetzt, weil ich von meinem Agenten seit einer Weile "
     "nichts mehr hoere. Lade mich gern wieder ein."
 )
+OWNER_GONE_SAY = (
+    "Ich verlasse den Call jetzt, weil die Sitzung meines Agenten beendet ist. "
+    "Lade mich gern wieder ein."
+)
+
+# 0.8.0 sign of life: `operator.alive` every ALIVE_INTERVAL s while the brain
+# served say/next/stdin within the last ALIVE_WINDOW s (a blocked `next` counts
+# as serving). Nothing is sent while orphaned, so the web UI can dim the chip.
+ALIVE_INTERVAL = 10.0
+ALIVE_WINDOW = 15.0
+OWNER_POLL = 2.0
 
 
 def _quit_signals() -> list:
@@ -359,6 +372,9 @@ class _Control:
         self.quit = asyncio.Event()
         self.room: rtc.Room | None = None
         self.room_ready = asyncio.Event()
+        self.alive_interval = ALIVE_INTERVAL
+        self.alive_window = ALIVE_WINDOW
+        self.leaving = False
         self.clock = relay.TurnClock()  # 0.7.0: latency_warning + status_stale for `next`
         self.agent_said = relay.AgentSaid()  # 0.7.0: Delta's own lines for `next`
 
@@ -435,6 +451,10 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
             timeout = float(req.get("timeout", 60))
         except (TypeError, ValueError):
             return {"ok": False, "error": "timeout must be a number"}
+        # A blocked `next` counts as "brain alive". Cap it at the idle timeout so
+        # an orphaned `next --timeout 86400` cannot keep a ghost join alive.
+        if ctl.watchdog.timeout > 0:
+            timeout = min(timeout, ctl.watchdog.timeout)
         ctl.watchdog.enter()
         try:
             ev = await ctl.events.get(timeout)
@@ -451,6 +471,8 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
     if cmd == "leave":
         ctl.watchdog.touch()
         text = str(req.get("say") or "").strip()
+        ctl.leaving = True
+        await _publish_alive(ctl, False)
         if text and ctl.room is not None:
             try:
                 await _publish_say(ctl.room, text, {"mode": "append"},
@@ -477,9 +499,63 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
     return {"ok": False, "error": f"unknown cmd {cmd!r}"}
 
 
+async def _publish_alive(ctl: _Control, alive: bool) -> bool:
+    """One `operator.alive` packet; best effort (never raises)."""
+    room = ctl.room
+    if room is None:
+        return False
+    payload = {"alive": alive, "ts": time.time(),
+               "idle_s": round(ctl.watchdog.idle_for(), 1)}
+    try:
+        await room.local_participant.publish_data(
+            json.dumps(payload).encode("utf-8"), reliable=True, topic="operator.alive")
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] operator.alive publish failed: {e!r}", file=sys.stderr, flush=True)
+        return False
+
+
+async def _alive_loop(ctl: _Control) -> None:
+    """Sign of life: send `operator.alive` every `alive_interval` s while the
+    brain served say/next within `alive_window` s, and at once when it comes
+    back. Silent while orphaned (the UI dims the chip after ~20 s)."""
+    tick = max(0.05, min(1.0, ctl.alive_interval / 4))
+    last_sent = 0.0
+    was_active = False
+    while not ctl.quit.is_set():
+        active = ctl.room is not None and ctl.watchdog.idle_for() < ctl.alive_window
+        now = time.monotonic()
+        due = not was_active or now - last_sent >= ctl.alive_interval
+        if active and not ctl.leaving and due and await _publish_alive(ctl, True):
+            last_sent = now
+        was_active = active
+        try:
+            await asyncio.wait_for(ctl.quit.wait(), timeout=tick)
+            return
+        except asyncio.TimeoutError:
+            pass
+
+
+async def _leave_with(ctl: _Control, json_mode: bool, meta: str,
+                      announce: str | None) -> None:
+    """Shared exit path of the orphan guards: tell the room, then quit."""
+    ctl.leaving = True
+    _print_event(json_mode, "system", meta, topic="_meta")
+    await _publish_alive(ctl, False)
+    if announce and ctl.room is not None:
+        try:
+            await _publish_say(ctl.room, announce, {"mode": "append"},
+                               ctl.say_tracker, ctl.echo)
+            await asyncio.sleep(1.0)
+        except Exception as e:  # noqa: BLE001
+            print(f"[error] leave announce failed: {e!r}", file=sys.stderr, flush=True)
+    ctl.quit.set()
+
+
 async def _idle_loop(ctl: _Control, json_mode: bool, announce: str | None) -> None:
     """Orphan guard: leave the call when the brain sent no say/next/stdin line
-    for `watchdog.timeout` seconds."""
+    for `watchdog.timeout` seconds. The watchdog lives on `_Control`, so it
+    spans reconnect cycles: a reconnect is no sign of life and never resets it."""
     if ctl.watchdog.timeout <= 0:
         return
     tick = min(5.0, max(0.05, ctl.watchdog.timeout / 4))
@@ -491,18 +567,90 @@ async def _idle_loop(ctl: _Control, json_mode: bool, announce: str | None) -> No
             pass
         if not ctl.watchdog.expired():
             continue
-        _print_event(json_mode, "system",
-                     f"idle-timeout: no say/next from the agent for "
-                     f"{ctl.watchdog.timeout:.0f}s, leaving", topic="_meta")
-        if announce and ctl.room is not None:
-            try:
-                await _publish_say(ctl.room, announce, {"mode": "append"},
-                                   ctl.say_tracker, ctl.echo)
-                await asyncio.sleep(1.0)
-            except Exception as e:  # noqa: BLE001
-                print(f"[error] idle announce failed: {e!r}", file=sys.stderr, flush=True)
-        ctl.quit.set()
+        await _leave_with(ctl, json_mode,
+                          f"idle-timeout: no say/next from the agent for "
+                          f"{ctl.watchdog.timeout:.0f}s, leaving", announce)
         return
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _owner_pids(explicit: list[int] | None) -> list[int]:
+    """Processes whose end ends the join: --owner-pid / VOICEHOOK_OWNER_PID
+    (the calling agent session) and the FIFO holder from the skill quickstart
+    ($VOICEHOOK_AGENT_HOME/holder)."""
+    pids: list[int] = [p for p in (explicit or []) if p and p > 1]
+    env = os.environ.get("VOICEHOOK_OWNER_PID", "").strip()
+    if env.isdigit() and int(env) > 1:
+        pids.append(int(env))
+    home = os.environ.get("VOICEHOOK_AGENT_HOME")
+    if home:
+        try:
+            raw = (Path(home) / "holder").read_text().strip()
+            if raw.isdigit() and int(raw) > 1:
+                pids.append(int(raw))
+        except OSError:
+            pass
+    return sorted(set(pids))
+
+
+async def _owner_loop(ctl: _Control, pids: list[int], json_mode: bool,
+                      announce: str | None, poll: float | None = None) -> None:
+    """Orphan guard 2: leave as soon as the calling session (owner pid) or the
+    FIFO holder is gone, instead of waiting for the idle timeout."""
+    if not pids:
+        return
+    poll = OWNER_POLL if poll is None else poll
+    while not ctl.quit.is_set():
+        gone = [p for p in pids if not _pid_alive(p)]
+        if gone:
+            await _leave_with(ctl, json_mode,
+                              f"owner-gone: process {gone[0]} ended, leaving", announce)
+            return
+        try:
+            await asyncio.wait_for(ctl.quit.wait(), timeout=poll)
+            return
+        except asyncio.TimeoutError:
+            pass
+
+
+def _daemon_readline(loop: asyncio.AbstractEventLoop, stream) -> asyncio.Future:
+    """`stream.readline()` in a DAEMON thread. The default executor's worker
+    threads are joined at interpreter exit, so a readline blocked on a FIFO
+    whose writer (the skill's `sleep 86400` holder) stays open kept every ended
+    join process alive for up to 24 h. A daemon thread dies with the process."""
+    fut: asyncio.Future = loop.create_future()
+
+    def _run() -> None:
+        try:
+            res, exc = stream.readline(), None
+        except BaseException as e:  # noqa: BLE001
+            res, exc = None, e
+
+        def _done() -> None:
+            if fut.done():
+                return
+            if exc is not None:
+                fut.set_exception(exc)
+            else:
+                fut.set_result(res)
+        try:
+            loop.call_soon_threadsafe(_done)
+        except RuntimeError:
+            pass  # loop already closed
+
+    threading.Thread(target=_run, name="vh-stdin", daemon=True).start()
+    return fut
 
 
 async def _stdin_publisher(
@@ -583,7 +731,7 @@ async def _stdin_publisher(
 
     while not stop.is_set():
         try:
-            chunk = await loop.run_in_executor(None, sys.stdin.readline)
+            chunk = await _daemon_readline(loop, sys.stdin)
         except (EOFError, KeyboardInterrupt):
             chunk = ""
         if chunk == "":  # EOF
@@ -994,6 +1142,8 @@ async def _join(
     strict: bool = False,
     idle_timeout: float = 600.0,
     idle_say: str | None = DEFAULT_IDLE_SAY,
+    owner_pids: list[int] | None = None,
+    owner_say: str | None = OWNER_GONE_SAY,
     force_persona: bool = False,
     control: bool = True,
     transport: str = "auto",
@@ -1091,6 +1241,12 @@ async def _join(
         except (NotImplementedError, RuntimeError, ValueError):
             pass
     idle_task = asyncio.create_task(_idle_loop(ctl, json_mode, idle_say))
+    watched = _owner_pids(owner_pids)
+    if watched:
+        _print_event(json_mode, "system", f"owner guard: leaving when pid(s) {watched} end",
+                     topic="_meta")
+    guard_tasks = [asyncio.create_task(_owner_loop(ctl, watched, json_mode, owner_say)),
+                   asyncio.create_task(_alive_loop(ctl))]
 
     rc = 0
     try:
@@ -1142,11 +1298,12 @@ async def _join(
                 break
     finally:
         ctl.quit.set()
-        idle_task.cancel()
-        try:
-            await idle_task
-        except (asyncio.CancelledError, Exception):
-            pass
+        for t in (idle_task, *guard_tasks):
+            t.cancel()
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
         await ctl.events.close()  # a blocked `next` returns {"type":"ended"}
         if server is not None:
             await asyncio.sleep(0.05)
@@ -1391,6 +1548,10 @@ def main(argv: list[str] | None = None) -> None:
         help="what voice-ai says before an idle-timeout leave ('' = leave silently).",
     )
     p_join.add_argument(
+        "--owner-pid", type=int, action="append", default=None, metavar="PID",
+        help="leave the call (with a short announcement) as soon as process PID ends; pass your agent session, e.g. --owner-pid $PPID (env VOICEHOOK_OWNER_PID works too). $VOICEHOOK_AGENT_HOME/holder is watched automatically.",
+    )
+    p_join.add_argument(
         "--transport", choices=vtransport.TRANSPORTS, default="auto",
         help="auto (default): WebRTC, switch to the HTTPS bridge when HTTPS_PROXY/ALL_PROXY is set or WebRTC fails to connect. webrtc / bridge force one.",
     )
@@ -1469,6 +1630,7 @@ def main(argv: list[str] | None = None) -> None:
                 graph_interval=args.graph_interval, strict=args.strict_relay,
                 idle_timeout=max(0.0, args.idle_timeout) * 60.0,
                 idle_say=args.idle_say or None,
+                owner_pids=args.owner_pid,
                 force_persona=args.force_persona, control=not args.no_control,
                 transport=args.transport,
             ))
