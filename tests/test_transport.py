@@ -385,3 +385,18 @@ def test_forced_webrtc_never_uses_bridge(monkeypatch, capsys):
     out, err = capsys.readouterr()
     assert "transport=webrtc (--transport webrtc)" in out
     assert "retrying once via the HTTPS bridge" not in out and not bridged
+
+
+def test_bridge_join_sends_username_only_when_set():
+    """0.9.0: --username -> bridge join field `username` -> vh.user (v4 #139)."""
+    async def go():
+        fb = FakeBridge()
+        base = await fb.start()
+        for user in ("Oliver", None):
+            room = vt.BridgeRoom(base, "a-b-c-AB12", "x", name="C", model="m", username=user)
+            await room.connect()
+            await room.disconnect()
+        await fb.stop()
+        return fb.joins
+    joins = asyncio.run(go())
+    assert joins[0]["username"] == "Oliver" and "username" not in joins[1]

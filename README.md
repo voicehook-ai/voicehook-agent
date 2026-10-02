@@ -43,11 +43,19 @@ voicehook-agent leave --say "Bis bald."                 # clean exit
 |---|---|---|
 | `say <text> [--mode revise\|overwrite\|append]` | `{"ok":true,"seq":3}` | 0 ok, 1 failed |
 | `next [--timeout SEC]` | `{"type":"user","text":...}`, `{"type":"revise","text":...,"unspoken":[...]}` (answer with `say --mode overwrite`), `{"type":"timeout"}`, `{"type":"ended"}` | 0, 3 on `ended` |
+| `says` (0.9.0) | `{"type":"says","says":[{"seq":3,"state":"spoken","spoken_chars":12,"age_s":4.1,"text":"..."}]}`: last state of each own say (`sent` until the voicebot's first receipt) | 0 |
 | `leave [--say TEXT]` | `{"type":"leaving"}` | 0 |
 | `status` | room, identity, connected, pending events, idle seconds, peers | 0 |
 | `status [TEXT] [--doing T] [--open T]... [--done T]... [-f board.json]` (0.7.0) | `{"type":"board","board":{...}}`: sends your status board | 0 ok, 1 failed |
 
 - `next` returns ONE event, oldest first; `pending` says how many more are queued.
+- **Say receipts (0.9.0):** the voicebot reports each say as `operator.say_status
+  {seq, state, spoken_chars}` (`seq` = the `seq` that `say` returned; states `queued`,
+  `spoken`, `interrupted`, `requeued`, `replaced`). `next` carries the changes since the
+  last `next` as `"say_status": [{"seq":3,"state":"spoken"}]` (`spoken_chars` only for
+  `interrupted`/`requeued`); a say stuck in `queued`/`requeued` for more than 20 s adds
+  `"say_hint"` (do not push more; if outdated, `say --mode overwrite` a short version).
+  `says` shows the last state of every say.
   Turns spoken while you were thinking are kept, never lost. `--timeout 0` only
   returns what is already queued. Each event carries `ts` (unix time it was
   spoken).
@@ -225,6 +233,7 @@ stdin (JSONL):
 | `operator.backchannel`| out       | silent operator↔agent side-channel, relayed as-is (#10) |
 | `operator.status`     | out       | your status board `{doing, open[], done[]}` (0.7.0, `status` command); replaces the last one, never spoken |
 | `operator.alive`     | room      | 0.8.0: `{alive, ts, idle_s}` every 10 s while the agent serves `next`/`say` (within 15 s); nothing while orphaned; `alive:false` on leave. The web UI dims the operator after ~20 s without it |
+| `operator.say_status` | in    | 0.9.0: `{seq, state, spoken_chars}` per state change of your say; `next` carries `say_status`, `says` the table |
 | `operator.status_request` | in    | the user asked what you are doing; `next` yields `{"type":"status_request"}` |
 
 *`out` here = emitted on the CLI's **stdout** (not published to the room).
@@ -245,6 +254,7 @@ Hardening flags (0.2.0) for unattended / background relay operation:
 | `--owner-pid <pid>` | 0.8.0 | Leave (with an announcement) as soon as `<pid>` ends, e.g. `--owner-pid $PPID`; repeatable; env `VOICEHOOK_OWNER_PID`. `$VOICEHOOK_AGENT_HOME/holder` is watched too. |
 | `--idle-say <text>` | 0.5.0 | Announcement before an idle leave (`''` = silent). |
 | `--force-persona` | 0.5.0 | Push persona/mode/graph even if another operator agent is in the room. |
+| `--username <name>` | 0.9.0 | The user's first name: in the greeting and, since 0.9.0, sent to the server (token `username=`, bridge join `username`) as participant attribute `vh.user`, so the voicebot knows whom it talks to. |
 | `--status-due <sec>` | 0.9.0 | `next` adds `status_due` + `hint` once the board is older than `<sec>` while work is in progress (default 45, env `VOICEHOOK_STATUS_DUE`, 0 = age rule off). |
 | `--no-control` | 0.5.0 | No local control socket (`say`/`next`/`leave`/`status` off). |
 | `--transport auto\|webrtc\|bridge` | 0.6.0 | How to reach the room. `auto` (default): WebRTC; the HTTPS bridge when `HTTPS_PROXY`/`ALL_PROXY` is set or the WebRTC connect fails/times out (one retry, logged). See below. |

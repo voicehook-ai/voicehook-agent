@@ -591,6 +591,91 @@ class TurnClock:
         return out
 
 
+# ----- 0.9.0: operator.say_status (worker -> operator) ------------------------------
+SAY_STATES = ("queued", "spoken", "interrupted", "requeued", "replaced")
+SAY_STUCK_S = 20.0          # queued/requeued longer than this -> hint
+SAYS_KEEP = 50              # says remembered for `voicehook-agent says`
+
+
+class SayStatus:
+    """Tracks what the voicebot did with each own `say` (operator.say_status
+    {seq, state, spoken_chars}; seq = the CLI's `_seq`). `next` hands out the state
+    changes since the last `next` as `say_status`, `says` shows the last state of
+    every say, and a say stuck in queued/requeued for SAY_STUCK_S yields a hint."""
+
+    def __init__(self, stuck_s: float = SAY_STUCK_S) -> None:
+        self.stuck_s = stuck_s
+        self._says: dict[int, dict] = {}
+        self._changes: list[dict] = []
+        self._hinted: set[tuple[int, str, float]] = set()
+
+    @staticmethod
+    def _t(now: float | None) -> float:
+        return time.monotonic() if now is None else now
+
+    def sent(self, seq: int, text: str = "", now: float | None = None) -> None:
+        t = self._t(now)
+        self._says[seq] = {"seq": seq, "state": "sent", "spoken_chars": 0,
+                           "text": " ".join(str(text).split())[:80], "at": t, "since": t}
+        while len(self._says) > SAYS_KEEP:
+            self._says.pop(next(iter(self._says)))
+
+    def update(self, payload: dict, now: float | None = None) -> dict | None:
+        """Apply one operator.say_status packet. Only own seqs count (the packet
+        goes to the whole room). Returns the compact change or None."""
+        if not isinstance(payload, dict):
+            return None
+        try:
+            seq = int(payload.get("seq"))
+        except (TypeError, ValueError):
+            return None
+        state = payload.get("state")
+        rec = self._says.get(seq)
+        if rec is None or state not in SAY_STATES:
+            return None
+        try:
+            chars = int(payload.get("spoken_chars") or 0)
+        except (TypeError, ValueError):
+            chars = 0
+        if rec["state"] != state:
+            rec["since"] = self._t(now)
+        rec["state"], rec["spoken_chars"] = state, chars
+        change = {"seq": seq, "state": state}
+        if state in ("interrupted", "requeued") and chars:
+            change["spoken_chars"] = chars
+        self._changes.append(change)
+        return change
+
+    def take(self, now: float | None = None) -> dict:
+        """{"say_status": [...]} plus {"say_hint": ...} for a stuck say, or {}."""
+        out: dict = {}
+        if self._changes:
+            out["say_status"], self._changes = self._changes, []
+        stuck = self.stuck(now)
+        if stuck:
+            out["say_hint"] = stuck
+        return out
+
+    def stuck(self, now: float | None = None) -> str | None:
+        t = self._t(now)
+        for rec in self._says.values():
+            key = (rec["seq"], rec["state"], rec["since"])
+            if rec["state"] in ("queued", "requeued") and t - rec["since"] > self.stuck_s \
+                    and key not in self._hinted:
+                self._hinted.add(key)
+                return (f"say seq {rec['seq']} haengt seit {round(t - rec['since'])} s in "
+                        f"{rec['state']} (Delta spricht oder der Nutzer redet): nicht "
+                        "nachschieben; veraltet? `voicehook-agent say --mode overwrite "
+                        "\"<Kurzfassung>\"`")
+        return None
+
+    def table(self, now: float | None = None) -> list[dict]:
+        t = self._t(now)
+        return [{"seq": r["seq"], "state": r["state"], "spoken_chars": r["spoken_chars"],
+                 "age_s": round(t - r["at"], 1), "text": r["text"]}
+                for r in self._says.values()]
+
+
 AGENT_SAID_MAX = 3          # entries in `agent_said`
 AGENT_SAID_CHARS = 400      # total chars in `agent_said`
 

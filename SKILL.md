@@ -59,6 +59,8 @@ tool calls, so every later call uses the absolute wrapper, e.g. `/tmp/vh-ab12cd/
 
 - `--name` / `--model` are mandatory (exit 2 without them): your real name and the exact
   model id you run on. Never claim a vendor you are not. Unknown model: `--model unbekannt`.
+- `--username <Vorname>` (optional, CLI 0.9.0 sends it to the server as `vh.user`): Delta knows
+  whom it talks to and addresses the user directly.
 - `<INVITE_URL>` must be the full invite link including `?invite=...` (the CLI sends it as
   `op_invite` and never prints it). A bare slug or a link without it fails with
   `operator invite required`: ask the user for the full link.
@@ -79,7 +81,8 @@ tool calls, so every later call uses the absolute wrapper, e.g. `/tmp/vh-ab12cd/
 
 `next` prints ONE JSON line (exit 3 once the call is over), with `agent_said` = Delta's own lines
 since the last `next`, `status_stale: true` = resend your board, `status_due: true` + `hint` (CLI
-0.9.0) = run the command in `hint` NOW, before anything else:
+0.9.0) = run the command in `hint` NOW, before anything else, `say_status` = what Delta did with
+your says (`vh says` = all), `say_hint` = a say waits > 20 s:
 
 | `type` | meaning | do |
 |---|---|---|
@@ -169,6 +172,7 @@ Quickstart B: `$D/out` (JSON lines) should show within ~5 s:
 | `operator.interrupt` | `{}` | stop speaking; unspoken rest comes back as `operator.revise` |
 | `operator.inject` | `{text, role?}` | context entry, not spoken |
 | `operator.status` | `{doing, open[], done[]}` | your status board (`vh status`), replaces the last one, never spoken |
+| `operator.say_status` | ← `{seq, state, spoken_chars}` | CLI 0.9.0: fate of your say (`queued`/`spoken`/`interrupted`/`requeued`/`replaced`); `next` carries `say_status`, `vh says` the last state, `say_hint` = stuck > 20 s |
 | `operator.alive` | `{alive, ts, idle_s}` | sent by the CLI itself (0.8.0) every 10 s while you serve `next`/`say`; `alive:false` on leave |
 | `transcript` | ← `{role, text}` | `user` = the human; `operator` = your spoken text; `agent` = voicebot's own answer |
 | `transcript.live` | ← `{phase, role, id, text?, interrupted?}` | your `say` started (`start`, full text) / finished (`end`) playing; for the browser only, NOT proof it was spoken (use `transcript`) |

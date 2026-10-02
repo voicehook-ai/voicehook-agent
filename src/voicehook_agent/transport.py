@@ -139,13 +139,15 @@ class BridgeRoom:
 
     def __init__(self, api_base: str, slug: str, identity: str, *, name: str, model: str,
                  invite: str | None = None, user_agent: str = "voicehook-agent",
-                 client_factory: Callable[..., httpx.AsyncClient] | None = None) -> None:
+                 client_factory: Callable[..., httpx.AsyncClient] | None = None,
+                 username: str | None = None) -> None:
         self.api_base = api_base.rstrip("/")
         self.slug = slug
         self.identity = identity
         self.name = name
         self.model = model
         self.invite = invite
+        self.username = username
         self.user_agent = user_agent
         self._client_factory = client_factory or _client
         self._http: httpx.AsyncClient | None = None
@@ -181,6 +183,8 @@ class BridgeRoom:
                       "idle_timeout": 0}
         if self.invite:
             body["invite"] = self.invite
+        if self.username:  # 0.9.0: -> participant attribute vh.user
+            body["username"] = self.username
         try:
             r = await self._http.post(f"{self.api_base}/api/bridge/join", json=body)
         except httpx.HTTPError as e:
