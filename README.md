@@ -45,6 +45,7 @@ voicehook-agent leave --say "Bis bald."                 # clean exit
 | `next [--timeout SEC]` | `{"type":"user","text":...}`, `{"type":"revise","text":...,"unspoken":[...]}` (answer with `say --mode overwrite`), `{"type":"timeout"}`, `{"type":"ended"}` | 0, 3 on `ended` |
 | `leave [--say TEXT]` | `{"type":"leaving"}` | 0 |
 | `status` | room, identity, connected, pending events, idle seconds, peers | 0 |
+| `status [TEXT] [--doing T] [--open T]... [--done T]... [-f board.json]` (0.7.0) | `{"type":"board","board":{...}}`: sends your status board | 0 ok, 1 failed |
 
 - `next` returns ONE event, oldest first; `pending` says how many more are queued.
   Turns spoken while you were thinking are kept, never lost. `--timeout 0` only
@@ -80,6 +81,21 @@ voicehook-agent leave --say "Bis bald."                 # clean exit
   `{"topic":"operator.persona"}` on stdin is still sent as you wrote it.
 - Speak the language of the call: answer in the language the user speaks
   (the auto-greet is German).
+- **Keep the main loop free (0.7.0):** between `next` and `say` do nothing slow.
+  Anything over ~3 s (shell, web, file edits, builds, lookups) goes to a background
+  agent/subtask; meanwhile `say` a short holding line and `status` the board. The CLI
+  measures the time from a `user` turn leaving `next` to your next `say`; over 8 s the
+  following `next` carries `"latency_warning": {"seconds": X, "hint": "delegate slow
+  work, keep main loop free"}`. Nothing is spoken automatically.
+- **Status board (0.7.0):** on every task change (started, finished, new) send the whole
+  board: `voicehook-agent status --doing "baut gerade den Fix" --open "Tests" --done
+  "Analyse"` (or `-f board.json` with `{doing, open[], done[]}`); `status ""` when
+  finished. It replaces the last board at a fixed place in the voicebot's instructions
+  (never spoken, server budget 600 chars, at most one update per 5 s applied). The
+  voicebot answers "was macht Claude gerade?" from it and calls you by your `--name`.
+  When the user asks, `next` yields `{"type":"status_request"}`: send `status` at once.
+  `next` adds `"status_stale": true` when your board is older than 5 min and the user
+  spoke since.
 
 > Since 0.2.0, `--keep-alive` is the default: **stdin-EOF no longer quits** and
 > transient room-disconnects auto-reconnect. Run with a closed stdin in the
@@ -174,6 +190,8 @@ stdin (JSONL):
 | `operator.revise`     | in        | agent → you: `{unspoken[], new, text}` — merge into ONE statement, send with `mode:"overwrite"` within 8s |
 | `operator.inject`     | out       | force voice-ai to react (user-role)    |
 | `operator.backchannel`| out       | silent operator↔agent side-channel, relayed as-is (#10) |
+| `operator.status`     | out       | your status board `{doing, open[], done[]}` (0.7.0, `status` command); replaces the last one, never spoken |
+| `operator.status_request` | in    | the user asked what you are doing; `next` yields `{"type":"status_request"}` |
 
 *`out` here = emitted on the CLI's **stdout** (not published to the room).
 
