@@ -370,6 +370,10 @@ OWNER_GONE_SAY = (
 ALIVE_INTERVAL = 10.0
 ALIVE_WINDOW = 15.0
 OWNER_POLL = 2.0
+# 0.10.1: a join with no human in the room leaves after this many seconds
+# (--no-human-timeout MIN). Separate from --idle-timeout (the brain is silent).
+NO_HUMAN_TIMEOUT = 120.0
+CALL_ENDED_MSG = "call ended by the server, leaving (no reconnect)"
 
 
 def _quit_signals() -> list:
@@ -393,7 +397,8 @@ class _Control:
     socket (say / next / leave / status)."""
 
     def __init__(self, slug: str, ident: str, say_tracker: relay.SayTracker,
-                 echo: relay.EchoSuppressor, idle_timeout: float) -> None:
+                 echo: relay.EchoSuppressor, idle_timeout: float,
+                 no_human_timeout: float = NO_HUMAN_TIMEOUT) -> None:
         self.slug = slug
         self.ident = ident
         self.say_tracker = say_tracker
@@ -411,6 +416,11 @@ class _Control:
         self.activity_lines = vactivity.PUBLISH_LINES
         self.activity_clock = time.monotonic
         self.leaving = False
+        # 0.10.1: no-human guard. Starts at join (nobody seen yet), stops while a
+        # human is in the room, restarts when the last one leaves. Spans reconnects.
+        self.no_human_timeout = no_human_timeout
+        self.no_human_since: float | None = time.monotonic()
+        self.call_ended: str | None = None  # reason of a server-side call end
         # 0.7.0: latency_warning + status_stale; 0.9.0: status_due + hint for `next`
         self.clock = relay.TurnClock(due_s=relay.status_due_seconds())
         self.agent_said = relay.AgentSaid()  # 0.7.0: Delta's own lines for `next`
@@ -423,6 +433,15 @@ class _Control:
     def detach(self) -> None:
         self.room = None
         self.room_ready.clear()
+
+    def humans_changed(self, room) -> None:
+        """Recount humans in `room` (see relay.is_human_peer), arm/stop the guard."""
+        n = sum(1 for p in room.remote_participants.values()
+                if relay.is_human_peer(_kind_label(p), dict(getattr(p, "attributes", None) or {})))
+        if n:
+            self.no_human_since = None
+        elif self.no_human_since is None:
+            self.no_human_since = time.monotonic()
 
     async def wait_room(self, timeout: float) -> rtc.Room | None:
         if self.room is not None:
@@ -657,6 +676,39 @@ async def _idle_loop(ctl: _Control, json_mode: bool, announce: str | None) -> No
         return
 
 
+async def _no_human_loop(ctl: _Control, json_mode: bool) -> None:
+    """0.10.1 ghost guard: leave when no human was in the room for
+    `ctl.no_human_timeout` seconds (Vorfall 04.10.: Claude sat alone in the room
+    after Delta had ended the call). A reconnect is no human: never resets."""
+    if ctl.no_human_timeout <= 0:
+        return
+    tick = min(5.0, max(0.05, ctl.no_human_timeout / 4))
+    while not ctl.quit.is_set():
+        try:
+            await asyncio.wait_for(ctl.quit.wait(), timeout=tick)
+            return
+        except asyncio.TimeoutError:
+            pass
+        since = ctl.no_human_since
+        if since is None or time.monotonic() - since < ctl.no_human_timeout:
+            continue
+        await _leave_with(ctl, json_mode,
+                          f"no-human-timeout: no human in the room for "
+                          f"{ctl.no_human_timeout:.0f}s, leaving (no reconnect)", None)
+        return
+
+
+async def _end_call(ctl: _Control, json_mode: bool, reason: str) -> None:
+    """Server ended the call (topic `call_end`): tell the brain, leave, no reconnect."""
+    if ctl.call_ended is not None:
+        return
+    ctl.call_ended = reason or "unknown"
+    ctl.events.put_front_nowait({"type": "call_end", "reason": ctl.call_ended})
+    _print_event(json_mode, "system", f"call-ended reason={ctl.call_ended}",
+                 topic="call_end", reason=ctl.call_ended)
+    await _leave_with(ctl, json_mode, CALL_ENDED_MSG, None)
+
+
 def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -882,6 +934,9 @@ async def _connect_and_listen(
             tok = await _mint_token(api_base, slug, ident, name=agent_name, model=model,
                                     op_invite=invite, username=username)
         except TokenMintError as e:
+            if e.status == 410:  # 0.10.1: call ended / room gone -> never rejoin
+                print(f"[error] call ended ({e}), not joining", file=sys.stderr, flush=True)
+                return 5, "CALL_ENDED"
             if e.status == 403 and "operator invite required" in e.detail.lower():
                 print(OPERATOR_INVITE_REQUIRED_ERROR, file=sys.stderr, flush=True)
                 return 3, "TOKEN_FORBIDDEN"
@@ -937,6 +992,15 @@ async def _connect_and_listen(
                 _emit_wake(json_mode, decision.payload)
                 if notify_url:
                     asyncio.create_task(_post_webhook(http_client, notify_url, decision.payload))
+        elif topic == "call_end":
+            # 0.10.1: the worker ended the call (idle_no_human, max_duration, ...).
+            reason = str(payload.get("reason") or "unknown")
+            if ctl is not None:
+                asyncio.ensure_future(_end_call(ctl, json_mode, reason))
+            else:
+                _emit_meta(f"call-ended reason={reason}")
+                disconnect_reason["name"] = "CALL_ENDED"
+                stop.set()
         elif topic.startswith("operator."):
             if topic == "operator.revise" and ctl is not None:
                 ctl.events.put_nowait(relay.revise_event(payload))
@@ -957,12 +1021,16 @@ async def _connect_and_listen(
 
     def _on_participant_connected(p) -> None:
         _emit_meta(f"peer-joined: {p.identity} ({_kind_label(p)})")
+        if ctl is not None:
+            ctl.humans_changed(room)
 
     def _on_participant_disconnected(p) -> None:
         ident_ = p.identity
         audible.discard(ident_)
         speakers.discard(ident_)
         _emit_meta(f"peer-left: {ident_} ({_kind_label(p)})")
+        if ctl is not None:
+            ctl.humans_changed(room)
 
     room.on("participant_connected", _on_participant_connected)
     room.on("participant_disconnected", _on_participant_disconnected)
@@ -1025,6 +1093,9 @@ async def _connect_and_listen(
         else:
             await asyncio.wait_for(room.connect(tok["url"], tok["token"]), timeout=connect_timeout)
     except Exception as e:
+        if isinstance(e, vtransport.BridgeError) and e.status == 410:
+            print("[error] call ended (bridge HTTP 410), not joining", file=sys.stderr, flush=True)
+            return 5, "CALL_ENDED"
         what = "bridge" if transport == "bridge" else "livekit"
         print(f"[error] {what} connect failed: {e!r}", file=sys.stderr)
         try:
@@ -1080,6 +1151,7 @@ async def _connect_and_listen(
 
     if ctl is not None:
         ctl.attach(room)
+        ctl.humans_changed(room)
 
     def _other_operators() -> list[str]:
         return relay.other_operators(
@@ -1233,6 +1305,7 @@ async def _join(
     graph_interval: float = 60.0,
     strict: bool = False,
     idle_timeout: float = 600.0,
+    no_human_timeout: float = NO_HUMAN_TIMEOUT,
     idle_say: str | None = DEFAULT_IDLE_SAY,
     owner_pids: list[int] | None = None,
     owner_say: str | None = OWNER_GONE_SAY,
@@ -1296,7 +1369,7 @@ async def _join(
     http_client = httpx.AsyncClient(headers={"user-agent": _USER_AGENT}) if notify_url else None
 
     # Local control socket for `say` / `next` / `leave` / `status` + idle guard.
-    ctl = _Control(slug, ident, say_tracker, echo, idle_timeout)
+    ctl = _Control(slug, ident, say_tracker, echo, idle_timeout, no_human_timeout)
     if status_due is not None:
         ctl.clock.due_s = status_due
     server: vsession.ControlServer | None = None
@@ -1343,6 +1416,7 @@ async def _join(
                      topic="_meta")
     guard_tasks = [asyncio.create_task(_owner_loop(ctl, watched, json_mode, owner_say)),
                    asyncio.create_task(_alive_loop(ctl)),
+                   asyncio.create_task(_no_human_loop(ctl, json_mode)),
                    asyncio.create_task(_activity_loop(ctl, sess_dir / vactivity.ACTIVITY_NAME))]
 
     rc = 0
@@ -1368,6 +1442,8 @@ async def _join(
                 _print_event(json_mode, "system", msg, topic="_meta")
                 print(f"[warn] {msg}", file=sys.stderr, flush=True)
                 continue
+            if reason == "CALL_ENDED" and not first:
+                rc = 0  # the call we were in ended: a clean end, not a join failure
             first = False
             # Clean quit (stdin /q or {"topic":"quit"}): reason is None.
             if reason is None:
@@ -1376,6 +1452,7 @@ async def _join(
             # keep-alive is on. Terminal reasons (host left / room closed /
             # client-initiated) end the session.
             # A 403 on the token mint (invite missing/invalid) will not heal by retrying.
+            # 0.10.1: CALL_ENDED (call_end topic, 410 on rejoin) is terminal too.
             if (not keep_alive or relay.is_terminal_disconnect(reason)
                     or reason == "TOKEN_FORBIDDEN"):
                 _print_event(json_mode, "system",
@@ -1647,6 +1724,10 @@ def main(argv: list[str] | None = None) -> None:
         help="leave the call (with a short announcement) when the agent sent no say/next/stdin line for MIN minutes; prevents orphaned joins. 0 = off. Default 10.",
     )
     p_join.add_argument(
+        "--no-human-timeout", type=float, default=NO_HUMAN_TIMEOUT / 60.0, metavar="MIN",
+        help="leave the call when no human has been in the room for MIN minutes (counted from the join, reset only by a human, not by a reconnect). Unlike --idle-timeout (your brain went silent) this ends ghost joins in empty rooms. 0 = off. Default 2.",
+    )
+    p_join.add_argument(
         "--idle-say", default=DEFAULT_IDLE_SAY,
         help="what voice-ai says before an idle-timeout leave ('' = leave silently).",
     )
@@ -1753,6 +1834,7 @@ def main(argv: list[str] | None = None) -> None:
                 no_greet=args.no_greet, graph_path=args.graph,
                 graph_interval=args.graph_interval, strict=args.strict_relay,
                 idle_timeout=max(0.0, args.idle_timeout) * 60.0,
+                no_human_timeout=max(0.0, args.no_human_timeout) * 60.0,
                 idle_say=args.idle_say or None,
                 owner_pids=args.owner_pid,
                 force_persona=args.force_persona, control=not args.no_control,
