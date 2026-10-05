@@ -267,11 +267,23 @@ TERMINAL_DISCONNECT_REASONS: frozenset[str] = frozenset({
     "PARTICIPANT_REMOVED",
     "USER_REJECTED",
     "USER_UNAVAILABLE",
+    # 0.10.1: the server ended the call (topic `call_end`, or /api/token or the
+    # bridge answered 410 "call has ended"). Never rejoin, keep-alive or not.
+    "CALL_ENDED",
 })
 
 
 def is_terminal_disconnect(reason_name: str) -> bool:
     return (reason_name or "").upper() in TERMINAL_DISCONNECT_REASONS
+
+
+def is_human_peer(kind: str, attrs: dict | None) -> bool:
+    """A real person in the room: a browser/phone participant (kind user or sip)
+    that is not an operator agent (``vh.role == "agent"``). The voice-ai worker
+    is kind ``agent`` and never counts."""
+    if kind not in ("user", "sip"):
+        return False
+    return (attrs or {}).get("vh.role") != "agent"
 
 
 # --------------------------------------------------------------------------- #

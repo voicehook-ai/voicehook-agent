@@ -43,7 +43,9 @@ SSE_MAX_FAILS = 4
 
 
 class BridgeError(RuntimeError):
-    pass
+    def __init__(self, msg: str, status: int | None = None) -> None:
+        super().__init__(msg)
+        self.status = status  # HTTP status of a rejected bridge call (410 = call ended)
 
 
 def proxy_env(env: dict | None = None) -> str | None:
@@ -193,7 +195,8 @@ class BridgeRoom:
         if r.status_code != 200:
             detail = _detail(r)
             await self._close_http()
-            raise BridgeError(f"bridge join failed: HTTP {r.status_code} {detail}")
+            raise BridgeError(f"bridge join failed: HTTP {r.status_code} {detail}",
+                              status=r.status_code)
         j = r.json()
         self._session = j["session"]
         self.expires_in = j.get("expires_in")
