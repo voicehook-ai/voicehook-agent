@@ -419,13 +419,18 @@ STATUS_STALE_S = 300.0     # board older than this and the user spoke since -> s
 STATUS_DUE_S = 45.0        # 0.9.0: board older than this (work in progress) -> status_due
 STATUS_DUE_ENV = "VOICEHOOK_STATUS_DUE"
 STATUS_CMD = 'voicehook-agent status --doing "<Zwischenstand, ETA>" --open "<offen>" --done "<erledigt>"'
+# 0.10.0: every status_due hint also asks for the FAQ (predicted next questions).
+FAQ_HINT = ("Welche 3 Fragen stellt der Nutzer wahrscheinlich als Nächstes? "
+            'Beantworte sie vorab per --faq "Frage::Antwort"')
 STATUS_HINTS = {
-    "status_request": "Nutzer fragt nach Stand: Board jetzt aktualisieren: " + STATUS_CMD,
-    "empty": "Board leer, Delta weiss nichts: jetzt setzen: " + STATUS_CMD,
-    "stale": "Board veraltet, Delta antwortet sonst falsch: jetzt aktualisieren: " + STATUS_CMD,
+    "status_request": "Nutzer fragt nach Stand: Board jetzt aktualisieren: " + STATUS_CMD + ". " + FAQ_HINT,
+    "empty": "Board leer, Delta weiss nichts: jetzt setzen: " + STATUS_CMD + ". " + FAQ_HINT,
+    "stale": "Board veraltet, Delta antwortet sonst falsch: jetzt aktualisieren: " + STATUS_CMD + ". " + FAQ_HINT,
 }
 SAY_PROGRESS_HINT = ("Fortschritt angesagt, Board ist aelter: Delta kennt ihn sonst nicht. "
-                     "Jetzt: " + STATUS_CMD)
+                     "Jetzt: " + STATUS_CMD + ". " + FAQ_HINT)
+FAQ_MAX = 6          # pairs per board
+FAQ_CHARS = 200      # per question and per answer
 _PROGRESS_RX = re.compile(
     r"\b(fertig|erledigt|abgeschlossen|live|deploy\w*|gemerged|merged|done|finished|shipped)\b",
     re.IGNORECASE)
@@ -465,10 +470,31 @@ def status_request_event(payload: dict, now: float | None = None) -> dict:
             "hint": STATUS_HINTS["status_request"]}
 
 
+def parse_faq(items: list[str] | None, warn=None) -> list[dict]:
+    """`--faq "Frage::Antwort"` values -> [{"q", "a"}]: split on the FIRST "::",
+    both halves stripped, an item with an empty half (or no "::") is skipped with
+    a warning, at most FAQ_MAX pairs, q and a capped to FAQ_CHARS each."""
+    out: list[dict] = []
+    for raw in items or []:
+        q, sep, a = str(raw).partition("::")
+        q, a = q.strip(), a.strip()
+        if not sep or not q or not a:
+            if warn is not None:
+                warn(f"[warn] --faq {raw!r} skipped: expected \"Frage::Antwort\" with both halves")
+            continue
+        if len(out) >= FAQ_MAX:
+            if warn is not None:
+                warn(f"[warn] --faq: more than {FAQ_MAX} pairs, the rest is dropped")
+            break
+        out.append({"q": q[:FAQ_CHARS], "a": a[:FAQ_CHARS]})
+    return out
+
+
 def build_board(text: str | None = None, doing: str | None = None,
                 open_: list[str] | None = None, done: list[str] | None = None,
-                file_obj: dict | None = None) -> dict:
-    """operator.status payload {doing, open[], done[]}. The server caps it (600 chars)."""
+                file_obj: dict | None = None, faq: list[dict] | None = None) -> dict:
+    """operator.status payload {doing, open[], done[]} (+ faq[{q, a}] when given,
+    0.10.0). The server caps it (600 chars)."""
     if file_obj is not None:
         if not isinstance(file_obj, dict):
             raise ValueError("board file must hold a JSON object {doing, open, done}")
@@ -484,6 +510,8 @@ def build_board(text: str | None = None, doing: str | None = None,
     base["open"] += list(open_ or [])
     base["done"] += list(done or [])
     base["doing"] = base["doing"].strip()
+    if faq:
+        base["faq"] = list(faq)
     return base
 
 

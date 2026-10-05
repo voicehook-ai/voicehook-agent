@@ -116,6 +116,19 @@ Delta answers the user from your board while you work in the background. Stale b
 - A `say` with progress words ("fertig", "live", "deploye") without a board since your last `say`
   returns `status_reason: "say_progress"`: push the board too.
 - Only ONE `say` per turn. Finished: `--done "..."` instead of `vh status ""` (empty = due).
+- FAQ (CLI 0.10.0): on EVERY board update predict the user's next 3 likely questions and answer
+  them in advance: `vh status --doing "..." --faq "Wann live?::in 2 min" --faq "Tests?::gruen"`
+  (repeatable, split on the first `::`, max 6 pairs, 200 chars each). Sent as `faq: [{q, a}]`.
+
+### Activity feed (operator.activity, CLI 0.10.0)
+
+Delta sees what you do, one line per tool call. Install once: `voicehook-agent hook install`
+(merges a PostToolUse hook, command `voicehook-agent-hook post-tool-use`, into
+`~/.claude/settings.json`; `hook print` shows the snippet). A line is `HH:MM:SS Tool: description`
+(only the tool's own `description`, scrubbed for secrets); never commands, arguments, paths, file
+contents or output. The join publishes the newest 15 lines `{lines[], ts}` on change, at most every
+5 s. Several live joins: nothing is written (set `VOICEHOOK_SESSION=<slug>/<identity>`). So: give
+Bash/Agent calls a short, speakable `description`.
 - Idle guard: no `say`/`next` for 10 min (`--idle-timeout MIN`, 0 = off) = join leaves, also across
   reconnects. `--owner-pid $PPID` (CLI 0.8.0) leaves as soon as your session ends; a dead FIFO holder too.
 - Sign of life (CLI 0.8.0): while you serve `next`/`say` the join sends `operator.alive` every 10 s.
@@ -171,7 +184,8 @@ Quickstart B: `$D/out` (JSON lines) should show within ~5 s:
 | `operator.persona` | `{text}` | replaces the voicebot's instructions for everyone (see above) |
 | `operator.interrupt` | `{}` | stop speaking; unspoken rest comes back as `operator.revise` |
 | `operator.inject` | `{text, role?}` | context entry, not spoken |
-| `operator.status` | `{doing, open[], done[]}` | your status board (`vh status`), replaces the last one, never spoken |
+| `operator.status` | `{doing, open[], done[], faq?[{q, a}]}` | your status board (`vh status`), replaces the last one, never spoken |
+| `operator.activity` | `{lines[], ts}` | sent by the CLI itself (0.10.0) from the PostToolUse hook: newest 15 tool-call lines, at most every 5 s |
 | `operator.say_status` | ← `{seq, state, spoken_chars}` | CLI 0.9.0: fate of your say (`queued`/`spoken`/`interrupted`/`requeued`/`replaced`); `next` carries `say_status`, `vh says` the last state, `say_hint` = stuck > 20 s |
 | `operator.alive` | `{alive, ts, idle_s}` | sent by the CLI itself (0.8.0) every 10 s while you serve `next`/`say`; `alive:false` on leave |
 | `transcript` | ← `{role, text}` | `user` = the human; `operator` = your spoken text; `agent` = voicebot's own answer |

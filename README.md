@@ -135,12 +135,61 @@ voicehook-agent leave --say "Bis bald."                 # clean exit
   ```json
   {"ok": true, "type": "timeout", "pending": 0, "status_due": true,
    "status_reason": "stale", "board_age_s": 61.2,
-   "hint": "Board veraltet, Delta antwortet sonst falsch: jetzt aktualisieren: voicehook-agent status --doing \"<Zwischenstand, ETA>\" --open \"<offen>\" --done \"<erledigt>\""}
+   "hint": "Board veraltet, Delta antwortet sonst falsch: jetzt aktualisieren: voicehook-agent status --doing \"<Zwischenstand, ETA>\" --open \"<offen>\" --done \"<erledigt>\". Welche 3 Fragen stellt der Nutzer wahrscheinlich als Nächstes? Beantworte sie vorab per --faq \"Frage::Antwort\""}
   ```
+- **FAQ on the board (0.10.0):** on EVERY board update also predict the user's next
+  likely questions and answer them in advance, so Delta can answer without asking you:
+  `voicehook-agent status --doing "deployt den Worker, ETA 2 min" --faq "Wann ist es
+  live?::in etwa 2 Minuten" --faq "Laufen die Tests?::ja, alle gruen"`. `--faq` is
+  repeatable and split on the first `::` (both halves stripped; an item with an empty
+  half is skipped with a warning on stderr); at most 6 pairs, question and answer capped
+  to 200 chars each. Payload: `{"doing": "...", "open": [], "done": [], "faq": [{"q":
+  "Wann ist es live?", "a": "in etwa 2 Minuten"}]}`. Without `--faq` the field is
+  omitted. Every `status_due` hint now also asks: "Welche 3 Fragen stellt der Nutzer
+  wahrscheinlich als Nächstes? Beantworte sie vorab per --faq".
 
 > Since 0.2.0, `--keep-alive` is the default: **stdin-EOF no longer quits** and
 > transient room-disconnects auto-reconnect. Run with a closed stdin in the
 > background without the FIFO sleep-holder hack. See [Relay flags](#relay-flags).
+
+## Activity feed (operator.activity, 0.10.0)
+
+Delta knows what the coding agent is doing in the background, without asking. A Claude
+Code `PostToolUse` hook writes ONE short line per tool call into `activity.log` of the
+running join's session dir; the join publishes the newest 15 lines (oldest first) as
+`operator.activity` `{"lines": ["17:12:03 Bash: Tests laufen lassen", "17:12:09 Edit"],
+"ts": 1759418000.0}`, only on change and at most once per 5 s (a change inside the
+window goes out when it ends, last one wins).
+
+Install once (merges idempotently into `~/.claude/settings.json`, keeps all other
+keys and hooks, refuses to touch invalid JSON):
+
+```bash
+voicehook-agent hook install              # or: --settings PATH
+voicehook-agent hook print                # the snippet, to paste by hand
+```
+
+```json
+{"hooks": {"PostToolUse": [{"matcher": "*", "hooks": [
+  {"type": "command", "command": "voicehook-agent-hook post-tool-use", "timeout": 5}]}]}}
+```
+
+`voicehook-agent-hook` is a light console script (no livekit import, starts fast);
+`voicehook-agent hook post-tool-use` does the same. The hook always exits 0 and prints
+nothing.
+
+- **A line contains:** local time, the tool name (`[A-Za-z0-9_.:-]`, max 40) and the
+  tool's own `description` if it has one (Bash, Agent/Task), max 120 chars:
+  `HH:MM:SS Tool: description` or `HH:MM:SS Tool`.
+- **A line never contains:** command text, arguments, file paths, file contents or
+  tool output. The description runs through a secret scrubber (API keys like `sk_`,
+  `rk_`, `re_`, `whsec_`, `vhw_`, `ghp_`, `github_pat_`, `xox?-`, `AKIA`, `AIza`,
+  `Bearer ...`, JWTs, `key=`/`token=`/`password=`/`secret=` values, long base64/hex
+  strings become `[redacted]`); the join scrubs again before publishing.
+- **Which call:** `VOICEHOOK_SESSION=<slug>/<identity>` wins; otherwise the one live
+  join on this machine. With zero or several live joins nothing is written, so one
+  Claude session never leaks into another call. The file is cleared when a join starts
+  and ends, mode 0600, trimmed to the last 50 lines above 200.
 
 ## Install
 
@@ -231,7 +280,8 @@ stdin (JSONL):
 | `operator.revise`     | in        | agent → you: `{unspoken[], new, text}` — merge into ONE statement, send with `mode:"overwrite"` within 8s |
 | `operator.inject`     | out       | force voice-ai to react (user-role)    |
 | `operator.backchannel`| out       | silent operator↔agent side-channel, relayed as-is (#10) |
-| `operator.status`     | out       | your status board `{doing, open[], done[]}` (0.7.0, `status` command); replaces the last one, never spoken |
+| `operator.status`     | out       | your status board `{doing, open[], done[], faq?[{q, a}]}` (0.7.0, `status` command; `faq` 0.10.0); replaces the last one, never spoken |
+| `operator.activity`   | room      | 0.10.0: `{lines[], ts}`, newest 15 tool-call lines of the coding agent (PostToolUse hook), on change, at most every 5 s |
 | `operator.alive`     | room      | 0.8.0: `{alive, ts, idle_s}` every 10 s while the agent serves `next`/`say` (within 15 s); nothing while orphaned; `alive:false` on leave. The web UI dims the operator after ~20 s without it |
 | `operator.say_status` | in    | 0.9.0: `{seq, state, spoken_chars}` per state change of your say; `next` carries `say_status`, `says` the table |
 | `operator.status_request` | in    | the user asked what you are doing; `next` yields `{"type":"status_request"}` |
