@@ -372,7 +372,9 @@ ALIVE_WINDOW = 15.0
 OWNER_POLL = 2.0
 # 0.10.1: a join with no human in the room leaves after this many seconds
 # (--no-human-timeout MIN). Separate from --idle-timeout (the brain is silent).
-NO_HUMAN_TIMEOUT = 120.0
+# 150 s: just above the server grace (VH_IDLE_NO_HUMAN_SECONDS 120 s, Oliver 05.10.),
+# so the server ends the call first and the CLI never leaves a call the server keeps.
+NO_HUMAN_TIMEOUT = 150.0
 CALL_ENDED_MSG = "call ended by the server, leaving (no reconnect)"
 
 
@@ -1725,7 +1727,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     p_join.add_argument(
         "--no-human-timeout", type=float, default=NO_HUMAN_TIMEOUT / 60.0, metavar="MIN",
-        help="leave the call when no human has been in the room for MIN minutes (counted from the join, reset only by a human, not by a reconnect). Unlike --idle-timeout (your brain went silent) this ends ghost joins in empty rooms. 0 = off. Default 2.",
+        help="leave the call when no human has been in the room for MIN minutes (counted from the join, reset only by a human, not by a reconnect). Unlike --idle-timeout (your brain went silent) this ends ghost joins in empty rooms. 0 = off. Default 2.5 (just above the server grace of 120 s).",
     )
     p_join.add_argument(
         "--idle-say", default=DEFAULT_IDLE_SAY,

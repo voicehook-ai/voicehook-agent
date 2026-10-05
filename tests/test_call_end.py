@@ -184,3 +184,12 @@ def test_positive_control_network_drop_still_reconnects(fake_env):
 
     n, rc = asyncio.run(run())
     assert n == 2 and rc == 0
+
+
+def test_no_human_timeout_default_is_above_server_grace():
+    """Oliver 05.10.: Server-Frist 120 s; die CLI geht erst danach (150 s), nie vorher."""
+    import inspect
+
+    from voicehook_agent import cli
+    assert cli.NO_HUMAN_TIMEOUT == 150.0 > 120.0
+    assert "default=NO_HUMAN_TIMEOUT / 60.0" in inspect.getsource(cli.main)  # Flag-Default = Konstante

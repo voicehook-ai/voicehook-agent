@@ -301,7 +301,7 @@ Hardening flags (0.2.0) for unattended / background relay operation:
 | `--say-ttl <sec>` | #9 | Drop a `operator.say` older than `<sec>` seconds, or superseded by a newer user-turn, instead of speaking it stale. |
 | `--strict-relay` | #8 | Inject a bundled strict-relay persona at connect: the voicebot speaks **only** pushed text and never self-generates. Reuses `--persona-file` semantics; overridden by `--persona`/`--persona-file`. |
 | `--idle-timeout <min>` | 0.5.0 | Leave when the agent sent no `say`/`next`/stdin line for `<min>` minutes (default 10, `0` off). |
-| `--no-human-timeout <min>` | 0.10.1 | Leave when no human has been in the room for `<min>` minutes (default 2, `0` off); a reconnect does not reset it. Server call end (`call_end`, `ROOM_DELETED`, HTTP 410) always ends the join, no reconnect even with `--keep-alive`. |
+| `--no-human-timeout <min>` | 0.10.1 | Leave when no human has been in the room for `<min>` minutes (default 2.5, just above the server grace of 120 s; `0` off); a reconnect does not reset it. Server call end (`call_end`, `ROOM_DELETED`, HTTP 410) always ends the join, no reconnect even with `--keep-alive`. |
 | `--owner-pid <pid>` | 0.8.0 | Leave (with an announcement) as soon as `<pid>` ends, e.g. `--owner-pid $PPID`; repeatable; env `VOICEHOOK_OWNER_PID`. `$VOICEHOOK_AGENT_HOME/holder` is watched too. |
 | `--idle-say <text>` | 0.5.0 | Announcement before an idle leave (`''` = silent). |
 | `--force-persona` | 0.5.0 | Push persona/mode/graph even if another operator agent is in the room. |
