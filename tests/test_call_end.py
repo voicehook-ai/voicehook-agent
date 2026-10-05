@@ -193,3 +193,84 @@ def test_no_human_timeout_default_is_above_server_grace():
     from voicehook_agent import cli
     assert cli.NO_HUMAN_TIMEOUT == 150.0 > 120.0
     assert "default=NO_HUMAN_TIMEOUT / 60.0" in inspect.getsource(cli.main)  # Flag-Default = Konstante
+
+
+# -- 0.10.2: 409 "no human in the room" -> clear message, wait, retry; 410 stays terminal --
+def test_409_waits_for_human_then_joins(fake_env, monkeypatch, capsys):
+    _FakeRoom.peers = HUMAN
+    monkeypatch.setattr(cli, "NO_HUMAN_RETRY_S", 0.1, raising=False)
+    calls = []
+
+    async def mint(*a, **k):
+        calls.append(time.monotonic())
+        if len(calls) < 3:
+            raise cli.TokenMintError(409, '{"detail":"no human in the room"}')
+        return {"url": "wss://fake", "token": "t"}
+
+    monkeypatch.setattr(cli, "_mint_token", mint)
+
+    async def run():
+        join = asyncio.create_task(_join(idle_timeout=0, keep_alive=True))
+        await asyncio.sleep(0.6)
+        joined = len(_FakeRoom.instances)
+        _FakeRoom.instances[0].emit("call_end", {"reason": "hangup"})
+        return joined, await asyncio.wait_for(join, 5)
+
+    joined, rc = asyncio.run(run())
+    assert len(calls) == 3 and joined == 1 and rc == 0
+    err = capsys.readouterr().err
+    assert err.count("no human in the room yet (HTTP 409)") == 1      # one clear message, no spam
+
+
+def test_409_gives_up_after_max_wait(fake_env, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "NO_HUMAN_RETRY_S", 0.05, raising=False)
+    monkeypatch.setattr(cli, "NO_HUMAN_WAIT_MAX_S", 0.3, raising=False)
+    calls = []
+
+    async def mint(*a, **k):
+        calls.append(1)
+        raise cli.TokenMintError(409, "no human in the room")
+
+    monkeypatch.setattr(cli, "_mint_token", mint)
+    rc = asyncio.run(asyncio.wait_for(_join(idle_timeout=0, keep_alive=False), 5))
+    assert rc == 6 and _FakeRoom.instances == []
+    assert 5 <= len(calls) <= 9                                       # 0.3 s / 0.05 s + first try
+    assert "still no human in the room after" in capsys.readouterr().err
+
+
+def test_410_after_409_stops_at_once(fake_env, monkeypatch):
+    monkeypatch.setattr(cli, "NO_HUMAN_RETRY_S", 0.05, raising=False)
+    calls = []
+
+    async def mint(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            raise cli.TokenMintError(409, "no human in the room")
+        raise cli.TokenMintError(410, "call has ended")
+
+    monkeypatch.setattr(cli, "_mint_token", mint)
+    rc = asyncio.run(asyncio.wait_for(_join(idle_timeout=0, keep_alive=True), 5))
+    assert rc == 5 and len(calls) == 2
+
+
+def test_bridge_409_retries(fake_env, monkeypatch):
+    _FakeRoom.peers = HUMAN
+    monkeypatch.setattr(cli, "NO_HUMAN_RETRY_S", 0.05, raising=False)
+    tries = []
+
+    class _Wait(_FakeRoom):
+        async def connect(self, url=None, token=None):
+            tries.append(1)
+            if len(tries) < 3:
+                raise cli.vtransport.BridgeError("bridge join failed: HTTP 409", status=409)
+            return await super().connect(url, token)
+
+    monkeypatch.setattr(cli.vtransport, "BridgeRoom", lambda *a, **k: _Wait())
+
+    async def run():
+        join = asyncio.create_task(_join(idle_timeout=0, transport="bridge"))
+        await asyncio.sleep(0.6)
+        _FakeRoom.instances[-1].emit("call_end", {"reason": "hangup"})
+        return await asyncio.wait_for(join, 5)
+
+    assert asyncio.run(run()) == 0 and len(tries) == 3

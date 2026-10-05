@@ -377,6 +377,16 @@ OWNER_POLL = 2.0
 NO_HUMAN_TIMEOUT = 150.0
 CALL_ENDED_MSG = "call ended by the server, leaving (no reconnect)"
 
+# 0.10.2: the server refuses an operator join while no human is in the room (HTTP 409,
+# voicehook-v4 #152). That heals as soon as the human (re)joins: wait and retry every
+# NO_HUMAN_RETRY_S, at most NO_HUMAN_WAIT_MAX_S, then give up. 410 stays terminal.
+NO_HUMAN_RETRY_S = 5.0
+NO_HUMAN_WAIT_MAX_S = 120.0
+NO_HUMAN_WAIT_MSG = ("no human in the room yet (HTTP 409): waiting for the person to join, "
+                     "retrying every {every:.0f}s for up to {max:.0f}s")
+NO_HUMAN_GIVE_UP_MSG = ("[error] still no human in the room after {max:.0f}s (HTTP 409), not joining. "
+                        "Open the call in the browser first, then run join again.")
+
 
 def _quit_signals() -> list:
     """Signals that make `join` leave cleanly. SIGHUP only when it is not
@@ -939,6 +949,8 @@ async def _connect_and_listen(
             if e.status == 410:  # 0.10.1: call ended / room gone -> never rejoin
                 print(f"[error] call ended ({e}), not joining", file=sys.stderr, flush=True)
                 return 5, "CALL_ENDED"
+            if e.status == 409:  # 0.10.2: no human in the room yet -> the caller waits + retries
+                return 6, "NO_HUMAN_YET"
             if e.status == 403 and "operator invite required" in e.detail.lower():
                 print(OPERATOR_INVITE_REQUIRED_ERROR, file=sys.stderr, flush=True)
                 return 3, "TOKEN_FORBIDDEN"
@@ -1098,6 +1110,8 @@ async def _connect_and_listen(
         if isinstance(e, vtransport.BridgeError) and e.status == 410:
             print("[error] call ended (bridge HTTP 410), not joining", file=sys.stderr, flush=True)
             return 5, "CALL_ENDED"
+        if isinstance(e, vtransport.BridgeError) and e.status == 409:
+            return 6, "NO_HUMAN_YET"
         what = "bridge" if transport == "bridge" else "livekit"
         print(f"[error] {what} connect failed: {e!r}", file=sys.stderr)
         try:
@@ -1425,6 +1439,7 @@ async def _join(
     try:
         backoff = relay.backoff_delays(base=1.0, factor=2.0, cap=30.0)
         first = True
+        no_human_waited: float | None = None  # seconds spent waiting on 409 (None = not waiting)
         while True:
             rc, reason = await _connect_and_listen(
                 api_base, slug, ident, json_mode, persona_text,
@@ -1444,6 +1459,25 @@ async def _join(
                 _print_event(json_mode, "system", msg, topic="_meta")
                 print(f"[warn] {msg}", file=sys.stderr, flush=True)
                 continue
+            if reason == "NO_HUMAN_YET":
+                if no_human_waited is None:
+                    no_human_waited = 0.0
+                    msg = NO_HUMAN_WAIT_MSG.format(every=NO_HUMAN_RETRY_S, max=NO_HUMAN_WAIT_MAX_S)
+                    _print_event(json_mode, "system", msg, topic="_meta")
+                    print(f"[info] {msg}", file=sys.stderr, flush=True)
+                if no_human_waited >= NO_HUMAN_WAIT_MAX_S:
+                    print(NO_HUMAN_GIVE_UP_MSG.format(max=NO_HUMAN_WAIT_MAX_S), file=sys.stderr, flush=True)
+                    break  # rc 6
+                try:
+                    await asyncio.wait_for(ctl.quit.wait(), timeout=NO_HUMAN_RETRY_S)
+                    break  # leave / SIGTERM while waiting
+                except asyncio.TimeoutError:
+                    pass
+                except asyncio.CancelledError:
+                    break
+                no_human_waited += NO_HUMAN_RETRY_S
+                continue  # nothing joined yet: `first` (stdin, greeting) stays as it was
+            no_human_waited = None
             if reason == "CALL_ENDED" and not first:
                 rc = 0  # the call we were in ended: a clean end, not a join failure
             first = False

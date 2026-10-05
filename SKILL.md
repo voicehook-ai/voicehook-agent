@@ -131,7 +131,7 @@ contents or output. The join publishes the newest 15 lines `{lines[], ts}` on ch
 Bash/Agent calls a short, speakable `description`.
 - Idle guard: no `say`/`next` for 10 min (`--idle-timeout MIN`, 0 = off) = join leaves, also across
   reconnects. `--owner-pid $PPID` (CLI 0.8.0) leaves as soon as your session ends; a dead FIFO holder too.
-- Call end (CLI 0.10.1): server `call_end`, room deleted or HTTP 410 = join exits, never reconnects; `next` returns `{"type":"call_end"}`. No human for 2.5 min (`--no-human-timeout MIN`; the server ends the call after 120 s) = join leaves.
+- Call end (CLI 0.10.1): server `call_end`, room deleted or HTTP 410 = join exits, never reconnects; `next` returns `{"type":"call_end"}`. No human for 2.5 min (`--no-human-timeout MIN`; the server ends the call after 120 s) = join leaves. HTTP 409 at join (CLI 0.10.2: no human in the room yet) = join says so and retries every 5 s for up to 2 min, then exits (rc 6).
 - Sign of life (CLI 0.8.0): while you serve `next`/`say` the join sends `operator.alive` every 10 s.
   Stop serving and after ~20 s the call shows "hört gerade nicht zu" and Delta says you are unreachable.
 
@@ -222,6 +222,7 @@ was really said. Budget used up mid-call: the voicebot announces it and ends the
 | `voicehook-agent: command not found` | use the absolute `$D/vh`, never the bare command |
 | `livekit connect failed` | invite URL wrong or expired, ask the user for a fresh link |
 | bridge join 403 / 410 / 429 | invite invalid / call over / too many sessions: fresh link or wait |
+| join 409 | no human in the room yet: the CLI waits and retries (5 s, max 2 min); open the call in the browser |
 | `0 peers` / no `agent` peer | user should reload the call tab |
 | silence after the greeting | no `agent` peer in `room-state`/`status` = voicebot down, tell the user |
 | voicebot makes things up | `operator.interrupt`, then a correcting `say` |
