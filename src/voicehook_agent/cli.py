@@ -76,6 +76,19 @@ Several operators (0.11.0): one shared say queue for all agents in the call.
     revise / say_status              only for the say's owner (field owner); transcript
                                      lines carry speaker (display name) + op (identity)
 
+Shapes in the ring (show): draw when a picture explains better than words.
+    show --preset check              preset: arrow_up arrow_right check cross question
+                                     loop split3 scale heart bolt one two three
+    show --polygon "x,y x,y ..."     own form, coordinates 0..1 (0,0 top left); --open =
+                                     not closed; --path "M0.1,0.9 L0.9,0.1" (only M L Q C Z)
+    show --json '<shape>'            full shape; several --preset/--polygon/--path = multi
+    show ... --label T --hold-ms N   label <= 24 chars, hold 800..8000 ms; --emotion LABEL;
+                                     one shape per 2 s, faster: "type":"rate_limited"
+    say --shape-preset NAME          shape/emotion ride along with the say (operator.say
+    say --shape-json J --emotion L   fields shape, emotion), drawn when it is spoken
+                                     WebRTC: topic operator.visual; bridge: POST
+                                     /api/bridge/visual. Invalid shape: exit 2, nothing sent.
+
 Activity feed (0.10.0): Delta sees what you are doing, one line per tool call.
     hook install [--settings PATH]   add the Claude Code PostToolUse hook to settings.json
     hook print                       print the settings.json snippet
@@ -105,6 +118,7 @@ from . import __version__, relay
 from . import activity as vactivity
 from . import session as vsession
 from . import transport as vtransport
+from . import visual as vvisual
 
 _SLUG_RX = re.compile(r"^[a-z]+-[a-z]+-[a-z]+-[A-Z0-9]{4,8}$")
 _VERSION = __version__
@@ -496,6 +510,57 @@ async def _publish_say(room: rtc.Room, text: str, extra: dict,
     return {"ok": True, "seq": say.seq}
 
 
+async def _publish_visual(room, body: dict) -> dict:
+    """Shape for the ring: bridge -> POST /api/bridge/visual, WebRTC -> data channel
+    topic operator.visual. Same body either way."""
+    send_visual = getattr(room, "send_visual", None)
+    try:
+        if send_visual is not None:
+            await send_visual(body)
+            via = "bridge"
+        else:
+            data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            await room.local_participant.publish_data(data, reliable=True, topic=vvisual.TOPIC)
+            via = "datachannel"
+    except vtransport.BridgeError as e:
+        if e.status == 429:
+            return {"ok": False, "type": "rate_limited", "error": VISUAL_RATE_ERROR}
+        if e.status == 400:
+            return {"ok": False, "type": "invalid", "error": f"server rejected the shape: {e}"}
+        return {"ok": False, "type": "visual", "error": f"visual not sent: {e}"}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "type": "visual", "error": f"visual not sent: {e}"}
+    return {"ok": True, "type": "visual", "via": via, "shape": body["shape"]["type"]}
+
+
+VISUAL_RATE_ERROR = ("rate limit: at most one shape per 2 s per operator, "
+                     "nothing drawn; send it again in 2 s or skip it")
+
+
+SHOW_HELP = """\
+Draw a shape in the ring (Kringel) while you explain something by voice.
+
+When to draw: a sequence or loop (arrow_right, loop), a comparison (scale, split3),
+a structure (own polygon, multi with label), yes or no (check, cross), a count of
+one to three (one, two, three). When not: not with every sentence, at most every few
+turns, never instead of speaking. Your says stay whole, natural, phone-ready sentences.
+
+Coordinates 0..1, (0,0) top left. Max 200 points, path d max 2 KB, whole shape
+max 8 KB, multi max 4 items, label max 24 chars (no control chars, emoji, <>),
+hold 800..8000 ms. Invalid input: exit 2, nothing sent. At most one shape per 2 s
+per operator: faster gives {"type":"rate_limited"}, exit 1.
+
+Examples:
+  voicehook-agent show --preset check --emotion joy
+  voicehook-agent show --polygon "0.2,0.9 0.2,0.45 0.5,0.15 0.8,0.45 0.8,0.9" --label Haus
+  voicehook-agent show --label "Vorher, nachher" --json '{"type":"multi","items":[
+      {"type":"polygon","points":[[0.1,0.4],[0.3,0.4],[0.3,0.6],[0.1,0.6]]},
+      {"type":"path","d":"M0.38,0.5 L0.62,0.5"},
+      {"type":"polygon","points":[[0.7,0.25],[0.9,0.25],[0.9,0.75],[0.7,0.75]]}]}'
+  voicehook-agent say "Erst testen, dann ausrollen." --shape-preset arrow_right
+"""
+
+
 # 0.11.0 (multi-operator): append is the default; a running say is never cut (only own
 # operator.interrupt / --urgent). overwrite/revise replace only our OWN not-started says.
 _SAY_MODES = ("append", "overwrite", "revise")
@@ -518,6 +583,13 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         extra: dict = {"mode": mode}
         if req.get("urgent"):
             extra["priority"] = "urgent"
+        try:  # shape / emotion for the ring, checked again (stdin-free path, same rules)
+            if req.get("shape") is not None:
+                extra["shape"] = vvisual.validate_shape(req["shape"])
+            if req.get("emotion") is not None:
+                extra["emotion"] = vvisual.validate_emotion(req["emotion"])
+        except vvisual.VisualError as e:
+            return {"ok": False, "type": "invalid", "error": str(e)}
         nudge = ctl.clock.said(text=text)  # 0.9.0: progress said, board older -> hint
         room = await ctl.wait_room(10.0)
         if room is None:
@@ -526,6 +598,28 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         if res.get("ok"):
             ctl.say_status.sent(res["seq"], text)
         return {**res, **nudge} if res.get("ok") else res
+    if cmd == "visual":
+        ctl.watchdog.touch()
+        try:
+            shape = vvisual.validate_shape(req.get("shape"))
+            emo = req.get("emotion")
+            emo = vvisual.validate_emotion(emo) if emo is not None else None
+        except vvisual.VisualError as e:
+            return {"ok": False, "type": "invalid", "error": str(e)}
+        # the server draws one shape per 2 s per operator; the data channel drops the
+        # rest silently, so refuse here with the same message the bridge gives (429)
+        now = time.monotonic()
+        last = getattr(ctl, "visual_at", None)
+        if last is not None and now - last < vvisual.RATE_S:
+            return {"ok": False, "type": "rate_limited", "retry_after_s":
+                    round(vvisual.RATE_S - (now - last), 1), "error": VISUAL_RATE_ERROR}
+        room = await ctl.wait_room(10.0)
+        if room is None:
+            return {"ok": False, "error": "not connected to the room (yet)"}
+        res = await _publish_visual(room, vvisual.payload(shape, emo))
+        if res.get("ok"):
+            ctl.visual_at = now
+        return res
     if cmd == "board":
         ctl.watchdog.touch()
         board = req.get("board")
@@ -1669,7 +1763,16 @@ def _client_request(args) -> dict:
         req = {"cmd": "say", "text": text.strip(), "mode": args.mode or SAY_DEFAULT_MODE}
         if getattr(args, "urgent", False):
             req["urgent"] = True
+        req.update(vvisual.say_fields(getattr(args, "shape_preset", None),
+                                      getattr(args, "shape_json", None),
+                                      getattr(args, "emotion", None)))
         return req
+    if args.cmd == "show":
+        shape = vvisual.shape_from_args(
+            presets=args.preset, polygons=args.polygon, paths=args.path,
+            json_text=args.json, open_=args.open, label=args.label, hold_ms=args.hold_ms)
+        emo = vvisual.parse_emotion_arg(args.emotion)
+        return {"cmd": "visual", **vvisual.payload(shape, emo)}
     if args.cmd == "next":
         return {"cmd": "next", "timeout": args.timeout}
     if args.cmd == "says":
@@ -1694,6 +1797,11 @@ def _run_client(args) -> int:
     next timeout), 1 = request failed, 3 = no running join / join ended."""
     try:
         req = _client_request(args)
+    except vvisual.VisualError as e:  # bad shape/emotion: nothing sent, exit 2
+        print(json.dumps({"ok": False, "type": "invalid", "error": str(e)}, ensure_ascii=False),
+              flush=True)
+        print(f"[error] {e}", file=sys.stderr, flush=True)
+        return 2
     except (OSError, ValueError) as e:
         print(json.dumps({"ok": False, "type": "error", "error": str(e)}, ensure_ascii=False), flush=True)
         return 1
@@ -1836,6 +1944,14 @@ def main(argv: list[str] | None = None) -> None:
     p_say.add_argument("--urgent", action="store_true", default=False,
                        help="priority urgent: interrupt whoever is speaking (Delta or another operator) "
                             "and go first. Use sparingly.")
+    p_say.add_argument("--shape-preset", default=None, metavar="NAME", choices=vvisual.PRESETS,
+                       help="draw this preset in the ring while the say is spoken (field shape): "
+                            + " ".join(vvisual.PRESETS))
+    p_say.add_argument("--shape-json", default=None, metavar="JSON",
+                       help="full shape for the say (preset/polygon/path/multi, see `show --help`)")
+    p_say.add_argument("--emotion", default=None, metavar="LABEL",
+                       help="tint of the ring for this say: " + " ".join(vvisual.EMOTIONS)
+                            + " (or JSON {label, valence, arousal})")
     _add_session(p_say)
     p_next = sub.add_parser("next", help="block until the next finalized user turn (or operator.revise); prints one JSON line")
     p_next.add_argument("--timeout", type=float, default=60.0, metavar="SEC",
@@ -1863,6 +1979,29 @@ def main(argv: list[str] | None = None) -> None:
     p_status.add_argument("-f", "--file", default=None, metavar="JSON",
                           help="board file {doing, open[], done[]}; flags add to it")
     _add_session(p_status)
+    p_show = sub.add_parser(
+        "show", help="draw a shape in the ring (operator.visual): preset, polygon, path or multi",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=SHOW_HELP)
+    p_show.add_argument("--preset", action="append", default=[], metavar="NAME",
+                        choices=vvisual.PRESETS, help="preset shape (repeatable): "
+                        + " ".join(vvisual.PRESETS))
+    p_show.add_argument("--polygon", action="append", default=[], metavar="'x,y x,y ...'",
+                        help="own polygon, points 0..1 (0,0 = top left), closed (repeatable)")
+    p_show.add_argument("--open", action="store_true", default=False,
+                        help="--polygon is an open line, not closed")
+    p_show.add_argument("--path", action="append", default=[], metavar="D",
+                        help="SVG path, only M L Q C Z, numbers 0..1 (repeatable)")
+    p_show.add_argument("--json", default=None, metavar="SHAPE",
+                        help="full shape JSON (not combinable with --preset/--polygon/--path)")
+    p_show.add_argument("--label", default=None, metavar="TEXT",
+                        help=f"short caption, max {vvisual.LABEL_MAX} chars")
+    p_show.add_argument("--hold-ms", type=int, default=None, metavar="N",
+                        help=f"how long the shape stays, {vvisual.HOLD_MS_MIN}..{vvisual.HOLD_MS_MAX} ms "
+                             "(default: server)")
+    p_show.add_argument("--emotion", default=None, metavar="LABEL",
+                        help="tint of the ring: " + " ".join(vvisual.EMOTIONS))
+    _add_session(p_show)
     # log-summary: the 2nd micro agent (digests the call log into operator.graph)
     p_sum = sub.add_parser("log-summary", help="watch a call log and emit operator.graph digests")
     p_sum.add_argument("log", help="path to the CLI's --json transcript log (JSONL)")
@@ -1924,6 +2063,8 @@ def main(argv: list[str] | None = None) -> None:
             rc = 130
         sys.exit(rc)
     if args.cmd in ("say", "next", "says", "leave", "status"):
+        sys.exit(_run_client(args))
+    if args.cmd == "show":
         sys.exit(_run_client(args))
     if args.cmd == "log-summary":
         try:

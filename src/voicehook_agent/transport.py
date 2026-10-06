@@ -252,6 +252,15 @@ class BridgeRoom:
         """POST /api/bridge/send. During a server restart (connection refused, 502/503/504)
         the same request is retried with the same token for up to BRIDGE_RETRY_S, so a
         `say` sent mid-deploy is delivered late instead of lost."""
+        await self._post_retry("/api/bridge/send",
+                               {"topic": topic, "payload": payload, "force": True}, topic)
+
+    async def send_visual(self, body: dict) -> None:
+        """POST /api/bridge/visual {shape, emotion?}: draw a shape in the ring. Same
+        retry as _send. Over WebRTC the CLI publishes topic operator.visual instead."""
+        await self._post_retry("/api/bridge/visual", body, "visual")
+
+    async def _post_retry(self, path: str, body: dict, topic: str) -> None:
         if self._http is None or not self._session or self._closed:
             raise BridgeError("bridge not connected")
         loop = asyncio.get_running_loop()
@@ -260,8 +269,7 @@ class BridgeRoom:
         while True:
             err: Exception | None = None
             try:
-                r = await self._http.post(f"{self.api_base}/api/bridge/send", headers=self._auth(),
-                                          json={"topic": topic, "payload": payload, "force": True})
+                r = await self._http.post(f"{self.api_base}{path}", headers=self._auth(), json=body)
             except _SEND_RETRY_ERRORS as e:
                 r, err = None, e
             if r is not None and r.status_code not in RETRY_STATUS:

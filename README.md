@@ -207,6 +207,43 @@ nothing.
   Claude session never leaks into another call. The file is cleared when a join starts
   and ends, mode 0600, trimmed to the last 50 lines above 200.
 
+## Shapes in the ring (`show`)
+
+An agent can draw into the ring (Kringel) of the call UI while it explains something
+by voice. Same session resolution as `say`; WebRTC join -> data-channel topic
+`operator.visual`, bridge join -> `POST /api/bridge/visual`. Body:
+`{"shape": <shape>, "emotion"?: {"label", "valence", "arousal"}}`.
+
+```bash
+voicehook-agent show --preset check --emotion joy                     # preset
+voicehook-agent show --polygon "0.2,0.9 0.2,0.45 0.5,0.15 0.8,0.45 0.8,0.9" --label Haus
+voicehook-agent show --label "Vorher, nachher" --json '{"type":"multi","items":[
+  {"type":"polygon","points":[[0.1,0.4],[0.3,0.4],[0.3,0.6],[0.1,0.6]]},
+  {"type":"path","d":"M0.38,0.5 L0.62,0.5"},
+  {"type":"polygon","points":[[0.7,0.25],[0.9,0.25],[0.9,0.75],[0.7,0.75]]}]}'
+voicehook-agent say "Erst testen, dann ausrollen." --shape-preset arrow_right
+```
+
+| Flag | Meaning |
+|------|---------|
+| `--preset NAME` | `arrow_up arrow_right check cross question loop split3 scale heart bolt one two three` |
+| `--polygon "x,y x,y ..."` | own polygon, closed (`--open` = line) |
+| `--path D` | SVG path, only `M L Q C Z`, numbers 0..1 |
+| `--json SHAPE` | full shape (`preset`, `polygon`, `path`, `multi` with `items`) |
+| `--label TEXT` / `--hold-ms N` / `--emotion LABEL` | caption <= 24 chars / 800..8000 ms / ring tint |
+
+Several `--preset/--polygon/--path` become one `multi` (max 4 items). Coordinates 0..1,
+(0,0) top left, max 200 points, a path `d` max 2 KB, the whole shape max 8 KB; label max
+24 chars without control characters, emoji or `<>`. The CLI validates like the server:
+invalid input prints `{"ok":false,"type":"invalid","error":...}` and exits 2, nothing is
+sent. At most one shape per 2 s per operator: faster returns `{"type":"rate_limited"}`
+(bridge HTTP 429), exit 1. `say --shape-preset NAME | --shape-json J` and `--emotion L` add the fields `shape`
+and `emotion` to that `operator.say`; the shape is drawn when the say is spoken.
+
+When to draw: a sequence or loop, a comparison, a structure, yes or no, a count of one
+to three. Not with every sentence, at most every few turns, never instead of speaking;
+say texts stay whole, natural, phone-ready sentences.
+
 ## Install
 
 ### One-shot (per-call, recommended)
@@ -301,6 +338,7 @@ stdin (JSONL):
 | `operator.alive`     | room      | 0.8.0: `{alive, ts, idle_s}` every 10 s while the agent serves `next`/`say` (within 15 s); nothing while orphaned; `alive:false` on leave. The web UI dims the operator after ~20 s without it |
 | `operator.say_status` | in    | 0.9.0: `{seq, state, spoken_chars}` per state change of your say; `next` carries `say_status`, `says` the table |
 | `operator.status_request` | in    | the user asked what you are doing; `next` yields `{"type":"status_request"}` |
+| `operator.visual`    | room      | `{shape, emotion?}`: draw a shape in the ring (`show`; bridge: `POST /api/bridge/visual`) |
 
 *`out` here = emitted on the CLI's **stdout** (not published to the room).
 
