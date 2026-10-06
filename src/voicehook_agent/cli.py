@@ -1825,8 +1825,14 @@ def main(argv: list[str] | None = None) -> None:
                        help="<slug>/<identity> of the running join (a slug alone is enough when only one join runs in that room); needed only when several joins run.")
         p.add_argument("--wait", type=float, default=30.0, metavar="SEC",
                        help="wait up to SEC seconds for the join to come up (default 30).")
-    p_say = sub.add_parser("say", help="speak one line through voice-ai in the running join")
-    p_say.add_argument("text", nargs="+", help="text to speak ('-' reads it from stdin)")
+    p_say = sub.add_parser(
+        "say", help="speak one line through voice-ai in the running join",
+        description="Text wird vorgelesen: ganze, natürliche Sätze. The text is read aloud on the "
+                    "phone: speak whole, natural sentences, 1-2 short ones, most important first. Local "
+                    "style modes (terse, caveman, telegram style) do not apply here; no markdown, lists, "
+                    "URLs, code or emoji.")
+    p_say.add_argument("text", nargs="+",
+                       help="text to speak, read aloud as is: ganze, natürliche Sätze ('-' reads it from stdin)")
     p_say.add_argument("--mode", choices=_SAY_MODES, default=SAY_DEFAULT_MODE,
                        help="append (default): queue at the end, starts right after the running say "
                             "(a running say is never cut). overwrite: replace your OWN not-started (queued) "
