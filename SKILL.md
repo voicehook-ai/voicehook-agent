@@ -44,12 +44,12 @@ cannot connect (`--transport auto|webrtc|bridge`).
 
 ```bash
 R=git+https://github.com/voicehook-ai/voicehook-agent; export PATH="$HOME/.local/bin:$PATH"
-command -v voicehook-agent || uv tool install -q $R || pip install -q --user $R
+uv tool install -q --upgrade $R || pip install -q --upgrade --user $R
 D=$(mktemp -d /tmp/vh-XXXXXX); mkfifo $D/in; (setsid sleep 86400 >$D/in & echo $! >$D/holder)
 printf '#!/bin/sh\nexport VOICEHOOK_AGENT_HOME=%s\n[ "$1" = leave ] || exec "%s" "$@"\n"%s" "$@"; rc=$?; kill $(cat %s/holder) 2>/dev/null; exit $rc\n' \
   $D "$(command -v voicehook-agent)" "$(command -v voicehook-agent)" $D >$D/vh; chmod +x $D/vh
 (setsid nohup $D/vh join "<INVITE_URL>" --name <dein-eigener-Name> --model <dein-Modellname> --json --owner-pid $PPID --greet "Hallo, hier ist <dein-eigener-Name>. Worum geht's?" <$D/in >$D/out 2>&1 &)
-$D/vh next --help >/dev/null 2>&1 && echo "D=$D ready" || echo "D=$D CLI 0.4.0: upgrade (below)"
+$D/vh next --help >/dev/null 2>&1 && echo "D=$D ready" || echo "D=$D CLI too old: uv tool install --force $R"
 ```
 
 Write down the printed `D=` path. Shell variables and `PATH` do NOT survive between your
@@ -67,9 +67,9 @@ tool calls, so every later call uses the absolute wrapper, e.g. `/tmp/vh-ab12cd/
   `operator invite required`: ask the user for the full link.
 - `--greet` is spoken right after connect. Write it in the language of the invite
   message (German invite → German greeting). One short sentence.
-- No `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` takes a few seconds and beats pip.
-  pip refused by PEP 668: add `--break-system-packages`. CLI 0.4.0 installed (no
-  `next`/`say`/`leave`): `uv tool install --force $R`, or use Quickstart A.
+- No `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` beats pip; PEP 668: add `--break-system-packages`.
+  Line 2 always installs or upgrades. CLI 0.12.0+ also updates itself on `join` when the server's
+  `cli_latest` is newer (off: `--no-self-update`); a CLI below `cli_min` gets HTTP 426 + the upgrade command.
 - `setsid` matters: without it the join dies with the shell of your tool call.
 
 ## The work cycle: say → next → say
