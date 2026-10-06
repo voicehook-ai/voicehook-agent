@@ -8,6 +8,7 @@ import json
 import sys
 from urllib.parse import urlparse
 
+import httpx
 import pytest
 
 from voicehook_agent import cli
@@ -92,13 +93,19 @@ class FakeBridge:
         self.left = 0
         self.port = 0
 
-    async def start(self) -> str:
-        self.server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+    async def start(self, port: int = 0) -> str:
+        self.server = await asyncio.start_server(self._handle, "127.0.0.1", port)
         self.port = self.server.sockets[0].getsockname()[1]
         return f"http://127.0.0.1:{self.port}"
 
     async def stop(self) -> None:
         self.server.close()
+
+    async def restart_down(self) -> None:
+        """Server restart (deploy): stream drops, nothing listens until `start(self.port)`."""
+        self.events.put_nowait(None)
+        self.server.close()
+        await self.server.wait_closed()
 
     def push(self, ev: dict) -> None:
         self.events.put_nowait(f"event: {ev['type']}\ndata: {json.dumps(ev)}\n\n")
@@ -400,3 +407,123 @@ def test_bridge_join_sends_username_only_when_set():
         return fb.joins
     joins = asyncio.run(go())
     assert joins[0]["username"] == "Oliver" and "username" not in joins[1]
+
+
+# --------------------------------------------------------------------------- #
+# Retry across a server restart (voicehook-v4 #158: session survives, same token)
+# --------------------------------------------------------------------------- #
+def test_bridge_survives_server_restart_same_token():
+    """Stream drops, server is down ~1.5 s, comes back with the same session: the CLI
+    reconnects with the SAME token (no new join), no `disconnected`, a say sent while
+    the server is down is delivered after the restart, events flow again."""
+    async def go():
+        fb = FakeBridge()
+        base = await fb.start()
+        room = vt.BridgeRoom(base, "a-b-c-AB12", "x", name="C", model="m")
+        got: dict[str, list] = {}
+        for ev in ("data_received", "disconnected", "reconnecting", "reconnected"):
+            room.on(ev, lambda *a, _ev=ev: got.setdefault(_ev, []).append(a))
+        await room.connect()
+        fb.push({"type": "hello", "peers": PEERS})
+        await _until(lambda: any(r[1] == "/api/bridge/events" for r in fb.requests))
+        await fb.restart_down()
+        await _until(lambda: "reconnecting" in got)
+        say = asyncio.create_task(room.local_participant.publish_data(
+            json.dumps({"text": "mitten im Deploy", "_seq": 7}).encode(), topic="operator.say"))
+        await asyncio.sleep(1.5)
+        assert not say.done() and fb.sent == []
+        fb.events = asyncio.Queue()
+        await fb.start(fb.port)
+        await asyncio.wait_for(say, 10)
+        assert fb.sent == [{"topic": "operator.say", "payload": {"text": "mitten im Deploy", "_seq": 7},
+                            "force": True}]
+        await _until(lambda: "reconnected" in got, timeout=10)
+        fb.push({"type": "data", "topic": "transcript", "sender": "voice-ai-1",
+                 "payload": {"role": "user", "text": "wieder da"}})
+        await _until(lambda: "data_received" in got)
+        assert "disconnected" not in got
+        assert len(fb.joins) == 1  # same session, no rejoin
+        assert all(h.get("authorization") == "Bearer S3SSION"
+                   for _, t, h, _ in fb.requests if not t.startswith("/api/bridge/join"))
+        await room.disconnect()
+        await fb.stop()
+    asyncio.run(go())
+
+
+def test_bridge_lost_after_retry_window(monkeypatch):
+    monkeypatch.setattr(vt, "BRIDGE_RETRY_S", 0.6)
+
+    async def go():
+        fb = FakeBridge()
+        base = await fb.start()
+        room = vt.BridgeRoom(base, "a-b-c-AB12", "x", name="C", model="m")
+        seen = []
+        room.on("disconnected", lambda r: seen.append(r))
+        await room.connect()
+        await _until(lambda: any(r[1] == "/api/bridge/events" for r in fb.requests))
+        await fb.restart_down()
+        with pytest.raises(vt.BridgeError, match="after retry"):
+            await room.local_participant.publish_data(b'{"text":"x"}', topic="operator.say")
+        await _until(lambda: seen, timeout=5)
+        assert seen == ["BRIDGE_LOST"] and fb.sent == []
+        await room.disconnect()
+    asyncio.run(go())
+
+
+def test_bridge_reconnect_event_reconnects_at_once():
+    """`"reconnect": true` (server drains) -> new stream right away, same token."""
+    async def go():
+        fb = FakeBridge()
+        base = await fb.start()
+        room = vt.BridgeRoom(base, "a-b-c-AB12", "x", name="C", model="m")
+        got: dict[str, list] = {}
+        for ev in ("data_received", "disconnected", "reconnected"):
+            room.on(ev, lambda *a, _ev=ev: got.setdefault(_ev, []).append(a))
+        await room.connect()
+        fb.push({"type": "timeout", "reconnect": True})
+        await _until(lambda: "reconnected" in got)
+        n = sum(1 for r in fb.requests if r[1] == "/api/bridge/events")
+        assert n == 2 and len(fb.joins) == 1 and "disconnected" not in got
+        fb.events.put_nowait(None)  # the fake's first (abandoned) stream handler waits first
+        fb.push({"type": "data", "topic": "t", "sender": "v", "payload": {"a": 1}})
+        await _until(lambda: "data_received" in got)
+        await room.disconnect()
+        await fb.stop()
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("status", [502, 503, 504])
+def test_bridge_send_retries_proxy_5xx(status, monkeypatch):
+    monkeypatch.setattr(vt, "BRIDGE_RETRY_S", 5.0)
+    calls = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        calls.append(req.headers.get("authorization"))
+        return httpx.Response(status if len(calls) < 3 else 200, json={"ok": True})
+
+    async def go():
+        room = vt.BridgeRoom("http://vh.test", "a-b-c-AB12", "x", name="C", model="m")
+        room._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        room._session = "S3SSION"
+        await room._send("operator.say", {"text": "x"})
+        await room._http.aclose()
+    asyncio.run(go())
+    assert calls == ["Bearer S3SSION"] * 3
+
+
+def test_bridge_send_does_not_retry_client_errors():
+    calls = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(429, json={"detail": "too many sends"})
+
+    async def go():
+        room = vt.BridgeRoom("http://vh.test", "a-b-c-AB12", "x", name="C", model="m")
+        room._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        room._session = "S3SSION"
+        with pytest.raises(vt.BridgeError, match="HTTP 429"):
+            await room._send("operator.say", {"text": "x"})
+        await room._http.aclose()
+    asyncio.run(go())
+    assert calls == [1]

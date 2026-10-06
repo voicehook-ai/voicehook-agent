@@ -341,6 +341,10 @@ header. The HTTP client honours `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`/`NO_PROXY
   otherwise WebRTC, and on a failed connect one retry via the bridge
   (`webrtc connect failed or timed out; retrying once via the HTTPS bridge`).
 - `--transport webrtc` / `--transport bridge` force one.
+- Server restart / deploy (0.11.0): the server keeps the bridge session (same token).
+  A dropped stream, a 502/503/504 or `"reconnect": true` is retried with the SAME token
+  for ~30 s (`reconnecting` / `reconnected` in the output); a `say` sent meanwhile is
+  delivered once the server is back. Only after that the join loop rejoins.
 - Everything else is identical: `--json` stream, FIFO/stdin input, `say`/`next`/`leave`/
   `status`, idle and persona guard (both still run in the CLI).
 - No install possible at all (installs blocked)? The bridge also works with plain curl,
