@@ -207,7 +207,7 @@ Quickstart B: `$D/out` (JSON lines) should show within ~5 s:
 | `operator.inject` | `{text, role?}` | context entry, not spoken |
 | `operator.status` | `{doing, open[], done[], faq?[{q, a}]}` | your status board (`vh status`), replaces the last one, never spoken |
 | `operator.activity` | `{lines[], ts}` | sent by the CLI itself (0.10.0) from the PostToolUse hook: newest 15 tool-call lines, at most every 5 s |
-| `operator.say_status` | ← `{seq, state, spoken_chars}` | CLI 0.9.0: fate of your say (`queued`/`spoken`/`interrupted`/`requeued`/`replaced`); `next` carries `say_status`, `vh says` the last state, `say_hint` = stuck > 20 s |
+| `operator.say_status` | ← `{seq, state, spoken_chars}` | CLI 0.9.0: fate of your say (`queued`/`spoken`/`interrupted`/`requeued`/`replaced`; live: `covered` = info already in Delta's answer, `note` says so, do not resend); `next` carries `say_status`, `vh says` the last state, `say_hint` = stuck > 20 s |
 | `operator.alive` | `{alive, ts, idle_s}` | sent by the CLI itself (0.8.0) every 10 s while you serve `next`/`say`; `alive:false` on leave |
 | `transcript` | ← `{role, text, speaker?, op?}` | `user` = the human; `operator` = an operator's spoken text (`op` = whose); `agent` = voicebot's own answer |
 | `transcript.live` | ← `{phase, role, id, text?, interrupted?}` | your `say` started (`start`, full text) / finished (`end`) playing; for the browser only, NOT proof it was spoken (use `transcript`) |

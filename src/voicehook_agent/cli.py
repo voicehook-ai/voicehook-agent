@@ -59,6 +59,8 @@ Say receipts (0.9.0, voicebot sends operator.say_status {seq, state, spoken_char
     next                             adds "say_status": [{"seq":N,"state":"spoken"}, ...]
                                      (changes since the last next) and "say_hint" when a
                                      say sits in queued/requeued for more than 20 s.
+                                     Live mode (0.12.0): state "covered" + "note" = Delta
+                                     already said it in his answer, do not send it again.
     says                             last state of every own say (sent until the first
                                      receipt): {"type":"says","says":[{seq,state,...}]}
     join --username NAME             also sent to the server (vh.user): Delta knows the user.
@@ -2007,7 +2009,7 @@ def main(argv: list[str] | None = None) -> None:
     _add_session(p_next)
     p_says = sub.add_parser(
         "says", help="last state of your own says (operator.say_status from the voicebot: "
-        "sent/queued/spoken/interrupted/requeued/replaced) as JSON")
+        "sent/queued/spoken/interrupted/requeued/replaced/covered) as JSON")
     _add_session(p_says)
     p_leave = sub.add_parser("leave", help="end the running join cleanly")
     p_leave.add_argument("--say", default=None, metavar="TEXT", help="goodbye line spoken before leaving")

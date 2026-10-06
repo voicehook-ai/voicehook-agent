@@ -67,11 +67,14 @@ voicehook-agent leave --say "Bis bald."                 # clean exit
   in `--json` output and on `next` user events when the server sends them.
 - **Say receipts (0.9.0):** the voicebot reports each say as `operator.say_status
   {seq, state, spoken_chars}` (`seq` = the `seq` that `say` returned; states `queued`,
-  `spoken`, `interrupted`, `requeued`, `replaced`). `next` carries the changes since the
+  `spoken`, `interrupted`, `requeued`, `replaced`, live `covered`). `next` carries the changes since the
   last `next` as `"say_status": [{"seq":3,"state":"spoken"}]` (`spoken_chars` only for
   `interrupted`/`requeued`); a say stuck in `queued`/`requeued` for more than 20 s adds
   `"say_hint"` (do not push more; if outdated, `say --mode overwrite` a short version).
-  `says` shows the last state of every say.
+  `says` shows the last state of every say. Live mode (0.12.0): `covered` (final) =
+  your say arrived while the user had the floor, went to the model as context, and
+  Delta already said it in his answer; it carries `"note": "Info steckt schon in
+  Deltas Antwort, nicht nochmal senden"`. Do not send it again.
   Turns spoken while you were thinking are kept, never lost. `--timeout 0` only
   returns what is already queued. Each event carries `ts` (unix time it was
   spoken).

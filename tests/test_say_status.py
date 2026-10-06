@@ -132,3 +132,44 @@ def test_join_threads_username_to_connect(monkeypatch):
                                True, model="opus-5.5", username="Oliver", no_greet=True,
                                idle_timeout=0, control=False, keep_alive=False))
     assert rc == 0 and seen["username"] == "Oliver"
+
+
+# ----- 0.12.0: covered (v4 #162, live mode) ----------------------------------------------
+def test_say_status_covered_in_next_and_says():
+    s = relay.SayStatus()
+    s.sent(7, "Der Deploy ist fertig", now=0.0)
+    s.update({"seq": 7, "state": "queued"}, now=0.5)
+    change = s.update({"seq": 7, "state": "covered", "spoken_chars": 0}, now=3.0)
+    note = "Info steckt schon in Deltas Antwort, nicht nochmal senden"
+    assert change == {"seq": 7, "state": "covered", "note": note}
+    assert s.take(now=3.0) == {"say_status": [{"seq": 7, "state": "queued"},
+                                              {"seq": 7, "state": "covered", "note": note}]}
+    row = s.table(now=4.0)[0]
+    assert row["state"] == "covered" and row["note"] == note
+    assert s.stuck(now=60.0) is None                       # final, never "stuck"
+
+
+def test_say_status_note_only_for_covered():
+    s = relay.SayStatus()
+    s.sent(1, "Hallo", now=0.0)
+    assert "note" not in s.update({"seq": 1, "state": "spoken"}, now=1.0)
+    assert "note" not in s.table(now=1.0)[0]
+
+
+def test_says_help_lists_covered():
+    assert '"covered"' in cli.__doc__
+
+
+def test_covered_round_trip_next_and_says():
+    async def go():
+        ctl = _ctl()
+        r = await cli._control_handler(ctl, {"cmd": "say", "text": "Der Deploy ist fertig"})
+        ctl.say_status.update({"seq": r["seq"], "state": "queued", "spoken_chars": 0})
+        ctl.say_status.update({"seq": r["seq"], "state": "covered", "spoken_chars": 0})
+        nxt = await cli._control_handler(ctl, {"cmd": "next", "timeout": 0})
+        says = await cli._control_handler(ctl, {"cmd": "says"})
+        return nxt, says
+    nxt, says = asyncio.run(go())
+    assert nxt["say_status"][-1]["state"] == "covered"
+    assert "Deltas Antwort" in nxt["say_status"][-1]["note"]
+    assert says["says"][0]["state"] == "covered" and "Deltas Antwort" in says["says"][0]["note"]
