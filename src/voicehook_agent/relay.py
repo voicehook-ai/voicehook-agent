@@ -411,13 +411,32 @@ def user_turn_event(role: str, text: str, payload: dict | None = None,
     text = (text or "").strip()
     if not text:
         return None
-    return {"type": "user", "role": "user", "text": text,
-            "ts": now if now is not None else time.time()}
+    ev = {"type": "user", "role": "user", "text": text,
+          "ts": now if now is not None else time.time()}
+    speaker = (payload or {}).get("speaker")
+    if speaker:  # 0.11.0: v4 names the speaker (user name); old servers: no field
+        ev["speaker"] = speaker
+    return ev
+
+
+def foreign_owner(payload: dict, own: set[str] | str | None, key: str = "owner") -> bool:
+    """0.11.0 (multi-operator): True if `payload[key]` names another operator.
+
+    The server routes operator.revise / operator.say_status only to the owner of the
+    say (destination_identities) and stamps `owner`; operator lines in `transcript`
+    carry `op`. Defensive second filter: without the field (old server) nothing is
+    foreign."""
+    who = payload.get(key) if isinstance(payload, dict) else None
+    if not who:
+        return False
+    mine = {own} if isinstance(own, str) else set(own or ())
+    return bool(mine) and who not in mine
 
 
 def revise_event(payload: dict, now: float | None = None) -> dict:
-    """Queue event for an incoming operator.revise (merge + resend with
-    mode=overwrite within 8 s)."""
+    """Queue event for an incoming operator.revise: our `--mode revise` replaced own
+    not-started says (`unspoken`); if any still matters, send one merged say with
+    mode=overwrite."""
     ev = {"type": "revise", "role": "system", "text": payload.get("text", ""),
           "ts": now if now is not None else time.time()}
     for k in ("unspoken", "new"):
