@@ -43,18 +43,23 @@ voicehook-agent leave --say "Bis bald."                 # clean exit
 | Command | Output (one JSON line) | Exit |
 |---|---|---|
 | `say <text> [--mode append\|overwrite\|revise] [--urgent]` | `{"ok":true,"seq":3}` | 0 ok, 1 failed |
-| `next [--timeout SEC]` | `{"type":"user","text":...}`, `{"type":"revise","text":...,"unspoken":[...]}` (answer with `say --mode overwrite`), `{"type":"timeout"}`, `{"type":"ended"}` | 0, 3 on `ended` |
+| `next [--timeout SEC]` | `{"type":"user","text":...}`, `{"type":"revise","text":...,"unspoken":[...],"new":...}` (your `--mode revise` replaced own not-started says; if any still matters, send one merged `say --mode overwrite`), `{"type":"timeout"}`, `{"type":"ended"}` | 0, 3 on `ended` |
 | `says` (0.9.0) | `{"type":"says","says":[{"seq":3,"state":"spoken","spoken_chars":12,"age_s":4.1,"text":"..."}]}`: last state of each own say (`sent` until the voicebot's first receipt) | 0 |
 | `leave [--say TEXT]` | `{"type":"leaving"}` | 0 |
 | `status` | room, identity, connected, pending events, idle seconds, peers | 0 |
 | `status [TEXT] [--doing T] [--open T]... [--done T]... [-f board.json]` (0.7.0) | `{"type":"board","board":{...}}`: sends your status board | 0 ok, 1 failed |
 
 - `next` returns ONE event, oldest first; `pending` says how many more are queued.
-- **Several operators (0.11.0):** `say` defaults to `--mode append` (queue at the end,
-  behind Delta and other operators; nobody is cut off). `--mode overwrite` replaces only
-  YOUR still unspoken says, never another operator's (answer to `revise`). `--mode revise`
-  replaces your own unspoken says and sends `operator.revise` back to you only. `--urgent`
-  (`priority:"urgent"`) interrupts whoever is speaking and goes first; use sparingly.
+- **Several operators (0.11.0):** a running say is never cut, except by your own
+  `operator.interrupt` or `--urgent`. `say` defaults to `--mode append`: queued at the
+  end, it starts right after the running one without a gap (the server prefetches the
+  TTS). `--mode overwrite` replaces only YOUR says that have not started yet (state
+  `queued`), at their place in the queue; if there are none it is simply appended (a
+  `requeued` rest counts as started). Never another operator's says. `--mode revise` =
+  overwrite plus `operator.revise` to you only, listing the replaced texts (`unspoken`)
+  and `new`; nothing is held, nothing cut, and no revise event when nothing was replaced.
+  `--urgent` (`priority:"urgent"`) interrupts whoever is speaking and goes first; use
+  sparingly.
   `join --voice Puck` (Google Chirp3-HD name, sent as `vh.voice`) picks your own voice;
   without it the server assigns a fixed voice per identity, never Delta's (pipeline mode).
   `operator.revise` / `operator.say_status` reach only the say's owner (`owner` field);
@@ -273,7 +278,7 @@ stdin (JSONL):
 ```json
 {"text": "Hi there"}                                          → operator.say (default)
 {"topic": "operator.persona", "text": "Du bist X..."}           → live system-prompt update
-{"topic": "operator.interrupt"}                                 → cut off voice-ai
+{"topic": "operator.interrupt"}                                 → stop your own running say
 {"topic": "operator.inject", "role": "user", "text": "..."}     → force voice-ai reply
 ```
 
@@ -287,8 +292,8 @@ stdin (JSONL):
 | `_meta`             | out*      | Connection / room-state events         |
 | `operator.say`        | out       | TTS push; tagged `_seq`/`_ts` (#9). `mode`: `append` (default since 0.11.0: queue at the end), `overwrite` (replaces only your own unspoken says), `revise` (your own unspoken says are stopped, `operator.revise` comes back to you only); `priority:"urgent"` interrupts whoever speaks |
 | `operator.persona`    | out       | live update voice-ai system prompt     |
-| `operator.interrupt`  | out       | stop your own output; your unspoken rest comes back as `operator.revise` |
-| `operator.revise`     | in        | agent → you only: `{unspoken[], new, text, owner}` — merge into ONE statement, send with `mode:"overwrite"` within 8s |
+| `operator.interrupt`  | out       | stop your own output (the only way, besides `urgent`, to cut a running say); your unspoken rest comes back as `operator.revise` |
+| `operator.revise`     | in        | agent → you only: `{unspoken[], new, text, owner}`: your `mode:"revise"` replaced these not-started says; if any still matters, send ONE merged say with `mode:"overwrite"` |
 | `operator.inject`     | out       | force voice-ai to react (user-role)    |
 | `operator.backchannel`| out       | silent operator↔agent side-channel, relayed as-is (#10) |
 | `operator.status`     | out       | your status board `{doing, open[], done[], faq?[{q, a}]}` (0.7.0, `status` command; `faq` 0.10.0); replaces the last one, never spoken |

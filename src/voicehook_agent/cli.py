@@ -64,11 +64,12 @@ Say receipts (0.9.0, voicebot sends operator.say_status {seq, state, spoken_char
     join --username NAME             also sent to the server (vh.user): Delta knows the user.
 
 Several operators (0.11.0): one shared say queue for all agents in the call.
-    say [--mode append]              default: queue at the end, behind Delta and other
-                                     operators; nobody is cut off
-    say --mode overwrite             replace only YOUR unspoken says (answer to revise)
-    say --mode revise                stop your own unspoken says, operator.revise comes
-                                     back to you only
+    say [--mode append]              default: queue at the end, starts right after the
+                                     running say (no gap); a running say is never cut
+    say --mode overwrite             replace only YOUR not-started (queued) says at their
+                                     place, else append; a requeued rest counts as started
+    say --mode revise                overwrite + operator.revise to you only (replaced
+                                     texts in unspoken, plus new); nothing held or cut
     say --urgent                     priority urgent: interrupt whoever speaks, go first
     join --voice NAME                own Chirp3-HD voice (e.g. Puck) -> vh.voice; without it
                                      the server picks one per identity, never Delta's
@@ -495,8 +496,8 @@ async def _publish_say(room: rtc.Room, text: str, extra: dict,
     return {"ok": True, "seq": say.seq}
 
 
-# 0.11.0 (multi-operator): append is the default; overwrite/revise only touch our
-# OWN unspoken says, never another operator's. --urgent interrupts whoever speaks.
+# 0.11.0 (multi-operator): append is the default; a running say is never cut (only own
+# operator.interrupt / --urgent). overwrite/revise replace only our OWN not-started says.
 _SAY_MODES = ("append", "overwrite", "revise")
 SAY_DEFAULT_MODE = "append"
 
@@ -1827,10 +1828,11 @@ def main(argv: list[str] | None = None) -> None:
     p_say = sub.add_parser("say", help="speak one line through voice-ai in the running join")
     p_say.add_argument("text", nargs="+", help="text to speak ('-' reads it from stdin)")
     p_say.add_argument("--mode", choices=_SAY_MODES, default=SAY_DEFAULT_MODE,
-                       help="append (default): queue at the end, after other operators' lines. "
-                            "overwrite: replace your OWN still unspoken says (never another operator's); "
-                            "answer an operator.revise with --mode overwrite. revise: replace your own "
-                            "unspoken says and get operator.revise back (only you receive it).")
+                       help="append (default): queue at the end, starts right after the running say "
+                            "(a running say is never cut). overwrite: replace your OWN not-started (queued) "
+                            "says at their place, else append; never another operator's. revise: like "
+                            "overwrite, plus operator.revise to you only listing the replaced texts; nothing "
+                            "is held or cut.")
     p_say.add_argument("--urgent", action="store_true", default=False,
                        help="priority urgent: interrupt whoever is speaking (Delta or another operator) "
                             "and go first. Use sparingly.")

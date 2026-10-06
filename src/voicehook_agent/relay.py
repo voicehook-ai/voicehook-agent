@@ -434,8 +434,9 @@ def foreign_owner(payload: dict, own: set[str] | str | None, key: str = "owner")
 
 
 def revise_event(payload: dict, now: float | None = None) -> dict:
-    """Queue event for an incoming operator.revise (merge + resend with
-    mode=overwrite within 8 s)."""
+    """Queue event for an incoming operator.revise: our `--mode revise` replaced own
+    not-started says (`unspoken`); if any still matters, send one merged say with
+    mode=overwrite."""
     ev = {"type": "revise", "role": "system", "text": payload.get("text", ""),
           "ts": now if now is not None else time.time()}
     for k in ("unspoken", "new"):

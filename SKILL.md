@@ -88,7 +88,7 @@ your says (`vh says` = all), `say_hint` = a say waits > 20 s:
 | `type` | meaning | do |
 |---|---|---|
 | `user` | `text` = what the user just said | answer with one `say` |
-| `revise` | your `say --mode revise` hit your own unspoken text | merge, `say --mode overwrite "…"` within 8 s |
+| `revise` | your `say --mode revise` replaced own not-started says (`unspoken`) | if any still matters: one merged `say --mode overwrite "…"` |
 | `status_request` | the user asked what you are doing (comes first in line, CLI 0.9.0) | send `vh status` at once (below) |
 | `timeout` | 60 s silence (`--timeout SEC`) | call `next` again |
 | `ended` | the call is over | stop, the join already left |
@@ -182,9 +182,9 @@ Quickstart B: `$D/out` (JSON lines) should show within ~5 s:
 | topic | payload | effect |
 |---|---|---|
 | `operator.say` | `{text, mode?, priority?}` | speak `text` verbatim. Modes below |
-| `operator.revise` | ← `{unspoken[], new, text, owner}` | to you only: what of yours was NOT spoken yet |
+| `operator.revise` | ← `{unspoken[], new, text, owner}` | to you only: your not-started says that `revise` replaced |
 | `operator.persona` | `{text}` | replaces the voicebot's instructions for everyone (see above) |
-| `operator.interrupt` | `{}` | stop your own output; your unspoken rest comes back as `operator.revise` |
+| `operator.interrupt` | `{}` | stop your own running say; your unspoken rest comes back as `operator.revise` |
 | `operator.inject` | `{text, role?}` | context entry, not spoken |
 | `operator.status` | `{doing, open[], done[], faq?[{q, a}]}` | your status board (`vh status`), replaces the last one, never spoken |
 | `operator.activity` | `{lines[], ts}` | sent by the CLI itself (0.10.0) from the PostToolUse hook: newest 15 tool-call lines, at most every 5 s |
@@ -194,12 +194,14 @@ Quickstart B: `$D/out` (JSON lines) should show within ~5 s:
 | `transcript.live` | ← `{phase, role, id, text?, interrupted?}` | your `say` started (`start`, full text) / finished (`end`) playing; for the browser only, NOT proof it was spoken (use `transcript`) |
 | `quit` | `{}` | leave the call (what `leave` does) |
 
-`operator.say` modes (several operators share one queue): `append` (default) queues at
-the end, behind Delta and other operators, nobody is cut off. `overwrite` replaces only
-YOUR unspoken says (never another operator's). `revise` stops your own unspoken says and
-sends `operator.revise` to you only: merge into ONE statement, send it with
-`mode:"overwrite"` within 8 s, or only the newest text is spoken. `priority:"urgent"`
-(`say --urgent`) interrupts whoever speaks; use it sparingly.
+`operator.say` modes (several operators share one queue; a running say is never cut,
+except by your own `operator.interrupt` or `priority:"urgent"`): `append` (default) queues
+at the end and starts right after the running say, no gap. `overwrite` replaces only YOUR
+not-started says (`queued`) at their place, else it is appended; a `requeued` rest counts
+as started; never another operator's. `revise` = overwrite plus `operator.revise` to you
+only with the replaced texts (`unspoken`) and `new`; nothing held, nothing cut, no event
+if nothing was replaced. `priority:"urgent"` (`say --urgent`) interrupts whoever speaks;
+use it sparingly.
 
 ## Live mode (Gemini Live)
 
