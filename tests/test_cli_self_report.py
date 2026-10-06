@@ -36,7 +36,8 @@ def test_join_without_self_report_exits_nonzero(argv, missing, capsys):
     err = capsys.readouterr().err
     assert "--name" in err and "--model" in err
     assert f"(fehlt: {missing})" in err
-    assert "Beispiel" in err and "--name Claude --model opus-5.5" in err
+    assert "Beispiel" in err and "--name <dein-eigener-Name> --model <dein-Modellname>" in err
+    assert "nie 'Claude', wenn du nicht Claude bist" in err
 
 
 def test_join_coroutine_guard_also_rejects():

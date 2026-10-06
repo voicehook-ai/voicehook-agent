@@ -63,6 +63,18 @@ Say receipts (0.9.0, voicebot sends operator.say_status {seq, state, spoken_char
                                      receipt): {"type":"says","says":[{seq,state,...}]}
     join --username NAME             also sent to the server (vh.user): Delta knows the user.
 
+Several operators (0.11.0): one shared say queue for all agents in the call.
+    say [--mode append]              default: queue at the end, behind Delta and other
+                                     operators; nobody is cut off
+    say --mode overwrite             replace only YOUR unspoken says (answer to revise)
+    say --mode revise                stop your own unspoken says, operator.revise comes
+                                     back to you only
+    say --urgent                     priority urgent: interrupt whoever speaks, go first
+    join --voice NAME                own Chirp3-HD voice (e.g. Puck) -> vh.voice; without it
+                                     the server picks one per identity, never Delta's
+    revise / say_status              only for the say's owner (field owner); transcript
+                                     lines carry speaker (display name) + op (identity)
+
 Activity feed (0.10.0): Delta sees what you are doing, one line per tool call.
     hook install [--settings PATH]   add the Claude Code PostToolUse hook to settings.json
     hook print                       print the settings.json snippet
@@ -175,7 +187,8 @@ def _operator_invite(url: str) -> str | None:
 
 async def _mint_token(api_base: str, slug: str, identity: str,
                       name: str | None = None, model: str | None = None,
-                      op_invite: str | None = None, username: str | None = None) -> dict:
+                      op_invite: str | None = None, username: str | None = None,
+                      voice: str | None = None) -> dict:
     """Calls /api/token?room=...&identity=...&invite=1 — invite=1 prevents
     a second voice-ai dispatch (voice-ai is presumably already in the room
     if a user is talking to it; we join as the additional agent participant).
@@ -200,6 +213,8 @@ async def _mint_token(api_base: str, slug: str, identity: str,
         params["op_invite"] = op_invite
     if username:  # 0.9.0: lands as participant attribute vh.user (Delta's core knows the user)
         params["username"] = username
+    if voice:  # 0.11.0: wish voice for our says (Chirp3-HD, e.g. 'Puck') -> vh.voice
+        params["voice"] = voice
     async with httpx.AsyncClient(timeout=10.0, headers={"user-agent": _USER_AGENT}) as cli:
         r = await cli.get(url, params=params)
         if r.status_code >= 400:
@@ -215,12 +230,12 @@ async def _mint_token(api_base: str, slug: str, identity: str,
 
 SELF_REPORT_ERROR = (
     "[error] Selbstauskunft fehlt: `join` braucht --name UND --model.\n"
-    "  --name   dein Anzeigename im Call (wie du dich nennst, z.B. 'Claude', 'Hermes', 'Cursor')\n"
+    "  --name   dein eigener Anzeigename im Call (dein echter Modell-/Herstellername)\n"
     "  --model  das exakte Modell, auf dem du gerade laeufst (z.B. 'opus-5.5', 'deepseek-v4-pro')\n"
-    "Beide erscheinen im Agent-Chip der Web-UI als 'Name · Modell'. Nie eine Marke raten,\n"
-    "die du nicht bist.\n"
+    "Beide erscheinen im Agent-Chip der Web-UI als 'Name · Modell'. Nenn deinen echten\n"
+    "Modell-/Herstellernamen, nie 'Claude', wenn du nicht Claude bist.\n"
     "Beispiel:\n"
-    "  voicehook-agent join https://voicehook.ai/r/<slug> --name Claude --model opus-5.5 --json"
+    "  voicehook-agent join https://voicehook.ai/r/<slug> --name <dein-eigener-Name> --model <dein-Modellname> --json"
 )
 
 
@@ -480,7 +495,10 @@ async def _publish_say(room: rtc.Room, text: str, extra: dict,
     return {"ok": True, "seq": say.seq}
 
 
-_SAY_MODES = ("revise", "overwrite", "append")
+# 0.11.0 (multi-operator): append is the default; overwrite/revise only touch our
+# OWN unspoken says, never another operator's. --urgent interrupts whoever speaks.
+_SAY_MODES = ("append", "overwrite", "revise")
+SAY_DEFAULT_MODE = "append"
 
 
 async def _control_handler(ctl: _Control, req: dict) -> dict:
@@ -492,12 +510,13 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         text = str(req.get("text") or "").strip()
         if not text:
             return {"ok": False, "error": "empty text"}
-        extra: dict = {}
-        mode = req.get("mode")
-        if mode:
-            if mode not in _SAY_MODES:
-                return {"ok": False, "error": f"mode must be one of {_SAY_MODES}"}
-            extra["mode"] = mode
+        # mode is always sent explicitly (older servers defaulted to revise)
+        mode = req.get("mode") or SAY_DEFAULT_MODE
+        if mode not in _SAY_MODES:
+            return {"ok": False, "error": f"mode must be one of {_SAY_MODES}"}
+        extra: dict = {"mode": mode}
+        if req.get("urgent"):
+            extra["priority"] = "urgent"
         nudge = ctl.clock.said(text=text)  # 0.9.0: progress said, board older -> hint
         room = await ctl.wait_room(10.0)
         if room is None:
@@ -931,6 +950,7 @@ async def _connect_and_listen(
     invite: str | None = None,
     connect_timeout: float = 45.0,
     username: str | None = None,
+    voice: str | None = None,
 ) -> tuple[int, str | None]:
     """One connect→listen cycle. Returns (rc, disconnect_reason_name).
     disconnect_reason_name is None for a clean stdin-driven quit; otherwise the
@@ -940,11 +960,11 @@ async def _connect_and_listen(
         # Server joins for us over HTTPS (same token/attributes as /api/token?invite=1).
         room = vtransport.BridgeRoom(api_base, slug, ident, name=agent_name or "agent",
                                      model=model or "unbekannt", invite=invite,
-                                     user_agent=_USER_AGENT, username=username)
+                                     user_agent=_USER_AGENT, username=username, voice=voice)
     else:
         try:
             tok = await _mint_token(api_base, slug, ident, name=agent_name, model=model,
-                                    op_invite=invite, username=username)
+                                    op_invite=invite, username=username, voice=voice)
         except TokenMintError as e:
             if e.status == 410:  # 0.10.1: call ended / room gone -> never rejoin
                 print(f"[error] call ended ({e}), not joining", file=sys.stderr, flush=True)
@@ -974,6 +994,11 @@ async def _connect_and_listen(
     def _emit_meta(text: str, **extra) -> None:
         _print_event(json_mode, "system", text, topic="_meta", **extra)
 
+    def _own_ids() -> set[str]:
+        lp = getattr(room, "local_participant", None)
+        return {i for i in (ident, getattr(lp, "identity", None),
+                            getattr(room, "identity", None)) if i}
+
     # ---- transcript / control inbound ------------------------------------- #
     def _on_data(pkt: rtc.DataPacket) -> None:
         topic = (pkt.topic or "").strip()
@@ -984,10 +1009,14 @@ async def _connect_and_listen(
         if topic == "transcript":
             role = payload.get("role", "?")
             text = payload.get("text", "")
-            # #10 — drop our own relayed TTS echo from the operator stream.
-            if echo.should_suppress(role, text):
+            # #10 — drop our own relayed TTS echo from the operator stream; a line of
+            # another operator (payload.op = their identity) is never our echo.
+            if not relay.foreign_owner(payload, _own_ids(), key="op") and echo.should_suppress(role, text):
                 return
-            _print_event(json_mode, role, text, topic=topic)
+            # 0.11.0: v4 stamps speaker (display name) + op (operator identity) on
+            # transcript lines; old servers send neither -> output unchanged.
+            who = {k: payload[k] for k in ("speaker", "op") if payload.get(k)}
+            _print_event(json_mode, role, text, topic=topic, **who)
             # `voicehook-agent next` — queue finalized user turns.
             if ctl is not None and role == "agent" and relay.TurnNotifier._is_final(payload):
                 ctl.agent_said.add(text)  # Delta's own answer (not an echo of our say)
@@ -1016,6 +1045,9 @@ async def _connect_and_listen(
                 disconnect_reason["name"] = "CALL_ENDED"
                 stop.set()
         elif topic.startswith("operator."):
+            if topic in ("operator.revise", "operator.say_status") and relay.foreign_owner(
+                    payload, _own_ids()):
+                return  # 0.11.0: belongs to another operator (server routes per owner)
             if topic == "operator.revise" and ctl is not None:
                 ctl.events.put_nowait(relay.revise_event(payload))
             elif topic == "operator.say_status":
@@ -1328,6 +1360,7 @@ async def _join(
     force_persona: bool = False,
     control: bool = True,
     transport: str = "auto",
+    voice: str | None = None,
     status_due: float | None = None,
 ) -> int:
     missing = _missing_self_report(agent_name, model)
@@ -1451,6 +1484,7 @@ async def _join(
                 strict=strict, agent_name=agent_name, model=model,
                 ctl=ctl, force_persona=force_persona,
                 transport=cur_transport, invite=invite, username=username,
+                voice=voice,
             )
             if first and vtransport.should_fallback(transport, cur_transport, reason):
                 cur_transport = "bridge"
@@ -1631,9 +1665,9 @@ def _client_request(args) -> dict:
         text = " ".join(args.text)
         if text == "-":
             text = sys.stdin.read()
-        req = {"cmd": "say", "text": text.strip()}
-        if args.mode:
-            req["mode"] = args.mode
+        req = {"cmd": "say", "text": text.strip(), "mode": args.mode or SAY_DEFAULT_MODE}
+        if getattr(args, "urgent", False):
+            req["urgent"] = True
         return req
     if args.cmd == "next":
         return {"cmd": "next", "timeout": args.timeout}
@@ -1687,10 +1721,11 @@ def main(argv: list[str] | None = None) -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
     p_join = sub.add_parser("join", help="join a voicehook.ai call as an agent")
     p_join.add_argument("invite_url", help="full invite link https://voicehook.ai/r/<slug>?invite=<code>  OR  bare <slug>")
-    p_join.add_argument("--name", default=None, help="REQUIRED. Your display name in the call (e.g. 'Claude', 'Hermes', 'Cursor'). Shown in the web Agent chip as 'Name · model', becomes the identity prefix and the name spoken in the auto-greet. Never claim a vendor you are not.")
+    p_join.add_argument("--name", default=None, help="REQUIRED. Your OWN display name in the call (<dein-eigener-Name>). Shown in the web Agent chip as 'Name · model', becomes the identity prefix and the name spoken in the auto-greet. Nenn deinen echten Modell-/Herstellernamen, nie 'Claude', wenn du nicht Claude bist.")
     p_join.add_argument("--identity", default=None, help="explicit full identity (overrides --name)")
     p_join.add_argument("--model", default=None, help="REQUIRED. Self-report: the exact model you run on (e.g. 'opus-5.5', 'deepseek-v4-pro'). Shown in the web Agent chip.")
     p_join.add_argument("--topic", default=None, help="self-report: what the call is about (<=5 words), spoken as 'wir waren gerade dabei {topic}'.")
+    p_join.add_argument("--voice", default=None, help="optional wish voice for your says (Google Chirp3-HD, e.g. 'Puck' or 'de-DE-Chirp3-HD-Puck'); sent to the server (token `voice=` / bridge join `voice`) as attribute vh.voice. Without it the server picks a fixed voice per identity, never Delta's. Normal mode only.")
     p_join.add_argument("--username", default=None, help="the user's first name: spoken in the salutation ('Hallo {username},') and, since 0.9.0, sent to the server (token `username=` / bridge join `username`) so the voicebot knows whom it talks to (participant attribute vh.user). Omitted if unknown.")
     p_join.add_argument("--prompt", default=None, help="extra sentence appended after the auto-greet.")
     p_join.add_argument("--greet", default=None, help="full custom greeting (overrides the composed template).")
@@ -1791,8 +1826,14 @@ def main(argv: list[str] | None = None) -> None:
                        help="wait up to SEC seconds for the join to come up (default 30).")
     p_say = sub.add_parser("say", help="speak one line through voice-ai in the running join")
     p_say.add_argument("text", nargs="+", help="text to speak ('-' reads it from stdin)")
-    p_say.add_argument("--mode", choices=_SAY_MODES, default=None,
-                       help="operator.say mode (server default: revise). Answer an operator.revise with --mode overwrite.")
+    p_say.add_argument("--mode", choices=_SAY_MODES, default=SAY_DEFAULT_MODE,
+                       help="append (default): queue at the end, after other operators' lines. "
+                            "overwrite: replace your OWN still unspoken says (never another operator's); "
+                            "answer an operator.revise with --mode overwrite. revise: replace your own "
+                            "unspoken says and get operator.revise back (only you receive it).")
+    p_say.add_argument("--urgent", action="store_true", default=False,
+                       help="priority urgent: interrupt whoever is speaking (Delta or another operator) "
+                            "and go first. Use sparingly.")
     _add_session(p_say)
     p_next = sub.add_parser("next", help="block until the next finalized user turn (or operator.revise); prints one JSON line")
     p_next.add_argument("--timeout", type=float, default=60.0, metavar="SEC",
@@ -1875,6 +1916,7 @@ def main(argv: list[str] | None = None) -> None:
                 owner_pids=args.owner_pid,
                 force_persona=args.force_persona, control=not args.no_control,
                 transport=args.transport, status_due=args.status_due,
+                voice=args.voice,
             ))
         except KeyboardInterrupt:
             rc = 130

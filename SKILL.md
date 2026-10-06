@@ -18,7 +18,7 @@ install. The session key stays in `$D/h` (mode 600), never in a URL.
 ```bash
 I="<INVITE_URL>"; D=$(mktemp -d /tmp/vh-XXXXXX); chmod 700 $D; echo "${I%%/r/*}" >$D/base
 curl -sS $(cat $D/base)/api/bridge/join -H content-type:application/json -d '{"invite_url":"'"$I"'",
- "name":"Claude","model":"<your-model-id>","greet":"Hallo, hier ist Claude. Worum geht es?"}' >$D/join
+ "name":"<dein-eigener-Name>","model":"<dein-Modellname>","greet":"Hallo, hier ist <dein-eigener-Name>. Worum geht es?"}' >$D/join
 (umask 077; sed -n 's/.*"session":"\([^"]*\)".*/Authorization: Bearer \1/p' $D/join >$D/h)
 cat >$D/vh <<'VH'
 #!/bin/sh
@@ -48,7 +48,7 @@ command -v voicehook-agent || uv tool install -q $R || pip install -q --user $R
 D=$(mktemp -d /tmp/vh-XXXXXX); mkfifo $D/in; (setsid sleep 86400 >$D/in & echo $! >$D/holder)
 printf '#!/bin/sh\nexport VOICEHOOK_AGENT_HOME=%s\n[ "$1" = leave ] || exec "%s" "$@"\n"%s" "$@"; rc=$?; kill $(cat %s/holder) 2>/dev/null; exit $rc\n' \
   $D "$(command -v voicehook-agent)" "$(command -v voicehook-agent)" $D >$D/vh; chmod +x $D/vh
-(setsid nohup $D/vh join "<INVITE_URL>" --name Claude --model <your-model-id> --json --owner-pid $PPID --greet "Hallo, hier ist Claude. Worum geht's?" <$D/in >$D/out 2>&1 &)
+(setsid nohup $D/vh join "<INVITE_URL>" --name <dein-eigener-Name> --model <dein-Modellname> --json --owner-pid $PPID --greet "Hallo, hier ist <dein-eigener-Name>. Worum geht's?" <$D/in >$D/out 2>&1 &)
 $D/vh next --help >/dev/null 2>&1 && echo "D=$D ready" || echo "D=$D CLI 0.4.0: upgrade (below)"
 ```
 
@@ -58,7 +58,8 @@ tool calls, so every later call uses the absolute wrapper, e.g. `/tmp/vh-ab12cd/
 (`VOICEHOOK_AGENT_HOME=$D`), so other agents on the same machine never collide with you.
 
 - `--name` / `--model` are mandatory (exit 2 without them): your real name and the exact
-  model id you run on. Never claim a vendor you are not. Unknown model: `--model unbekannt`.
+  model id you run on. Nenn deinen echten Modell-/Herstellernamen, nie 'Claude', wenn du
+  nicht Claude bist. Unknown model: `--model unbekannt`. Optional `--voice Puck` (own voice).
 - `--username <Vorname>` (optional, CLI 0.9.0 sends it to the server as `vh.user`): Delta knows
   whom it talks to and addresses the user directly.
 - `<INVITE_URL>` must be the full invite link including `?invite=...` (the CLI sends it as
@@ -87,7 +88,7 @@ your says (`vh says` = all), `say_hint` = a say waits > 20 s:
 | `type` | meaning | do |
 |---|---|---|
 | `user` | `text` = what the user just said | answer with one `say` |
-| `revise` | your `say` overlapped unspoken text | merge, `say --mode overwrite "…"` within 8 s |
+| `revise` | your `say --mode revise` hit your own unspoken text | merge, `say --mode overwrite "…"` within 8 s |
 | `status_request` | the user asked what you are doing (comes first in line, CLI 0.9.0) | send `vh status` at once (below) |
 | `timeout` | 60 s silence (`--timeout SEC`) | call `next` again |
 | `ended` | the call is over | stop, the join already left |
@@ -180,24 +181,25 @@ Quickstart B: `$D/out` (JSON lines) should show within ~5 s:
 
 | topic | payload | effect |
 |---|---|---|
-| `operator.say` | `{text, mode?}` | speak `text` verbatim. Modes below |
-| `operator.revise` | ← `{unspoken[], new, text}` | from the voicebot: what was NOT spoken yet |
+| `operator.say` | `{text, mode?, priority?}` | speak `text` verbatim. Modes below |
+| `operator.revise` | ← `{unspoken[], new, text, owner}` | to you only: what of yours was NOT spoken yet |
 | `operator.persona` | `{text}` | replaces the voicebot's instructions for everyone (see above) |
-| `operator.interrupt` | `{}` | stop speaking; unspoken rest comes back as `operator.revise` |
+| `operator.interrupt` | `{}` | stop your own output; your unspoken rest comes back as `operator.revise` |
 | `operator.inject` | `{text, role?}` | context entry, not spoken |
 | `operator.status` | `{doing, open[], done[], faq?[{q, a}]}` | your status board (`vh status`), replaces the last one, never spoken |
 | `operator.activity` | `{lines[], ts}` | sent by the CLI itself (0.10.0) from the PostToolUse hook: newest 15 tool-call lines, at most every 5 s |
 | `operator.say_status` | ← `{seq, state, spoken_chars}` | CLI 0.9.0: fate of your say (`queued`/`spoken`/`interrupted`/`requeued`/`replaced`); `next` carries `say_status`, `vh says` the last state, `say_hint` = stuck > 20 s |
 | `operator.alive` | `{alive, ts, idle_s}` | sent by the CLI itself (0.8.0) every 10 s while you serve `next`/`say`; `alive:false` on leave |
-| `transcript` | ← `{role, text}` | `user` = the human; `operator` = your spoken text; `agent` = voicebot's own answer |
+| `transcript` | ← `{role, text, speaker?, op?}` | `user` = the human; `operator` = an operator's spoken text (`op` = whose); `agent` = voicebot's own answer |
 | `transcript.live` | ← `{phase, role, id, text?, interrupted?}` | your `say` started (`start`, full text) / finished (`end`) playing; for the browser only, NOT proof it was spoken (use `transcript`) |
 | `quit` | `{}` | leave the call (what `leave` does) |
 
-`operator.say` modes: `revise` (default) speaks at once if nothing of yours is pending;
-otherwise it stops and sends you `operator.revise` with the unspoken parts. Then merge
-everything into ONE statement and send it with `mode:"overwrite"` within 8 s, or only the
-newest text is spoken. `append` queues behind the current output (multi-part, status
-heartbeats).
+`operator.say` modes (several operators share one queue): `append` (default) queues at
+the end, behind Delta and other operators, nobody is cut off. `overwrite` replaces only
+YOUR unspoken says (never another operator's). `revise` stops your own unspoken says and
+sends `operator.revise` to you only: merge into ONE statement, send it with
+`mode:"overwrite"` within 8 s, or only the newest text is spoken. `priority:"urgent"`
+(`say --urgent`) interrupts whoever speaks; use it sparingly.
 
 ## Live mode (Gemini Live)
 

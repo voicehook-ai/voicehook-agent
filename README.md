@@ -7,11 +7,12 @@ participant. No SDK, no MCP server, no learning curve — stdin/stdout protocol.
 ## TL;DR
 
 ```bash
-uvx voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name Claude --model opus-5.5
+uvx voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name <dein-eigener-Name> --model <dein-Modellname>
 ```
 
 - **`--name` + `--model` are mandatory** (since 0.4.0): your self-chosen display
-  name and the exact model you run on. Without both, `join` exits with code 2
+  name and the exact model you run on. Nenn deinen echten Modell-/Herstellernamen,
+  nie 'Claude', wenn du nicht Claude bist. Without both, `join` exits with code 2
   and explains what to pass. The web call UI shows them in the Agent chip as
   `Name · model` (a loading ring is shown there until you have joined).
 - **Use the full invite link**, including its `?invite=<code>` part. The CLI
@@ -28,7 +29,7 @@ Start `join` once in the background, then drive the call with one-shot
 commands. No FIFO, no tmux, no `sleep; tail`:
 
 ```bash
-voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name Claude --model opus-5.5 --json \
+voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name <dein-eigener-Name> --model <dein-Modellname> --json \
   > ~/.voicehook-agent/call.log 2>&1 &
 
 voicehook-agent say "Hallo, ich bin jetzt im Call."     # speak one line
@@ -41,7 +42,7 @@ voicehook-agent leave --say "Bis bald."                 # clean exit
 
 | Command | Output (one JSON line) | Exit |
 |---|---|---|
-| `say <text> [--mode revise\|overwrite\|append]` | `{"ok":true,"seq":3}` | 0 ok, 1 failed |
+| `say <text> [--mode append\|overwrite\|revise] [--urgent]` | `{"ok":true,"seq":3}` | 0 ok, 1 failed |
 | `next [--timeout SEC]` | `{"type":"user","text":...}`, `{"type":"revise","text":...,"unspoken":[...]}` (answer with `say --mode overwrite`), `{"type":"timeout"}`, `{"type":"ended"}` | 0, 3 on `ended` |
 | `says` (0.9.0) | `{"type":"says","says":[{"seq":3,"state":"spoken","spoken_chars":12,"age_s":4.1,"text":"..."}]}`: last state of each own say (`sent` until the voicebot's first receipt) | 0 |
 | `leave [--say TEXT]` | `{"type":"leaving"}` | 0 |
@@ -49,6 +50,16 @@ voicehook-agent leave --say "Bis bald."                 # clean exit
 | `status [TEXT] [--doing T] [--open T]... [--done T]... [-f board.json]` (0.7.0) | `{"type":"board","board":{...}}`: sends your status board | 0 ok, 1 failed |
 
 - `next` returns ONE event, oldest first; `pending` says how many more are queued.
+- **Several operators (0.11.0):** `say` defaults to `--mode append` (queue at the end,
+  behind Delta and other operators; nobody is cut off). `--mode overwrite` replaces only
+  YOUR still unspoken says, never another operator's (answer to `revise`). `--mode revise`
+  replaces your own unspoken says and sends `operator.revise` back to you only. `--urgent`
+  (`priority:"urgent"`) interrupts whoever is speaking and goes first; use sparingly.
+  `join --voice Puck` (Google Chirp3-HD name, sent as `vh.voice`) picks your own voice;
+  without it the server assigns a fixed voice per identity, never Delta's (pipeline mode).
+  `operator.revise` / `operator.say_status` reach only the say's owner (`owner` field);
+  transcript lines carry `speaker` (display name) and `op` (operator identity), printed
+  in `--json` output and on `next` user events when the server sends them.
 - **Say receipts (0.9.0):** the voicebot reports each say as `operator.say_status
   {seq, state, spoken_chars}` (`seq` = the `seq` that `say` returned; states `queued`,
   `spoken`, `interrupted`, `requeued`, `replaced`). `next` carries the changes since the
@@ -196,7 +207,7 @@ nothing.
 ### One-shot (per-call, recommended)
 
 ```bash
-uvx voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name Claude --model opus-5.5
+uvx voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name <dein-eigener-Name> --model <dein-Modellname>
 ```
 
 [uv](https://github.com/astral-sh/uv) downloads the package on demand. Zero state.
@@ -216,7 +227,7 @@ pipx install voicehook-agent
 Then:
 
 ```bash
-voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name Claude --model opus-5.5
+voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name <dein-eigener-Name> --model <dein-Modellname>
 ```
 
 ## Agent-skill registration
@@ -236,7 +247,7 @@ shares a voicehook invite.
 ### Interactive mode (default)
 
 ```
-$ voicehook-agent join https://voicehook.ai/r/abc-def-ghi-XYZ4?go=1 --name Claude --model opus-5.5
+$ voicehook-agent join https://voicehook.ai/r/abc-def-ghi-XYZ4?go=1 --name <dein-eigener-Name> --model <dein-Modellname>
 [system] connecting room=abc-def-ghi-XYZ4 as identity=claude-mbp-7f3a via https://voicehook.ai
 [system] connected — 1 peers: ['agent-AJ_qwerty1234']
 [hint] type a line to operator.say (voice-ai speaks it). /q to quit (Ctrl-D no longer quits under --keep-alive).
@@ -250,7 +261,7 @@ Ich bin dein Pair-Programming-Brain.    ← typed by agent (voice-ai TTS speaks 
 ### JSON mode
 
 ```bash
-voicehook-agent join <url> --name Claude --model opus-5.5 --json
+voicehook-agent join <url> --name <dein-eigener-Name> --model <dein-Modellname> --json
 ```
 
 stdout (JSONL):
@@ -270,14 +281,14 @@ stdin (JSONL):
 
 | Topic              | Direction | Purpose                                |
 |--------------------|-----------|----------------------------------------|
-| `transcript`        | in        | Live turns, `role` = `user` / `operator` (your `operator.say`, after it was spoken) / `agent` (voice-ai's own answer) |
+| `transcript`        | in        | Live turns, `role` = `user` / `operator` (an `operator.say`, after it was spoken; `op` = whose) / `agent` (voice-ai's own answer); `speaker` = display name (v4, 0.11.0) |
 | `transcript.live`   | in        | `{phase, role, id, text?, interrupted?}`: your `say` started (`start`, full text) / finished (`end`) playing; for the browser only, NOT proof it was spoken (use `transcript`) |
 | `_wake`             | out*      | Wake marker on each finalized user-turn (#12) |
 | `_meta`             | out*      | Connection / room-state events         |
-| `operator.say`        | out       | TTS push; tagged `_seq`/`_ts` (#9). `mode`: `revise` (default: if unspoken text is pending the agent stops and answers with `operator.revise`), `overwrite` (your merged answer), `append` (queue) |
+| `operator.say`        | out       | TTS push; tagged `_seq`/`_ts` (#9). `mode`: `append` (default since 0.11.0: queue at the end), `overwrite` (replaces only your own unspoken says), `revise` (your own unspoken says are stopped, `operator.revise` comes back to you only); `priority:"urgent"` interrupts whoever speaks |
 | `operator.persona`    | out       | live update voice-ai system prompt     |
-| `operator.interrupt`  | out       | stop everything; unspoken rest comes back as `operator.revise` |
-| `operator.revise`     | in        | agent → you: `{unspoken[], new, text}` — merge into ONE statement, send with `mode:"overwrite"` within 8s |
+| `operator.interrupt`  | out       | stop your own output; your unspoken rest comes back as `operator.revise` |
+| `operator.revise`     | in        | agent → you only: `{unspoken[], new, text, owner}` — merge into ONE statement, send with `mode:"overwrite"` within 8s |
 | `operator.inject`     | out       | force voice-ai to react (user-role)    |
 | `operator.backchannel`| out       | silent operator↔agent side-channel, relayed as-is (#10) |
 | `operator.status`     | out       | your status board `{doing, open[], done[], faq?[{q, a}]}` (0.7.0, `status` command; `faq` 0.10.0); replaces the last one, never spoken |
