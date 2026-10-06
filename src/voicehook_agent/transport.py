@@ -39,7 +39,16 @@ _END_REASON = {
 }
 
 SSE_READ_TIMEOUT = 45.0   # server pings every 15 s
-SSE_MAX_FAILS = 4
+# Server restart (deploy): the server keeps bridge sessions and restores them under the
+# SAME session token (voicehook-v4 #158). So a dropped stream, a 502/503/504 from the
+# proxy in front, or an event with "reconnect": true is retried with that token for up
+# to BRIDGE_RETRY_S; only then the bridge counts as lost (and the join loop rejoins).
+BRIDGE_RETRY_S = 30.0
+RETRY_BACKOFF_MAX_S = 4.0
+RETRY_STATUS = frozenset({502, 503, 504})
+# Errors where the request never reached the app (safe to resend a say).
+_SEND_RETRY_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout,
+                      httpx.RemoteProtocolError)
 
 
 class BridgeError(RuntimeError):
@@ -240,12 +249,34 @@ class BridgeRoom:
             self._http = None
 
     async def _send(self, topic: str, payload: Any) -> None:
+        """POST /api/bridge/send. During a server restart (connection refused, 502/503/504)
+        the same request is retried with the same token for up to BRIDGE_RETRY_S, so a
+        `say` sent mid-deploy is delivered late instead of lost."""
         if self._http is None or not self._session or self._closed:
             raise BridgeError("bridge not connected")
-        r = await self._http.post(f"{self.api_base}/api/bridge/send", headers=self._auth(),
-                                  json={"topic": topic, "payload": payload, "force": True})
+        loop = asyncio.get_running_loop()
+        deadline: float | None = None
+        delay = 0.5
+        while True:
+            err: Exception | None = None
+            try:
+                r = await self._http.post(f"{self.api_base}/api/bridge/send", headers=self._auth(),
+                                          json={"topic": topic, "payload": payload, "force": True})
+            except _SEND_RETRY_ERRORS as e:
+                r, err = None, e
+            if r is not None and r.status_code not in RETRY_STATUS:
+                break
+            now = loop.time()
+            deadline = now + BRIDGE_RETRY_S if deadline is None else deadline
+            if now >= deadline or self._closed or self._http is None:
+                what = f"HTTP {r.status_code}" if r is not None else repr(err)
+                raise BridgeError(f"bridge send {topic} failed after retry: {what}",
+                                  status=r.status_code if r is not None else None)
+            await asyncio.sleep(min(delay, max(0.0, deadline - now)))
+            delay = min(delay * 2, RETRY_BACKOFF_MAX_S)
         if r.status_code != 200:
-            raise BridgeError(f"bridge send {topic} failed: HTTP {r.status_code} {_detail(r)}")
+            raise BridgeError(f"bridge send {topic} failed: HTTP {r.status_code} {_detail(r)}",
+                              status=r.status_code)
 
     def _fire_disconnected(self, reason: str) -> None:
         if self._fired_disconnect:
@@ -254,11 +285,16 @@ class BridgeRoom:
         self.emit("disconnected", reason)
 
     async def _sse_loop(self) -> None:
-        """Own connection for the stream; reconnects within the server's 60 s grace."""
+        """Own connection for the stream. Dropped stream, 5xx or `"reconnect": true` ->
+        reconnect with the SAME session token for up to BRIDGE_RETRY_S (server restart,
+        deploy, proxy hiccup); 401/404/410 or a longer outage -> BRIDGE_LOST."""
+        loop = asyncio.get_running_loop()
         fails = 0
+        down_since: float | None = None
         timeout = httpx.Timeout(15.0, read=SSE_READ_TIMEOUT)
         async with self._client_factory(self.user_agent, timeout) as cli:
             while not self._closed:
+                reconnect_now = False
                 try:
                     async with cli.stream("GET", f"{self.api_base}/api/bridge/events",
                                           headers={**self._auth(), "accept": "text/event-stream"}) as r:
@@ -266,14 +302,17 @@ class BridgeRoom:
                             self._fire_disconnected("BRIDGE_LOST")
                             return
                         r.raise_for_status()
-                        if fails:
+                        if down_since is not None:
                             self.emit("reconnected")
-                        fails = 0
+                        fails, down_since = 0, None
                         async for ev in parse_sse(r.aiter_lines()):
                             if ev.get("type") == "ended":
                                 reason = str(ev.get("reason") or "UNKNOWN")
                                 self._fire_disconnected(_END_REASON.get(reason, reason))
                                 return
+                            if ev.get("reconnect") is True:  # server restarts: ask again now
+                                reconnect_now = True
+                                break
                             self._dispatch(ev)
                 except asyncio.CancelledError:
                     raise
@@ -281,13 +320,16 @@ class BridgeRoom:
                     pass
                 if self._closed:
                     return
-                fails += 1
-                if fails > SSE_MAX_FAILS:
+                now = loop.time()
+                if down_since is None:
+                    down_since = now
+                    self.emit("reconnecting")
+                elif now - down_since >= BRIDGE_RETRY_S:
                     self._fire_disconnected("BRIDGE_LOST")
                     return
-                if fails == 1:
-                    self.emit("reconnecting")
-                await asyncio.sleep(min(2.0 ** fails, 10.0))
+                fails += 1
+                wait = 0.2 if reconnect_now else min(0.5 * 2.0 ** (fails - 1), RETRY_BACKOFF_MAX_S)
+                await asyncio.sleep(min(wait, max(0.0, down_since + BRIDGE_RETRY_S - now)))
 
     def _participant(self, info: dict) -> BridgeParticipant:
         ident = info.get("identity", "?")
