@@ -74,7 +74,11 @@ voicehook-agent leave --say "Bis bald."                 # clean exit
   `says` shows the last state of every say. Live mode (0.12.0): `covered` (final) =
   your say arrived while the user had the floor, went to the model as context, and
   Delta already said it in his answer; it carries `"note": "Info steckt schon in
-  Deltas Antwort, nicht nochmal senden"`. Do not send it again.
+  Deltas Antwort, nicht nochmal senden"`. Do not send it again. `no_audio` = no audio
+  within 4 s (voice engine silent), the voicebot retries once; `dropped` (final) = the
+  retry was silent too, the say was never spoken: resend it if it still matters. Both
+  carry a `note`; `reason` is passed through (`interrupted` + `max_duration` = the
+  voicebot's emergency brake cut a say that never reported finished).
   Turns spoken while you were thinking are kept, never lost. `--timeout 0` only
   returns what is already queued. Each event carries `ts` (unix time it was
   spoken).

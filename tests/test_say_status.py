@@ -173,3 +173,28 @@ def test_covered_round_trip_next_and_says():
     assert nxt["say_status"][-1]["state"] == "covered"
     assert "Deltas Antwort" in nxt["say_status"][-1]["note"]
     assert says["says"][0]["state"] == "covered" and "Deltas Antwort" in says["says"][0]["note"]
+
+
+# ----- v4 fix/live-say-no-audio: no_audio / dropped ------------------------------------
+def test_say_status_no_audio_then_dropped_passes_through():
+    s = relay.SayStatus()
+    s.sent(9, "Der Pull Request ist offen", now=0.0)
+    s.update({"seq": 9, "state": "queued"}, now=0.1)
+    a = s.update({"seq": 9, "state": "no_audio", "reason": "no_audio"}, now=4.2)
+    assert a == {"seq": 9, "state": "no_audio", "note": relay.SAY_NOTES["no_audio"],
+                 "reason": "no_audio"}
+    b = s.update({"seq": 9, "state": "dropped", "reason": "no_audio",
+                  "text": "Der Pull Request ist offen", "hint": "neu senden"}, now=8.4)
+    assert b["state"] == "dropped" and "neu senden" in b["note"]
+    out = s.take(now=8.5)
+    assert [c["state"] for c in out["say_status"]] == ["queued", "no_audio", "dropped"]
+    assert s.table(now=9.0)[0]["state"] == "dropped"
+    assert s.stuck(now=60.0) is None                       # final, never "stuck"
+
+
+def test_say_status_brake_reason_on_interrupted():
+    s = relay.SayStatus()
+    s.sent(3, "lang", now=0.0)
+    c = s.update({"seq": 3, "state": "interrupted", "spoken_chars": 12,
+                  "reason": "max_duration"}, now=30.0)
+    assert c == {"seq": 3, "state": "interrupted", "spoken_chars": 12, "reason": "max_duration"}
