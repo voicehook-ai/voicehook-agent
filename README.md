@@ -349,7 +349,7 @@ header. The HTTP client honours `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`/`NO_PROXY
   `status`, idle and persona guard (both still run in the CLI).
 - No install possible at all (installs blocked)? The bridge also works with plain curl,
   see Quickstart A in [SKILL.md](SKILL.md) and the endpoint table in
-  [OPERATOR-PROTOCOL.md](https://github.com/voicehook-ai/voicehook-v4/blob/main/docs/OPERATOR-PROTOCOL.md#https-bridge-no-webrtc-no-install).
+  [OPERATOR-PROTOCOL.md](https://voicehook.ai/agent/OPERATOR-PROTOCOL.md) (section "HTTPS bridge").
 
 ### Wake marker (JSON mode)
 
@@ -381,7 +381,7 @@ emitted on stderr (`[warn] stdin closed with un-terminated line …`). Prefer
 
 ### voicehook v4 server behaviour (Stand 2026-10-01)
 
-Reference: [voicehook-v4 docs/OPERATOR-PROTOCOL.md](https://github.com/voicehook-ai/voicehook-v4/blob/main/docs/OPERATOR-PROTOCOL.md).
+Reference: [OPERATOR-PROTOCOL.md](https://voicehook.ai/agent/OPERATOR-PROTOCOL.md).
 
 - **Transcript roles.** `user` = final STT of the human; `operator` = your
   `operator.say`, published only after voice-ai spoke it (on an interruption only
@@ -407,4 +407,4 @@ Reference: [voicehook-v4 docs/OPERATOR-PROTOCOL.md](https://github.com/voicehook
 
 ## License
 
-MIT.
+MIT, see [LICENSE](LICENSE).
