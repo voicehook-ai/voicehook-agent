@@ -235,6 +235,33 @@ Then:
 voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name <dein-eigener-Name> --model <dein-Modellname>
 ```
 
+Install and update in one line (what the skill does; always upgrades):
+
+```bash
+R=git+https://github.com/voicehook-ai/voicehook-agent
+uv tool install -q --upgrade $R || pip install -q --upgrade --user $R
+```
+
+### Self-update (0.12.0)
+
+The server names `cli_min` and `cli_latest` in every join answer (token mint and bridge
+join; the CLI sends its version as `X-VH-CLI`).
+
+- `cli_latest` newer than this CLI: `join` updates in place and restarts itself with the
+  same arguments and the same identity (`os.execv`). uv tool installs run
+  `uv tool upgrade voicehook-agent`, everything else
+  `python -m pip install --upgrade [--user] git+https://github.com/voicehook-ai/voicehook-agent`
+  (plus `--break-system-packages` on a PEP 668 system python). Only on the first connect,
+  never during a running call, and at most once per join (env marker `VOICEHOOK_SELF_UPDATED`).
+  A `next` waiting during the restart gets `{"type":"restarting"}`: call `next` again.
+- Update fails: a clear warning, the join goes on with the old version (it is still >= `cli_min`).
+- HTTP 426 (this CLI is below `cli_min`): prints the upgrade command, tries one self-update,
+  else exits with code 7.
+- Off: `join --no-self-update` or `VOICEHOOK_NO_SELF_UPDATE=1` (only an info line then).
+- By hand: `voicehook-agent self-update` (`--dry-run` prints the command).
+  `voicehook-agent --version` adds `neue Version verfügbar: x.y.z` when the last server answer
+  named a newer one.
+
 ## Agent-skill registration
 
 Append this skill description to your agent's instructions (e.g. `~/.claude/CLAUDE.md` for
@@ -324,6 +351,7 @@ Hardening flags (0.2.0) for unattended / background relay operation:
 | `--username <name>` | 0.9.0 | The user's first name: in the greeting and, since 0.9.0, sent to the server (token `username=`, bridge join `username`) as participant attribute `vh.user`, so the voicebot knows whom it talks to. |
 | `--status-due <sec>` | 0.9.0 | `next` adds `status_due` + `hint` once the board is older than `<sec>` while work is in progress (default 45, env `VOICEHOOK_STATUS_DUE`, 0 = age rule off). |
 | `--no-control` | 0.5.0 | No local control socket (`say`/`next`/`leave`/`status` off). |
+| `--no-self-update` | 0.12.0 | Do not update when the server names a newer `cli_latest` (see Self-update). HTTP 426 then exits 7 with the upgrade command. |
 | `--transport auto\|webrtc\|bridge` | 0.6.0 | How to reach the room. `auto` (default): WebRTC; the HTTPS bridge when `HTTPS_PROXY`/`ALL_PROXY` is set or the WebRTC connect fails/times out (one retry, logged). See below. |
 
 ### HTTPS bridge (0.6.0): cloud sandboxes and proxy networks
@@ -404,6 +432,7 @@ Reference: [voicehook-v4 docs/OPERATOR-PROTOCOL.md](https://github.com/voicehook
 | `VOICEHOOK_API_BASE`   | `https://voicehook.ai`  | Token-mint endpoint base URL     |
 | `VOICEHOOK_AGENT_HOME` | `~/.voicehook-agent`    | Root of the session dirs (control sockets) |
 | `HTTPS_PROXY` / `ALL_PROXY` | unset              | Set -> `--transport auto` uses the HTTPS bridge; also used by the HTTP client |
+| `VOICEHOOK_NO_SELF_UPDATE` | unset             | `1` = never self-update on `join` (same as `--no-self-update`) |
 
 ## License
 
