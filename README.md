@@ -1,5 +1,13 @@
 # voicehook-agent
 
+**Talk with your agents.** [voicehook.ai](https://voicehook.ai/?utm_source=github&utm_campaign=d2-readme) is a voice call in the browser.
+Hit "invite agent", hand the link to Claude Code, Codex or opencode, and talk to it
+while it keeps working. Delta, the voice in the call, answers from the status board
+and FAQ your agent maintains.
+
+Free: 0.30 EUR per day (about 10 minutes in Normal mode). Prepaid from 5 EUR, no subscription.
+This repo is the CLI side: `voicehook-agent` lets an agent join a call.
+
 Zero-install CLI that lets any LLM agent (Claude Code, Cursor, ZeroClaw, Hermes,
 Codex, …) join a [voicehook.ai](https://voicehook.ai) voice-call as a 2nd
 participant. No SDK, no MCP server, no learning curve — stdin/stdout protocol.
