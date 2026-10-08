@@ -651,7 +651,15 @@ class TurnClock:
 
 
 # ----- 0.9.0: operator.say_status (worker -> operator) ------------------------------
-SAY_STATES = ("queued", "spoken", "interrupted", "requeued", "replaced")
+SAY_STATES = ("queued", "spoken", "interrupted", "requeued", "replaced", "covered",
+              "no_audio", "dropped")
+# 0.12.0 (v4 #162, live mode): the say reached the model as context while the user had the
+# floor, and Delta already said its content in his answer, so it is not spoken (final).
+# v4 fix/live-say-no-audio: no audio within the start limit -> no_audio, one retry by the
+# voicebot; retry silent too -> dropped (final, never spoken).
+SAY_NOTES = {"covered": "Info steckt schon in Deltas Antwort, nicht nochmal senden",
+             "no_audio": "kein Audio, der Voicebot versucht es einmal neu",
+             "dropped": "nicht gesprochen (auch der zweite Versuch ohne Audio): bei Bedarf neu senden"}
 SAY_STUCK_S = 20.0          # queued/requeued longer than this -> hint
 SAYS_KEEP = 50              # says remembered for `voicehook-agent says`
 
@@ -702,6 +710,11 @@ class SayStatus:
         change = {"seq": seq, "state": state}
         if state in ("interrupted", "requeued") and chars:
             change["spoken_chars"] = chars
+        if state in SAY_NOTES:
+            change["note"] = SAY_NOTES[state]
+        reason = payload.get("reason")
+        if isinstance(reason, str) and reason:
+            change["reason"] = reason[:40]   # no_audio, max_duration (Notbremse)
         self._changes.append(change)
         return change
 
@@ -730,9 +743,14 @@ class SayStatus:
 
     def table(self, now: float | None = None) -> list[dict]:
         t = self._t(now)
-        return [{"seq": r["seq"], "state": r["state"], "spoken_chars": r["spoken_chars"],
-                 "age_s": round(t - r["at"], 1), "text": r["text"]}
-                for r in self._says.values()]
+        rows = []
+        for r in self._says.values():
+            row = {"seq": r["seq"], "state": r["state"], "spoken_chars": r["spoken_chars"],
+                   "age_s": round(t - r["at"], 1), "text": r["text"]}
+            if r["state"] in SAY_NOTES:
+                row["note"] = SAY_NOTES[r["state"]]
+            rows.append(row)
+        return rows
 
 
 AGENT_SAID_MAX = 3          # entries in `agent_said`
