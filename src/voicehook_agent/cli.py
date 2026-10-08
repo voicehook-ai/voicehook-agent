@@ -100,15 +100,22 @@ Activity log (0.13.0): keep it filled, Delta reads it in speech pauses.
                                      and no new line came for --activity-due SEC (default
                                      60, env VOICEHOOK_ACTIVITY_DUE, 0 = off). Silent while
                                      hook lines arrive; at most one hint per SEC.
-    next                             adds stale_error {status_age_s?, activity_age_s?, message}
+    next                             adds stale_error {status_age_s, activity_age_s, message}
                                      on EVERY output (no rate limit) while you are active
                                      (doing/open set, a say in the last 5 min, or no board
                                      yet and the join older than SEC) and the board or the
                                      log is older than --stale-error SEC (default 60, env
-                                     VOICEHOOK_STALE_ERROR_S, 0 = off). Never set = age since
-                                     the join; while hook lines arrive only the board counts.
+                                     VOICEHOOK_STALE_ERROR_S, 0 = off); an age is null when
+                                     that part is fresh. Never set = age since the join;
+                                     while hook lines arrive only the board counts.
                                      Plain (non --json) join output: `!! stale: <message>`
                                      after every user turn.
+    next                             always adds activity_now {text, age_s} and board_now
+                                     {doing, age_s}: what Delta knows about you (null = none).
+    Automatic: join writes ~/.voicehook/joins/<pid>.json so the hook finds it under any
+    VOICEHOOK_AGENT_HOME. Curl bridge join (Quickstart A): `voicehook-agent bridge-session
+    --save join.json --base URL` (only base + session, 0600, --clear on leave) lets the hook
+    POST each line to /api/bridge/activity (2 s timeout, max one per 5 s, latest wins).
 """
 from __future__ import annotations
 
@@ -474,6 +481,7 @@ class _Control:
         self.activity_due = vactivity.ActivityDue(due_s=vactivity.activity_due_seconds())
         self.activity_path: Path | None = None
         self.stale_s = relay.stale_error_seconds()  # 0.13.0 stale_error threshold
+        self.activity_sent: tuple[str, float] | None = None  # 0.13.0 activity_now
         self.leaving = False
         # 0.10.1: no-human guard. Starts at join (nobody seen yet), stops while a
         # human is in the room, restarts when the last one leaves. Spans reconnects.
@@ -591,6 +599,7 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
             stale = _stale_error(ctl)
             if stale:
                 hints["stale_error"] = stale
+            hints.update(_now_view(ctl))
         if ev is None:
             return {"ok": True, "type": "timeout", "pending": 0, **hints}
         if ev.get("type") == "user":
@@ -711,6 +720,18 @@ def _stale_error(ctl: _Control) -> dict:
         return {}
 
 
+def _now_view(ctl: _Control) -> dict:
+    """0.13.0: what Delta currently knows about you: activity_now {text, age_s} (the
+    newest line last published as operator.activity, without its time) and board_now
+    {doing, age_s}; null when nothing was sent. Same shape as the server's bridge `next`."""
+    act = None
+    if ctl.activity_sent is not None:
+        line, at = ctl.activity_sent
+        text = re.sub(r"^\d\d:\d\d:\d\d ", "", line)
+        act = {"text": text, "age_s": round(ctl.activity_clock() - at, 1)}
+    return {"activity_now": act, "board_now": ctl.clock.board_now()}
+
+
 def _print_stale(ctl: _Control, json_mode: bool) -> None:
     """Plain (non --json) join output: `!! stale: <message>` while stale."""
     if json_mode:
@@ -730,6 +751,8 @@ async def _publish_activity(ctl: _Control, lines: list[str]) -> bool:
         await room.local_participant.publish_data(
             json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             reliable=True, topic=vactivity.TOPIC)
+        if lines:
+            ctl.activity_sent = (lines[-1], ctl.activity_clock())  # 0.13.0 activity_now
         return True
     except Exception as e:  # noqa: BLE001
         print(f"[warn] operator.activity publish failed: {e!r}", file=sys.stderr, flush=True)
@@ -1546,6 +1569,7 @@ async def _join(
             vsession.write_info(sess_dir, {"pid": os.getpid(), "room": slug,
                                            "identity": ident, "api_base": api_base,
                                            "started": time.time()})
+            vactivity.write_pointer(sess_dir)  # 0.13.0: hook finds us under any home
             _print_event(json_mode, "system",
                          f"control socket ready: {server.sock_path}", topic="_meta")
     vactivity.clear(sess_dir)  # 0.10.0: no activity lines of a previous call leak in
@@ -1651,6 +1675,7 @@ async def _join(
             await asyncio.sleep(0.05)
             await server.close()
             vsession.remove_info(sess_dir)
+            vactivity.remove_pointer(sess_dir)
             vactivity.clear(sess_dir)
             try:
                 sess_dir.rmdir()
@@ -1792,6 +1817,26 @@ def _client_request(args) -> dict:
     return {"cmd": "status"}
 
 
+def _run_bridge_session(args) -> int:
+    """0.13.0 `bridge-session --save JSON [--base URL] | --clear`. Never prints the token."""
+    if args.clear:
+        vactivity.clear_bridge_session()
+        print(json.dumps({"ok": True, "type": "bridge-session", "cleared": True}), flush=True)
+        return 0
+    if not args.save:
+        print(json.dumps({"ok": False, "type": "error", "error": "--save JSON or --clear"}), flush=True)
+        return 2
+    try:
+        raw = sys.stdin.read() if args.save == "-" else Path(args.save).read_text(encoding="utf-8")
+        base = args.base or os.environ.get("VOICEHOOK_API_BASE") or "https://voicehook.ai"
+        path = vactivity.save_bridge_session(json.loads(raw), base)
+    except (OSError, ValueError) as e:
+        print(json.dumps({"ok": False, "type": "error", "error": str(e)}), flush=True)
+        return 1
+    print(json.dumps({"ok": True, "type": "bridge-session", "path": str(path)}), flush=True)
+    return 0
+
+
 def _run_client(args) -> int:
     """say / next / leave / status: one JSON line out. Exit 0 = ok (incl.
     next timeout), 1 = request failed, 3 = no running join / join ended."""
@@ -1927,7 +1972,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     p_join.add_argument(
         "--stale-error", type=float, default=None, metavar="SEC",
-        help=f"`next` adds stale_error {{status_age_s, activity_age_s, message}} on EVERY output while you are active and your board or activity log is older than SEC seconds (default {relay.STALE_ERROR_S:g}, env {relay.STALE_ERROR_ENV}; 0 = off).",
+        help=f"`next` adds stale_error {{status_age_s, activity_age_s, message}} (null age = fresh) on EVERY output while you are active and your board or activity log is older than SEC seconds (default {relay.STALE_ERROR_S:g}, env {relay.STALE_ERROR_ENV}; 0 = off).",
     )
     p_join.add_argument(
         "--no-control", action="store_true", default=False,
@@ -2011,7 +2056,19 @@ def main(argv: list[str] | None = None) -> None:
     p_act.add_argument("text", nargs="+", help="what is happening now ('-' reads it from stdin); "
                        "scrubbed, capped at 120 chars; no paths, secrets or personal data")
     _add_session(p_act)
+    # 0.13.0: bridge session for the hook (Quickstart A, curl bridge join)
+    p_bs = sub.add_parser(
+        "bridge-session", help="store {base, session} of a curl bridge join (Quickstart A) in "
+        "~/.voicehook/bridge-session.json (0600) so the Claude Code hook POSTs activity lines "
+        "to /api/bridge/activity; --clear on leave/ended")
+    p_bs.add_argument("--save", default=None, metavar="JSON",
+                      help="the /api/bridge/join answer (file, '-' = stdin); only the session is kept")
+    p_bs.add_argument("--base", default=None, metavar="URL",
+                      help="server base, e.g. https://voicehook.ai (default $VOICEHOOK_API_BASE or https://voicehook.ai)")
+    p_bs.add_argument("--clear", action="store_true", default=False, help="delete the file")
     args = ap.parse_args(argv)
+    if args.cmd == "bridge-session":
+        sys.exit(_run_bridge_session(args))
     if args.cmd == "hook":
         hook_argv = [args.action] + (["--settings", args.settings] if args.settings else [])
         sys.exit(vactivity.main(hook_argv))

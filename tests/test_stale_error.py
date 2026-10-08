@@ -57,11 +57,11 @@ def test_message_both_parts_german_with_commands():
 
 def test_message_single_parts():
     s = relay.stale_error_payload(70.0, None)
-    assert set(s) == {"status_age_s", "message"}
+    assert s["activity_age_s"] is None and s["status_age_s"] == 70
     assert s["message"] == ('FEHLER: Statusboard seit 1 Min 10 s nicht aktualisiert. '
                             'Jetzt: voicehook-agent status --doing "…"')
     a = relay.stale_error_payload(None, 61.0)
-    assert set(a) == {"activity_age_s", "message"}
+    assert a["status_age_s"] is None and a["activity_age_s"] == 61
     assert a["message"] == ('FEHLER: Aktivitätslog seit 1 Min 1 s nicht aktualisiert. '
                             'Jetzt: voicehook-agent activity "…"')
     assert relay.stale_error_payload(None, None) == {}
@@ -109,8 +109,10 @@ def test_disappears_after_updates(t, tmp_path):
         clean = await _next(ctl)
         return both, only_act, clean
     both, only_act, clean = asyncio.run(go())
-    assert set(both["stale_error"]) == {"status_age_s", "activity_age_s", "message"}
-    assert set(only_act["stale_error"]) == {"activity_age_s", "message"}
+    assert both["stale_error"]["status_age_s"] == 90 and both["stale_error"]["activity_age_s"] == 90
+    assert only_act["stale_error"]["status_age_s"] is None
+    assert only_act["stale_error"]["activity_age_s"] == 90
+    assert only_act["stale_error"]["message"].startswith("FEHLER: Aktivitätslog seit 1 Min 30 s")
     assert "stale_error" not in clean
 
 
@@ -163,7 +165,7 @@ def test_hook_lines_make_only_status_part_relevant(t, tmp_path):
         t["now"] += 120.0
         return await _next(ctl)
     out = asyncio.run(go())
-    assert set(out["stale_error"]) == {"status_age_s", "message"}
+    assert out["stale_error"]["activity_age_s"] is None and out["stale_error"]["status_age_s"] == 120
 
 
 def test_threshold_env_flag_and_zero(t, monkeypatch):

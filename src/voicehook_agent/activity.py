@@ -26,6 +26,14 @@ through a secret scrubber. Never command text, arguments, full paths, search
 patterns, file contents or tool output. With zero or several live joins the hook writes nothing, so one Claude
 session never leaks into another call.
 
+Automatic flow (0.13.0):
+* Pointer files `~/.voicehook/joins/<pid>.json` (written by `join`) let the hook find
+  a join that runs with its own VOICEHOOK_AGENT_HOME (Quickstart B wrapper).
+* Bridge: with `~/.voicehook/bridge-session.json` ({base, session} of a curl bridge
+  join, Quickstart A) the hook also POSTs the text to `<base>/api/bridge/activity`
+  (Bearer session; 2 s timeout, at most one POST per 5 s, the latest line wins via a
+  detached flusher, never blocking). 401/404/410 = session gone: the file is removed.
+
 This module stays stdlib-only (no livekit/httpx) so the hook starts fast.
 """
 from __future__ import annotations
@@ -148,6 +156,18 @@ def format_line(event: dict, now: float | None = None) -> str:
     return f"{_ts(now)} {tool}: {desc}" if desc else f"{_ts(now)} {tool}"
 
 
+def bridge_text(event: dict) -> str:
+    """0.13.0: text for the bridge: the tool's own description 1:1; a file tool
+    `Read relay.py`; else the tool name."""
+    tool = sanitize_tool(event.get("tool_name"))
+    inp = event.get("tool_input")
+    if isinstance(inp, dict) and isinstance(inp.get("description"), str) \
+            and inp["description"].strip():
+        return describe(inp, tool)
+    desc = describe(inp, event.get("tool_name"))
+    return f"{tool} {desc}" if desc else tool
+
+
 def note_line(text: str, now: float | None = None) -> str:
     """0.13.0: manual line `HH:MM:SS note: <text>` (`voicehook-agent activity`),
     scrubbed and capped like a hook description. ValueError when empty."""
@@ -202,8 +222,89 @@ def live_join_dirs() -> list[Path]:
     return out
 
 
+# --------------------------------------------------------------------------- #
+# 0.13.0: fixed state dir (independent of VOICEHOOK_AGENT_HOME): join pointers +
+# bridge session
+# --------------------------------------------------------------------------- #
+STATE_ENV = "VOICEHOOK_STATE_DIR"
+BRIDGE_SESSION_NAME = "bridge-session.json"
+BRIDGE_STATE_NAME = "bridge-activity.json"
+BRIDGE_IDS_NAME = "bridge-activity.ids"
+BRIDGE_TIMEOUT_S = 2.0
+BRIDGE_WINDOW_S = 5.0
+
+
+def state_root() -> Path:
+    env = (os.environ.get(STATE_ENV) or "").strip()
+    return Path(env) if env else Path.home() / ".voicehook"
+
+
+def _private_dir(d: Path) -> Path:
+    d.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(d, 0o700)
+    except OSError:
+        pass
+    return d
+
+
+def _write_private(path: Path, text: str) -> None:
+    """Write `text` atomically, mode 0600, never following a symlink."""
+    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        os.write(fd, text.encode("utf-8"))
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+
+
+def pointer_path(pid: int | None = None) -> Path:
+    return state_root() / "joins" / f"{os.getpid() if pid is None else pid}.json"
+
+
+def write_pointer(dir_: Path) -> None:
+    """join: `~/.voicehook/joins/<pid>.json` = {dir, pid}, so the hook finds this join
+    whatever VOICEHOOK_AGENT_HOME the hook sees. Best effort."""
+    try:
+        _private_dir(state_root())
+        _private_dir(state_root() / "joins")
+        _write_private(pointer_path(), json.dumps({"dir": str(Path(dir_).resolve()),
+                                                   "pid": os.getpid()}))
+    except OSError:
+        pass
+
+
+def remove_pointer(dir_: Path | None = None) -> None:
+    try:
+        pointer_path().unlink()
+    except OSError:
+        pass
+
+
+def pointer_dirs() -> list[Path]:
+    """Session dirs named by pointer files whose pid is alive and whose session.json
+    names the same pid."""
+    out: list[Path] = []
+    try:
+        files = sorted((state_root() / "joins").glob("*.json"))
+    except OSError:
+        return []
+    for f in files:
+        try:
+            info = json.loads(f.read_text(encoding="utf-8"))
+            pid, d = int(info.get("pid")), Path(str(info.get("dir")))
+            own = int(json.loads((d / vsession.INFO_NAME).read_text(encoding="utf-8")).get("pid"))
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+        if pid > 0 and pid == own and _pid_alive(pid):
+            out.append(d)
+    return out
+
+
 def target_dir() -> Path | None:
-    """VOICEHOOK_SESSION=<slug>/<identity> wins; else the ONE live join; else None."""
+    """VOICEHOOK_SESSION=<slug>/<identity> wins; else the ONE live join (own home or a
+    pointer file, 0.13.0); else None (zero or several: nothing leaks into another call)."""
     env = (os.environ.get("VOICEHOOK_SESSION") or "").strip()
     if env:
         slug, _, ident = env.partition("/")
@@ -211,8 +312,159 @@ def target_dir() -> Path | None:
             return None
         d = vsession.session_dir(slug, ident)
         return d if d.is_dir() else None
-    live = live_join_dirs()
-    return live[0] if len(live) == 1 else None
+    live: dict[str, Path] = {}
+    for d in live_join_dirs() + pointer_dirs():
+        try:
+            live.setdefault(str(d.resolve()), d)
+        except OSError:
+            continue
+    return next(iter(live.values())) if len(live) == 1 else None
+
+
+# ----- bridge session (Quickstart A: curl bridge join) ------------------------------
+def save_bridge_session(answer: dict, base: str) -> Path:
+    """Store ONLY {base, session} of a /api/bridge/join answer (0600). ValueError when
+    the answer has no session or base is not http(s)."""
+    session = answer.get("session") if isinstance(answer, dict) else None
+    base = str(base or "").strip().rstrip("/")
+    if not isinstance(session, str) or not session.strip():
+        raise ValueError("join answer has no session")
+    if not re.match(r"^https?://[^\s/]+", base):
+        raise ValueError(f"base must be an http(s) URL, got {base!r}")
+    _private_dir(state_root())
+    path = state_root() / BRIDGE_SESSION_NAME
+    _write_private(path, json.dumps({"base": base, "session": session.strip()}))
+    return path
+
+
+def clear_bridge_session() -> None:
+    for name in (BRIDGE_SESSION_NAME, BRIDGE_STATE_NAME, BRIDGE_IDS_NAME):
+        try:
+            (state_root() / name).unlink()
+        except OSError:
+            pass
+
+
+def load_bridge_session() -> dict | None:
+    try:
+        d = json.loads((state_root() / BRIDGE_SESSION_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(d, dict) or not d.get("base") or not d.get("session"):
+        return None
+    return {"base": str(d["base"]), "session": str(d["session"])}
+
+
+def _bridge_post(base: str, session: str, text: str,
+                 timeout: float = BRIDGE_TIMEOUT_S) -> int | None:
+    """POST <base>/api/bridge/activity {"text"}; HTTP status, None on network error."""
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(
+        f"{base}/api/bridge/activity", method="POST",
+        data=json.dumps({"text": text}, ensure_ascii=False).encode("utf-8"),
+        headers={"authorization": f"Bearer {session}", "content-type": "application/json",
+                 "user-agent": "voicehook-agent-hook"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:  # base comes from our own 0600 file
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+    except Exception:  # noqa: BLE001 - never block the hook
+        return None
+
+
+def _spawn_flusher(delay: float) -> None:
+    """Detached `voicehook-agent-hook bridge-flush DELAY`: sends the pending line when
+    the rate window ends. Best effort."""
+    import subprocess
+    try:
+        subprocess.Popen([sys.executable, "-m", "voicehook_agent.activity", "bridge-flush",
+                          f"{max(0.0, delay):.3f}"],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except Exception:  # noqa: BLE001
+        return
+
+
+def _bridge_state(fn) -> object:
+    """Run fn(state) -> result under an exclusive lock on the bridge state file."""
+    _private_dir(state_root())
+    path = state_root() / BRIDGE_STATE_NAME
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        _lock(fd)
+        try:
+            st = json.loads(os.read(fd, 1 << 16).decode("utf-8") or "{}")
+        except ValueError:
+            st = {}
+        if not isinstance(st, dict):
+            st = {}
+        res = fn(st)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        os.write(fd, json.dumps(st).encode("utf-8"))
+        return res
+    finally:
+        os.close(fd)
+
+
+def _deliver(sess: dict, text: str) -> None:
+    status = _bridge_post(sess["base"], sess["session"], text)
+    if status in (401, 404, 410):  # bridge session unknown/expired or call ended
+        clear_bridge_session()
+
+
+def bridge_send(text: str, now: float | None = None) -> bool:
+    """Hook -> bridge: POST at once when the last POST is >= 5 s ago, else keep it as
+    pending (latest wins) and make sure one flusher is scheduled. True if sent or
+    queued. Never raises."""
+    try:
+        sess = load_bridge_session()
+        if sess is None or not text:
+            return False
+        t = time.time() if now is None else now
+
+        def step(st: dict):
+            last = float(st.get("last_post") or 0.0)
+            if t - last >= BRIDGE_WINDOW_S:
+                st.update(last_post=t, pending=None)
+                return ("post", 0.0)
+            st["pending"] = text
+            due = last + BRIDGE_WINDOW_S
+            if float(st.get("flush_at") or 0.0) < t:   # no flusher scheduled yet
+                st["flush_at"] = due
+                return ("spawn", due - t)
+            return ("queued", 0.0)
+        action, delay = _bridge_state(step)
+        if action == "post":
+            _deliver(sess, text)
+        elif action == "spawn":
+            _spawn_flusher(delay)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def bridge_flush(now: float | None = None, sleep=time.sleep, delay: float = 0.0) -> None:
+    """The flusher: after `delay` s send the pending line (if any). Never raises."""
+    try:
+        if delay > 0:
+            sleep(delay)
+        sess = load_bridge_session()
+        t = time.time() if now is None else now
+
+        def step(st: dict):
+            pending = st.get("pending")
+            st.update(pending=None, flush_at=0.0)
+            if pending:
+                st["last_post"] = t
+            return pending
+        pending = _bridge_state(step)
+        if pending and sess is not None:
+            _deliver(sess, str(pending))
+    except Exception:  # noqa: BLE001
+        return
 
 
 def append_line(dir_: Path, line: str) -> None:
@@ -257,9 +509,8 @@ def _tool_use_id(event: dict) -> str:
     return re.sub(r"[^A-Za-z0-9_\-]", "", tid)[:100] if isinstance(tid, str) else ""
 
 
-def _remember_id(dir_: Path, tid: str) -> None:
+def _remember_id(path: Path, tid: str) -> None:
     """Pre: note tid as logged (file 0600, newest IDS_KEEP kept)."""
-    path = dir_ / IDS_NAME
     fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
         _lock(fd)
@@ -272,9 +523,8 @@ def _remember_id(dir_: Path, tid: str) -> None:
         os.close(fd)
 
 
-def _take_id(dir_: Path, tid: str) -> bool:
+def _take_id(path: Path, tid: str) -> bool:
     """Post: True (and forget it) if Pre already logged tid."""
-    path = dir_ / IDS_NAME
     try:
         fd = os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
     except OSError:
@@ -306,16 +556,21 @@ def _handle(raw: str, phase: str, now: float | None) -> bool:
         event = json.loads(raw) if raw and raw.strip() else {}
         if not isinstance(event, dict):
             return False
-        dir_ = target_dir()
-        if dir_ is None:
-            return False
         tid = _tool_use_id(event)
-        if phase == "post" and tid and _take_id(dir_, tid):
-            return False  # Pre already logged this call
-        append_line(dir_, format_line(event, now))
-        if phase == "pre" and tid:
-            _remember_id(dir_, tid)
-        return True
+        done = False
+        dir_ = target_dir()
+        if dir_ is not None and not (phase == "post" and tid and _take_id(dir_ / IDS_NAME, tid)):
+            append_line(dir_, format_line(event, now))
+            if phase == "pre" and tid:
+                _remember_id(dir_ / IDS_NAME, tid)
+            done = True
+        if load_bridge_session() is not None:   # 0.13.0: curl bridge join (Quickstart A)
+            ids = state_root() / BRIDGE_IDS_NAME
+            if not (phase == "post" and tid and _take_id(ids, tid)):
+                done = bridge_send(bridge_text(event), now) or done
+                if phase == "pre" and tid:
+                    _remember_id(ids, tid)
+        return done
     except Exception:  # noqa: BLE001 - a hook must never disturb Claude Code
         return False
 
@@ -528,6 +783,13 @@ def main(argv: list[str] | None = None) -> int:
             raw = ""
         (pre_tool_use if cmd == "pre-tool-use" else post_tool_use)(raw)
         return 0  # always 0, nothing on stdout (PreToolUse: no output = allow)
+    if cmd == "bridge-flush":
+        try:
+            delay = float(args[1]) if len(args) > 1 else 0.0
+        except ValueError:
+            delay = 0.0
+        bridge_flush(delay=delay)
+        return 0
     if cmd == "print":
         print(json.dumps(snippet(), indent=2))
         return 0

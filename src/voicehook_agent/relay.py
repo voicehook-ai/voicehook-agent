@@ -524,12 +524,11 @@ def human_age(seconds: float) -> str:
 
 
 def stale_error_payload(status_age: float | None, activity_age: float | None) -> dict:
-    """{"status_age_s"?, "activity_age_s"?, "message"} for the stale parts, or {}."""
-    out: dict = {}
-    if status_age is not None:
-        out["status_age_s"] = int(status_age)
-    if activity_age is not None:
-        out["activity_age_s"] = int(activity_age)
+    """{"status_age_s", "activity_age_s", "message"} (same shape as the server's bridge
+    `next`): an age is null when that part is fresh, the message names only what is
+    overdue; {} when nothing is."""
+    out: dict = {"status_age_s": None if status_age is None else int(status_age),
+                 "activity_age_s": None if activity_age is None else int(activity_age)}
     if status_age is not None and activity_age is not None:
         msg = (f"FEHLER: Statusboard seit {human_age(status_age)} nicht aktualisiert, "
                f"Aktivitätslog seit {human_age(activity_age)}. "
@@ -621,6 +620,7 @@ class TurnClock:
         self.board_set_at: float | None = None   # last real `status` push (None = never)
         self.board_empty = True
         self.board_live = False                  # doing or open set = work in progress
+        self.board_doing = ""                    # 0.13.0 board_now
         self.request_at: float | None = None     # open status_request
         self.said_at: float | None = None
 
@@ -659,6 +659,7 @@ class TurnClock:
         self.board_set_at = t
         self.board_empty = board_is_empty(board)
         b = board or {}
+        self.board_doing = str(b.get("doing") or "").strip()
         self.board_live = bool(str(b.get("doing") or "").strip() or b.get("open"))
         self.request_at = None
 
@@ -710,6 +711,12 @@ class TurnClock:
         if self.said_at is not None and t - self.said_at <= WORK_WINDOW_S:
             return True
         return self.board_set_at is None and t - self.joined_at > stale_s
+
+    def board_now(self, now: float | None = None) -> dict | None:
+        """0.13.0: {doing, age_s} of the last board Delta has, None before the first."""
+        if self.board_set_at is None:
+            return None
+        return {"doing": self.board_doing, "age_s": round(self._t(now) - self.board_set_at, 1)}
 
     def status_age(self, now: float | None = None) -> float:
         """Seconds since the last board (since the join when none was sent)."""

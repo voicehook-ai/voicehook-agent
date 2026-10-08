@@ -246,6 +246,19 @@ happening right now". An empty or old log means Delta has nothing to say.
 
   Silent while hook lines arrive (any hook line in the last 10 min); at most one hint per
   SEC. Its own key `activity_hint`, so a `status_due` `hint` in the same reply stays intact.
+- **Automatic flow:** `join` writes a pointer `~/.voicehook/joins/<pid>.json` (0600), so the hook
+  finds the join even when it runs with its own `VOICEHOOK_AGENT_HOME` (Quickstart B wrapper);
+  several live joins still mean nothing is written. For a curl bridge join (Quickstart A)
+  `voicehook-agent bridge-session --save join.json --base https://voicehook.ai` (or the
+  Quickstart's own line) stores only `{base, session}` in `~/.voicehook/bridge-session.json`
+  (0600; `--clear`, leave/ended and an HTTP 401/404/410 remove it). The hook then POSTs the tool's
+  description to `<base>/api/bridge/activity` `{"text"}` with the bridge Bearer token: 2 s
+  timeout, never blocking (exit 0), at most one POST per 5 s, the latest line wins (a detached
+  flusher sends it when the window ends). `VOICEHOOK_STATE_DIR` moves `~/.voicehook`.
+- **`activity_now` / `board_now`:** every `next` shows what Delta currently knows about you:
+  `"activity_now": {"text": "Bash: Sending deploy to JEV", "age_s": 12.0}` (newest line last
+  published as `operator.activity`, without its time) and `"board_now": {"doing": "...", "age_s": 12.0}`;
+  `null` before the first.
 - **`stale_error` (no rate limit):** while you are active (`doing`/`open` set, a `say` in the
   last 5 min, or no board yet and the join older than SEC) and your board or your log is
   older than `--stale-error SEC` (default 60, env `VOICEHOOK_STALE_ERROR_S`, 0 = off), EVERY
@@ -255,7 +268,8 @@ happening right now". An empty or old log means Delta has nothing to say.
   "stale_error": {"status_age_s": 187, "activity_age_s": 95, "message": "FEHLER: Statusboard seit 3 Min nicht aktualisiert, Aktivitätslog seit 1 Min 35 s. Jetzt: voicehook-agent status --doing \"…\" und voicehook-agent activity \"…\""}
   ```
 
-  Only the stale parts appear; never set = age since the join; while hook lines arrive only
+  An age is `null` when that part is fresh and the message names only what is overdue (same
+  shape as the server's bridge `next`); never set = age since the join; while hook lines arrive only
   the board counts. A finished/empty board without a `say` for 5 min stays silent. Plain
   (non `--json`) join output prints `!! stale: <message>` after every user turn.
   `status_due`/`activity_due` stay unchanged.

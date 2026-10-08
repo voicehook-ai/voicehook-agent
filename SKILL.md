@@ -20,14 +20,15 @@ I="<INVITE_URL>"; D=$(mktemp -d /tmp/vh-XXXXXX); chmod 700 $D; echo "${I%%/r/*}"
 curl -sS $(cat $D/base)/api/bridge/join -H content-type:application/json -d '{"invite_url":"'"$I"'",
  "name":"<dein-eigener-Name>","model":"<dein-Modellname>","greet":"Hallo, hier ist <dein-eigener-Name>. Worum geht es?"}' >$D/join
 (umask 077; sed -n 's/.*"session":"\([^"]*\)".*/Authorization: Bearer \1/p' $D/join >$D/h)
+mkdir -p ~/.voicehook && chmod 700 ~/.voicehook; (umask 077; sed -n 's|.*"session":"\([^"]*\)".*|{"base":"'"$(cat $D/base)"'","session":"\1"}|p' $D/join >~/.voicehook/bridge-session.json)
 cat >$D/vh <<'VH'
 #!/bin/sh
 D=$(dirname "$0"); B=$(cat $D/base); c="curl -sS -H @$D/h -H content-type:application/json"
 j(){ python3 -c 'import json,sys;a=sys.argv;d={a[1]:a[2]};a[3:] and d.update(mode=a[3]);print(json.dumps(d))' "$@"; }
 case $1 in
-next) r=$($c -m 130 "$B/api/bridge/next?timeout=${3:-50}"); echo "$r"; case $r in *'"ended"'*) exit 3;; esac;;
+next) r=$($c -m 130 "$B/api/bridge/next?timeout=${3:-50}"); echo "$r"; case $r in *'"ended"'*) rm -f ~/.voicehook/bridge-session.json; exit 3;; esac;;
 say) shift; m=; [ "$1" = --mode ] && { m=$2; shift 2; }; $c $B/api/bridge/say -d "$(j text "$*" $m)"; echo;;
-leave) $c $B/api/bridge/leave -d "$(j say "$3")"; echo;;
+leave) $c $B/api/bridge/leave -d "$(j say "$3")"; echo; rm -f ~/.voicehook/bridge-session.json;;
 status) $c $B/api/bridge/status; echo;;
 esac
 VH
@@ -36,6 +37,9 @@ chmod 700 $D/vh; [ -s $D/h ] && echo "D=$D ready" || cat $D/join
 
 `$D/vh next|say|leave|status` then work exactly like the CLI below (same JSON from `next`,
 exit 3 once the call is over). Idle guard and persona guard run on the server.
+`~/.voicehook/bridge-session.json` (0600, only base + session, removed on leave/ended): if the
+CLI's Claude Code hook is installed, it POSTs every tool's short description to
+`/api/bridge/activity` on its own (at most every 5 s, never blocking).
 
 ## Quickstart B: CLI (local machine, target: in the call in under 30 s)
 
@@ -141,13 +145,16 @@ In speech pauses Delta reads only fresh lines (< 60 s) aloud: what is happening 
   `vh activity "Running database migrations"` (appends `HH:MM:SS note: <text>`; scrubbed, max 120
   chars; no paths, secrets or personal data). CLI only (Quickstart B); the curl wrapper of
   Quickstart A has no `activity` yet.
+- Automatic (CLI 0.13.0): the hook finds a `$D/vh` join through `~/.voicehook/joins/` and a curl
+  bridge join through `~/.voicehook/bridge-session.json`. Every `next` shows what Delta knows about
+  you: `activity_now {text, age_s}` and `board_now {doing, age_s}` (null = nothing sent yet).
 - `next` adds `activity_due: true` + `activity_age_s` + `activity_hint` when work is in progress
   (`doing`/`open` set, or you spoke / sent a board in the last 5 min) and the log got no line for
   60 s (`--activity-due SEC` / env `VOICEHOOK_ACTIVITY_DUE`, 0 = off). Run the command in
   `activity_hint`. Silent while hook lines arrive; at most one hint per 60 s.
 - `stale_error` (CLI 0.13.0, EVERY `next`, no rate limit): board or log older than 60 s while you
-  are active (`--stale-error SEC` / env `VOICEHOOK_STALE_ERROR_S`, 0 = off): `{status_age_s?,
-  activity_age_s?, message}`, e.g. "FEHLER: Statusboard seit 3 Min nicht aktualisiert, ...". Fix it
+  are active (`--stale-error SEC` / env `VOICEHOOK_STALE_ERROR_S`, 0 = off): `{status_age_s,
+  activity_age_s, message}` (age null = that part is fresh), e.g. "FEHLER: Statusboard seit 3 Min nicht aktualisiert, ...". Fix it
   before your `say`. Plain join output: `!! stale: ...`.
 - Idle guard: no `say`/`next` for 10 min (`--idle-timeout MIN`, 0 = off) = join leaves, also across
   reconnects. `--owner-pid $PPID` (CLI 0.8.0) leaves as soon as your session ends; a dead FIFO holder too.
