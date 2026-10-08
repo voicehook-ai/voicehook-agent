@@ -44,12 +44,12 @@ cannot connect (`--transport auto|webrtc|bridge`).
 
 ```bash
 R=git+https://github.com/voicehook-ai/voicehook-agent; export PATH="$HOME/.local/bin:$PATH"
-command -v voicehook-agent || uv tool install -q $R || pip install -q --user $R
+uv tool install -q --upgrade $R || pip install -q --upgrade --user $R
 D=$(mktemp -d /tmp/vh-XXXXXX); mkfifo $D/in; (setsid sleep 86400 >$D/in & echo $! >$D/holder)
 printf '#!/bin/sh\nexport VOICEHOOK_AGENT_HOME=%s\n[ "$1" = leave ] || exec "%s" "$@"\n"%s" "$@"; rc=$?; kill $(cat %s/holder) 2>/dev/null; exit $rc\n' \
   $D "$(command -v voicehook-agent)" "$(command -v voicehook-agent)" $D >$D/vh; chmod +x $D/vh
 (setsid nohup $D/vh join "<INVITE_URL>" --name <dein-eigener-Name> --model <dein-Modellname> --json --owner-pid $PPID --greet "Hallo, hier ist <dein-eigener-Name>. Worum geht's?" <$D/in >$D/out 2>&1 &)
-$D/vh next --help >/dev/null 2>&1 && echo "D=$D ready" || echo "D=$D CLI 0.4.0: upgrade (below)"
+$D/vh next --help >/dev/null 2>&1 && echo "D=$D ready" || echo "D=$D CLI too old: uv tool install --force $R"
 ```
 
 Write down the printed `D=` path. Shell variables and `PATH` do NOT survive between your
@@ -67,9 +67,9 @@ tool calls, so every later call uses the absolute wrapper, e.g. `/tmp/vh-ab12cd/
   `operator invite required`: ask the user for the full link.
 - `--greet` is spoken right after connect. Write it in the language of the invite
   message (German invite → German greeting). One short sentence.
-- No `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` takes a few seconds and beats pip.
-  pip refused by PEP 668: add `--break-system-packages`. CLI 0.4.0 installed (no
-  `next`/`say`/`leave`): `uv tool install --force $R`, or use Quickstart A.
+- No `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` beats pip; PEP 668: add `--break-system-packages`.
+  Line 2 always installs or upgrades. CLI 0.12.0+ also updates itself on `join` when the server's
+  `cli_latest` is newer (off: `--no-self-update`); a CLI below `cli_min` gets HTTP 426 + the upgrade command.
 - `setsid` matters: without it the join dies with the shell of your tool call.
 
 ## The work cycle: say → next → say
@@ -146,10 +146,29 @@ Bash/Agent calls a short, speakable `description`.
   stops the FIFO holder). Never `pkill -f "voicehook-agent join"`: the pattern matches
   your own shell and other operators' joins.
 
-## Speak right
+## Wie du im Call sprichst
+
+Everything you send with `say` or `--greet` is read aloud to a person on the phone. **Local style
+modes (terse, caveman, Telegrammstil, Stichpunkte) do NOT apply to `say` text:** speak whole,
+natural sentences with articles and verbs, like a good radio host or hotline agent.
 
 - **Language:** the user's (German by default); switch only when the user switches.
-- **Short:** 1-2 sentences, <60 chars each. No markdown, lists, emoji or URLs read aloud.
+- **Short:** 1-2 sentences per `say`, each one breath (about 8-12 words, <60 chars). One statement per sentence.
+- **Most important first:** result first, then the reason. Active verbs: "Ich habe den Fix deployt", not "Fix wurde deployt".
+- **Speakable:** round numbers ("fast die Hälfte", "rund achthundert"); codes and phone numbers in digit groups. No
+  abbreviations, symbols, paths, URLs, code, markdown, lists or emoji: say what it means ("der Login-Endpunkt").
+- **Signal and repeat:** announce longer answers ("Zwei Punkte. Erstens …"), repeat the core once at the end.
+- **Confirm, then ask:** read a task back in one sentence ("Okay, ich deploye den Worker."); end with one clear question
+  when you need a decision. Pauses come from full stops, not from comma chains.
+
+| Chat style (wrong) | Phone style (right) |
+|---|---|
+| Deploy grün. Tests 812/812. CI ok. | Der Deploy ist durch, und alle Tests sind grün. |
+| PR #161 offen → wartet auf Review. | Ich habe den Pull Request geöffnet. Er wartet auf dein Review. |
+| 403 bei /api/join, Token stale. | Der Beitritt klappt nicht, weil der Schlüssel abgelaufen ist. Soll ich ihn erneuern? |
+
+Newer voicehook servers (v4, Oct 2026) also strip leftover markdown, backticks, emoji and link prefixes and read arrows as "dann", but never reword you.
+
 - **Echo = proof:** `{"role": "operator", …}` in `$D/out` = spoken; no echo = not (yet) spoken.
 - **No secrets, no PII** in `say`, `--greet` or a persona: everything travels in clear text
   over the LiveKit data channel.
@@ -218,7 +237,7 @@ Quickstart B: `$D/out` (JSON lines) should show within ~5 s:
 | `operator.inject` | `{text, role?}` | context entry, not spoken |
 | `operator.status` | `{doing, open[], done[], faq?[{q, a}]}` | your status board (`vh status`), replaces the last one, never spoken |
 | `operator.activity` | `{lines[], ts}` | sent by the CLI itself (0.10.0) from the PostToolUse hook: newest 15 tool-call lines, at most every 5 s |
-| `operator.say_status` | ← `{seq, state, spoken_chars}` | CLI 0.9.0: fate of your say (`queued`/`spoken`/`interrupted`/`requeued`/`replaced`); `next` carries `say_status`, `vh says` the last state, `say_hint` = stuck > 20 s |
+| `operator.say_status` | ← `{seq, state, spoken_chars}` | CLI 0.9.0: fate of your say (`queued`/`spoken`/`interrupted`/`requeued`/`replaced`; live: `covered` = info already in Delta's answer, `note` says so, do not resend; `no_audio` = no audio within 4 s, the voicebot retries once; `dropped` = retry silent too, never spoken, resend if still needed); `next` carries `say_status`, `vh says` the last state, `say_hint` = stuck > 20 s |
 | `operator.alive` | `{alive, ts, idle_s}` | sent by the CLI itself (0.8.0) every 10 s while you serve `next`/`say`; `alive:false` on leave |
 | `transcript` | ← `{role, text, speaker?, op?}` | `user` = the human; `operator` = an operator's spoken text (`op` = whose); `agent` = voicebot's own answer |
 | `transcript.live` | ← `{phase, role, id, text?, interrupted?}` | your `say` started (`start`, full text) / finished (`end`) playing; for the browser only, NOT proof it was spoken (use `transcript`) |

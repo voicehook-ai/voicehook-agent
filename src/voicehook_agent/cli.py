@@ -59,6 +59,8 @@ Say receipts (0.9.0, voicebot sends operator.say_status {seq, state, spoken_char
     next                             adds "say_status": [{"seq":N,"state":"spoken"}, ...]
                                      (changes since the last next) and "say_hint" when a
                                      say sits in queued/requeued for more than 20 s.
+                                     Live mode (0.12.0): state "covered" + "note" = Delta
+                                     already said it in his answer, do not send it again.
     says                             last state of every own say (sent until the first
                                      receipt): {"type":"says","says":[{seq,state,...}]}
     join --username NAME             also sent to the server (vh.user): Delta knows the user.
@@ -95,6 +97,15 @@ Activity feed (0.10.0): Delta sees what you are doing, one line per tool call.
     hook post-tool-use               the hook itself (fast path: voicehook-agent-hook)
                                      join publishes the newest 15 lines as operator.activity
                                      {lines, ts}, on change, at most every 5 s.
+
+Self-update (0.12.0): the server names cli_min / cli_latest in every join answer.
+    join                             cli_latest newer than this CLI: update in place (uv tool
+                                     upgrade, else pip --upgrade) and restart the join with the
+                                     same arguments (once per join). Update fails: warn, go on.
+                                     HTTP 426 (below cli_min): print the upgrade command, try
+                                     one self-update, else exit 7.
+    join --no-self-update            off (env VOICEHOOK_NO_SELF_UPDATE=1)
+    self-update                      update now; --version shows "neue Version verfügbar"
 """
 from __future__ import annotations
 
@@ -116,6 +127,7 @@ from livekit import rtc
 
 from . import __version__, relay
 from . import activity as vactivity
+from . import selfupdate as vselfupdate
 from . import session as vsession
 from . import transport as vtransport
 from . import visual as vvisual
@@ -185,9 +197,10 @@ class TokenMintError(Exception):
     """Token mint rejected. The message never contains the request URL, so the
     operator invite (`op_invite`) cannot leak into logs or stderr."""
 
-    def __init__(self, status: int, detail: str):
+    def __init__(self, status: int, detail: str, body: dict | None = None):
         self.status = status
         self.detail = detail
+        self.body = body  # parsed JSON (426: detail.cli_min/cli_latest/upgrade)
         super().__init__(f"HTTP {status} {detail}".strip())
 
 
@@ -230,7 +243,9 @@ async def _mint_token(api_base: str, slug: str, identity: str,
         params["username"] = username
     if voice:  # 0.11.0: wish voice for our says (Chirp3-HD, e.g. 'Puck') -> vh.voice
         params["voice"] = voice
-    async with httpx.AsyncClient(timeout=10.0, headers={"user-agent": _USER_AGENT}) as cli:
+    # 0.12.0: X-VH-CLI = the server's version gate (426 below cli_min)
+    async with httpx.AsyncClient(timeout=10.0, headers={"user-agent": _USER_AGENT,
+                                                        "x-vh-cli": _VERSION}) as cli:
         r = await cli.get(url, params=params)
         if r.status_code >= 400:
             try:
@@ -239,7 +254,11 @@ async def _mint_token(api_base: str, slug: str, identity: str,
                 detail = ""
             if op_invite:
                 detail = detail.replace(op_invite, "***")
-            raise TokenMintError(r.status_code, detail)
+            try:
+                body = r.json() if r.status_code == 426 else None
+            except ValueError:
+                body = None
+            raise TokenMintError(r.status_code, detail, body if isinstance(body, dict) else None)
         return r.json()
 
 
@@ -1019,6 +1038,79 @@ async def _stdin_publisher(
             await _handle_line(line)
 
 
+RC_RESTART = 75  # internal: _join left the call for a self-update, main() re-execs
+
+
+class _Updater:
+    """0.12.0 self-update state of one join (see selfupdate.py). `restart` + `identity`
+    tell main() to re-exec after _join has cleaned up."""
+
+    def __init__(self, opt_out: bool = False, *, env=None, runner=None) -> None:
+        self.env = os.environ if env is None else env
+        self.opt_out = vselfupdate.opted_out(opt_out, self.env)
+        self.restarted = vselfupdate.already_restarted(self.env)
+        self.runner = runner
+        self.tried = False
+        self.restart = False
+        self.identity: str | None = None
+
+    async def _upgrade(self) -> bool:
+        self.tried = True
+        cmd = vselfupdate.upgrade_command()
+        kw = {"runner": self.runner} if self.runner is not None else {}
+        return await asyncio.to_thread(vselfupdate.run_upgrade, cmd, **kw)
+
+    async def on_versions(self, info: dict, emit, *, check: bool) -> bool:
+        """After a successful join answer. True = updated, leave and restart now."""
+        vselfupdate.remember(info)
+        latest = info.get("cli_latest")
+        if not check:
+            return False
+        why = vselfupdate.decide(latest, _VERSION, opt_out=self.opt_out,
+                                 restarted=self.restarted or self.tried)
+        if why == "current":
+            return False
+        if why == "opt-out":
+            msg = (f"voicehook-agent {latest} available (this is {_VERSION}, self-update off): "
+                   "voicehook-agent self-update")
+            emit(msg)
+            print(f"[info] {msg}", file=sys.stderr, flush=True)
+            return False
+        if why == "restarted":
+            msg = (f"self-update ran, but this is still {_VERSION} (latest {latest}); "
+                   f"{vselfupdate.manual_hint()}")
+            emit(msg)
+            print(f"[warn] {msg}", file=sys.stderr, flush=True)
+            return False
+        emit(f"self-update: {_VERSION} -> {latest}, restarting the join afterwards")
+        print(f"[info] self-update: voicehook-agent {_VERSION} -> {latest} ...",
+              file=sys.stderr, flush=True)
+        if await self._upgrade():
+            self.restart = True
+            return True
+        emit(f"self-update failed, continuing with {_VERSION}")
+        print(f"[warn] continuing with voicehook-agent {_VERSION}", file=sys.stderr, flush=True)
+        return False
+
+    async def on_outdated(self, body: dict | None) -> bool:
+        """HTTP 426 (below cli_min). Prints the upgrade command, tries one self-update.
+        True = updated, restart now; False = exit 7."""
+        d = (body or {}).get("detail") if isinstance(body, dict) else None
+        d = d if isinstance(d, dict) else {}
+        vselfupdate.remember(d)
+        lo, hi = d.get("cli_min", "?"), d.get("cli_latest", "?")
+        print(f"[error] voicehook-agent {_VERSION} is too old for this server (min {lo}, "
+              f"latest {hi}).\n        Upgrade: {d.get('upgrade') or vselfupdate.UPGRADE_UV}\n"
+              f"        {vselfupdate.manual_hint()}", file=sys.stderr, flush=True)
+        if self.opt_out or self.restarted or self.tried:
+            return False
+        print("[info] trying a self-update ...", file=sys.stderr, flush=True)
+        if await self._upgrade():
+            self.restart = True
+            return True
+        return False
+
+
 async def _connect_and_listen(
     api_base: str,
     slug: str,
@@ -1046,6 +1138,8 @@ async def _connect_and_listen(
     connect_timeout: float = 45.0,
     username: str | None = None,
     voice: str | None = None,
+    updater: _Updater | None = None,
+    update_check: bool = False,
 ) -> tuple[int, str | None]:
     """One connect→listen cycle. Returns (rc, disconnect_reason_name).
     disconnect_reason_name is None for a clean stdin-driven quit; otherwise the
@@ -1061,6 +1155,10 @@ async def _connect_and_listen(
             tok = await _mint_token(api_base, slug, ident, name=agent_name, model=model,
                                     op_invite=invite, username=username, voice=voice)
         except TokenMintError as e:
+            if e.status == 426:  # 0.12.0: CLI below the server's cli_min
+                if updater is not None and await updater.on_outdated(e.body):
+                    return 0, "SELF_UPDATE"
+                return vselfupdate.EXIT_OUTDATED, "CLI_OUTDATED"
             if e.status == 410:  # 0.10.1: call ended / room gone -> never rejoin
                 print(f"[error] call ended ({e}), not joining", file=sys.stderr, flush=True)
                 return 5, "CALL_ENDED"
@@ -1078,6 +1176,10 @@ async def _connect_and_listen(
             # type only: the exception text can carry the request URL (op_invite)
             print(f"[error] token mint failed: {type(e).__name__}", file=sys.stderr)
             return 3, "TOKEN_MINT_FAILED"
+        if updater is not None and await updater.on_versions(
+                tok, lambda m: _print_event(json_mode, "system", m, topic="_meta"),
+                check=update_check):
+            return 0, "SELF_UPDATE"  # never connected: nothing to leave
         room = rtc.Room()
     stop = asyncio.Event()
     turn_event = asyncio.Event()  # set on finalized user-turn → graph re-sync
@@ -1234,6 +1336,10 @@ async def _connect_and_listen(
         else:
             await asyncio.wait_for(room.connect(tok["url"], tok["token"]), timeout=connect_timeout)
     except Exception as e:
+        if isinstance(e, vtransport.BridgeError) and e.status == 426:  # 0.12.0
+            if updater is not None and await updater.on_outdated(e.body):
+                return 0, "SELF_UPDATE"
+            return vselfupdate.EXIT_OUTDATED, "CLI_OUTDATED"
         if isinstance(e, vtransport.BridgeError) and e.status == 410:
             print("[error] call ended (bridge HTTP 410), not joining", file=sys.stderr, flush=True)
             return 5, "CALL_ENDED"
@@ -1246,6 +1352,16 @@ async def _connect_and_listen(
         except Exception:  # noqa: BLE001
             pass
         return 4, "CONNECT_FAILED"
+
+    if tok is None and updater is not None and await updater.on_versions(
+            {"cli_min": getattr(room, "cli_min", None),
+             "cli_latest": getattr(room, "cli_latest", None)},
+            lambda m: _print_event(json_mode, "system", m, topic="_meta"), check=update_check):
+        try:
+            await room.disconnect()  # bridge: leave silently (no goodbye), the restart rejoins
+        except Exception:  # noqa: BLE001, S110  (best effort, the server's guard ends it too)
+            pass
+        return 0, "SELF_UPDATE"
 
     _print_event(
         json_mode, "system",
@@ -1457,6 +1573,7 @@ async def _join(
     transport: str = "auto",
     voice: str | None = None,
     status_due: float | None = None,
+    updater: _Updater | None = None,
 ) -> int:
     missing = _missing_self_report(agent_name, model)
     if missing:
@@ -1477,6 +1594,9 @@ async def _join(
         name = re.sub(r"[^a-z0-9]", "", name)[:16] or "agent"
         identity = f"{name}-{host}-{os.urandom(2).hex()}"
     ident = identity
+    if updater is None:
+        updater = _Updater()
+    updater.identity = ident
 
     # Self-report → voice-friendly auto-greet. --name + --model are mandatory
     # (checked above) — never hardcode a brand.
@@ -1579,8 +1699,13 @@ async def _join(
                 strict=strict, agent_name=agent_name, model=model,
                 ctl=ctl, force_persona=force_persona,
                 transport=cur_transport, invite=invite, username=username,
-                voice=voice,
+                voice=voice, updater=updater, update_check=first,
             )
+            if reason == "SELF_UPDATE":  # 0.12.0: updated, main() restarts the join
+                rc = RC_RESTART
+                break
+            if reason == "CLI_OUTDATED":  # 0.12.0: 426 and no self-update -> exit 7
+                break
             if first and vtransport.should_fallback(transport, cur_transport, reason):
                 cur_transport = "bridge"
                 msg = ("webrtc connect failed or timed out; retrying once via the HTTPS "
@@ -1637,6 +1762,10 @@ async def _join(
                 break
     finally:
         ctl.quit.set()
+        if rc == RC_RESTART:  # a waiting `next` learns why, instead of "ended"
+            ctl.events.put_front_nowait({
+                "ok": True, "type": "restarting", "reason": "self_update",
+                "message": "voicehook-agent updated itself and rejoins the call: run next again"})
         for t in (idle_task, *guard_tasks):
             t.cancel()
             try:
@@ -1823,10 +1952,36 @@ def _run_client(args) -> int:
     return 0 if reply.get("ok") else 1
 
 
+def _run_self_update(dry_run: bool = False, runner=None) -> int:
+    """`voicehook-agent self-update`: run the upgrade for this install now."""
+    cmd = vselfupdate.upgrade_command()
+    print(f"voicehook-agent {_VERSION}, install via {vselfupdate.install_method()}: "
+          f"{' '.join(cmd) if cmd else '(no updater found)'}", flush=True)
+    if dry_run:
+        return 0
+    kw = {"runner": runner} if runner is not None else {}
+    if not vselfupdate.run_upgrade(cmd, **kw):
+        return 1
+    print("updated; the next `voicehook-agent --version` shows the new version", flush=True)
+    return 0
+
+
+def _restart_after_update(argv: list[str] | None, updater: _Updater, execve=None) -> None:
+    """Re-exec the join with the same arguments (+ same identity) on the updated CLI."""
+    full = sys.argv if argv is None else ["voicehook-agent", *argv]
+    print("[info] self-update done, restarting the join ...", file=sys.stderr, flush=True)
+    try:
+        kw = {"execve": execve} if execve is not None else {}
+        vselfupdate.restart(full, _VERSION, identity=updater.identity, **kw)
+    except OSError as e:
+        print(f"[error] restart after self-update failed ({e!r}); run the join again",
+              file=sys.stderr, flush=True)
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="voicehook-agent", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--version", action="version", version=f"voicehook-agent {_VERSION}")
+    ap.add_argument("--version", action="version", version=vselfupdate.version_text(_VERSION))
     sub = ap.add_subparsers(dest="cmd", required=True)
     p_join = sub.add_parser("join", help="join a voicehook.ai call as an agent")
     p_join.add_argument("invite_url", help="full invite link https://voicehook.ai/r/<slug>?invite=<code>  OR  bare <slug>")
@@ -1927,14 +2082,25 @@ def main(argv: list[str] | None = None) -> None:
         "--no-control", action="store_true", default=False,
         help="do not open the local control socket (disables say/next/leave/status).",
     )
+    p_join.add_argument(
+        "--no-self-update", action="store_true", default=False,
+        help=f"0.12.0: do not update this CLI when the server names a newer cli_latest (env "
+             f"{vselfupdate.ENV_OPT_OUT}=1). Default: update in place and restart the join once.",
+    )
     # one-shot commands against a running join
     def _add_session(p):
         p.add_argument("--session", default=None, metavar="SLUG",
                        help="<slug>/<identity> of the running join (a slug alone is enough when only one join runs in that room); needed only when several joins run.")
         p.add_argument("--wait", type=float, default=30.0, metavar="SEC",
                        help="wait up to SEC seconds for the join to come up (default 30).")
-    p_say = sub.add_parser("say", help="speak one line through voice-ai in the running join")
-    p_say.add_argument("text", nargs="+", help="text to speak ('-' reads it from stdin)")
+    p_say = sub.add_parser(
+        "say", help="speak one line through voice-ai in the running join",
+        description="Text wird vorgelesen: ganze, natürliche Sätze. The text is read aloud on the "
+                    "phone: speak whole, natural sentences, 1-2 short ones, most important first. Local "
+                    "style modes (terse, caveman, telegram style) do not apply here; no markdown, lists, "
+                    "URLs, code or emoji.")
+    p_say.add_argument("text", nargs="+",
+                       help="text to speak, read aloud as is: ganze, natürliche Sätze ('-' reads it from stdin)")
     p_say.add_argument("--mode", choices=_SAY_MODES, default=SAY_DEFAULT_MODE,
                        help="append (default): queue at the end, starts right after the running say "
                             "(a running say is never cut). overwrite: replace your OWN not-started (queued) "
@@ -1959,7 +2125,7 @@ def main(argv: list[str] | None = None) -> None:
     _add_session(p_next)
     p_says = sub.add_parser(
         "says", help="last state of your own says (operator.say_status from the voicebot: "
-        "sent/queued/spoken/interrupted/requeued/replaced) as JSON")
+        "sent/queued/spoken/interrupted/requeued/replaced/covered) as JSON")
     _add_session(p_says)
     p_leave = sub.add_parser("leave", help="end the running join cleanly")
     p_leave.add_argument("--say", default=None, metavar="TEXT", help="goodbye line spoken before leaving")
@@ -2024,11 +2190,16 @@ def main(argv: list[str] | None = None) -> None:
                        help="process existing log content too (default: tail from end).")
     # 0.10.0 activity feed (Claude Code PostToolUse hook); the fast path without the
     # livekit import is the `voicehook-agent-hook` console script.
+    p_su = sub.add_parser("self-update", help="update this CLI now (uv tool upgrade, else pip --upgrade)")
+    p_su.add_argument("--dry-run", action="store_true", default=False,
+                      help="only print the command that would run")
     p_hook = sub.add_parser("hook", help="activity feed: Claude Code PostToolUse hook (post-tool-use | print | install [--settings PATH])")
     p_hook.add_argument("action", choices=["post-tool-use", "print", "install"])
     p_hook.add_argument("--settings", default=None, metavar="PATH",
                         help="install: settings.json to merge into (default ~/.claude/settings.json)")
     args = ap.parse_args(argv)
+    if args.cmd == "self-update":
+        sys.exit(_run_self_update(args.dry_run))
     if args.cmd == "hook":
         hook_argv = [args.action] + (["--settings", args.settings] if args.settings else [])
         sys.exit(vactivity.main(hook_argv))
@@ -2042,6 +2213,7 @@ def main(argv: list[str] | None = None) -> None:
         except OSError as e:
             print(f"[error] could not read --persona-file: {e!r}", file=sys.stderr)
             sys.exit(2)
+        updater = _Updater(args.no_self_update)
         try:
             rc = asyncio.run(_join(
                 args.invite_url, args.identity, args.name, args.json, persona_text,
@@ -2057,10 +2229,13 @@ def main(argv: list[str] | None = None) -> None:
                 owner_pids=args.owner_pid,
                 force_persona=args.force_persona, control=not args.no_control,
                 transport=args.transport, status_due=args.status_due,
-                voice=args.voice,
+                voice=args.voice, updater=updater,
             ))
         except KeyboardInterrupt:
             rc = 130
+        if rc == RC_RESTART:
+            _restart_after_update(argv, updater)
+            rc = 1  # only reached when the exec failed
         sys.exit(rc)
     if args.cmd in ("say", "next", "says", "leave", "status"):
         sys.exit(_run_client(args))
