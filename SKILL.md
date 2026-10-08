@@ -145,6 +145,10 @@ In speech pauses Delta reads only fresh lines (< 60 s) aloud: what is happening 
   (`doing`/`open` set, or you spoke / sent a board in the last 5 min) and the log got no line for
   60 s (`--activity-due SEC` / env `VOICEHOOK_ACTIVITY_DUE`, 0 = off). Run the command in
   `activity_hint`. Silent while hook lines arrive; at most one hint per 60 s.
+- `stale_error` (CLI 0.13.0, EVERY `next`, no rate limit): board or log older than 60 s while you
+  are active (`--stale-error SEC` / env `VOICEHOOK_STALE_ERROR_S`, 0 = off): `{status_age_s?,
+  activity_age_s?, message}`, e.g. "FEHLER: Statusboard seit 3 Min nicht aktualisiert, ...". Fix it
+  before your `say`. Plain join output: `!! stale: ...`.
 - Idle guard: no `say`/`next` for 10 min (`--idle-timeout MIN`, 0 = off) = join leaves, also across
   reconnects. `--owner-pid $PPID` (CLI 0.8.0) leaves as soon as your session ends; a dead FIFO holder too.
 - Call end (CLI 0.10.1): server `call_end`, room deleted or HTTP 410 = join exits, never reconnects; `next` returns `{"type":"call_end"}`. No human for 2.5 min (`--no-human-timeout MIN`; the server ends the call after 120 s) = join leaves. HTTP 409 at join (CLI 0.10.2: no human in the room yet) = join says so and retries every 5 s for up to 2 min, then exits (rc 6).

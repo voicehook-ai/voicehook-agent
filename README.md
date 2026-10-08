@@ -241,11 +241,24 @@ happening right now". An empty or old log means Delta has nothing to say.
 
   ```json
   {"ok": true, "type": "timeout", "pending": 0, "activity_due": true, "activity_age_s": 61.0,
-   "activity_hint": "Activity log silent while you work: ... voicehook-agent activity \"<3-8 words>\" ..."}
+   "activity_hint": "Aktivitätslog still, während du arbeitest: ... voicehook-agent activity \"<3-8 Wörter>\" ..."}
   ```
 
   Silent while hook lines arrive (any hook line in the last 10 min); at most one hint per
   SEC. Its own key `activity_hint`, so a `status_due` `hint` in the same reply stays intact.
+- **`stale_error` (no rate limit):** while you are active (`doing`/`open` set, a `say` in the
+  last 5 min, or no board yet and the join older than SEC) and your board or your log is
+  older than `--stale-error SEC` (default 60, env `VOICEHOOK_STALE_ERROR_S`, 0 = off), EVERY
+  `next` carries:
+
+  ```json
+  "stale_error": {"status_age_s": 187, "activity_age_s": 95, "message": "FEHLER: Statusboard seit 3 Min nicht aktualisiert, Aktivitätslog seit 1 Min 35 s. Jetzt: voicehook-agent status --doing \"…\" und voicehook-agent activity \"…\""}
+  ```
+
+  Only the stale parts appear; never set = age since the join; while hook lines arrive only
+  the board counts. A finished/empty board without a `say` for 5 min stays silent. Plain
+  (non `--json`) join output prints `!! stale: <message>` after every user turn.
+  `status_due`/`activity_due` stay unchanged.
 
 ## Install
 
@@ -364,6 +377,7 @@ Hardening flags (0.2.0) for unattended / background relay operation:
 | `--username <name>` | 0.9.0 | The user's first name: in the greeting and, since 0.9.0, sent to the server (token `username=`, bridge join `username`) as participant attribute `vh.user`, so the voicebot knows whom it talks to. |
 | `--status-due <sec>` | 0.9.0 | `next` adds `status_due` + `hint` once the board is older than `<sec>` while work is in progress (default 45, env `VOICEHOOK_STATUS_DUE`, 0 = age rule off). |
 | `--activity-due <sec>` | 0.13.0 | `next` adds `activity_due` + `activity_age_s` + `activity_hint` once no new `activity.log` line came for `<sec>` while work is in progress (default 60, env `VOICEHOOK_ACTIVITY_DUE`, 0 = off); silent while hook lines arrive. |
+| `--stale-error <sec>` | 0.13.0 | `next` adds `stale_error` `{status_age_s?, activity_age_s?, message}` on every output while you are active and board or activity log are older than `<sec>` (default 60, env `VOICEHOOK_STALE_ERROR_S`, 0 = off). |
 | `--no-control` | 0.5.0 | No local control socket (`say`/`next`/`leave`/`status` off). |
 | `--transport auto\|webrtc\|bridge` | 0.6.0 | How to reach the room. `auto` (default): WebRTC; the HTTPS bridge when `HTTPS_PROXY`/`ALL_PROXY` is set or the WebRTC connect fails/times out (one retry, logged). See below. |
 

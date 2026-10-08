@@ -100,6 +100,15 @@ Activity log (0.13.0): keep it filled, Delta reads it in speech pauses.
                                      and no new line came for --activity-due SEC (default
                                      60, env VOICEHOOK_ACTIVITY_DUE, 0 = off). Silent while
                                      hook lines arrive; at most one hint per SEC.
+    next                             adds stale_error {status_age_s?, activity_age_s?, message}
+                                     on EVERY output (no rate limit) while you are active
+                                     (doing/open set, a say in the last 5 min, or no board
+                                     yet and the join older than SEC) and the board or the
+                                     log is older than --stale-error SEC (default 60, env
+                                     VOICEHOOK_STALE_ERROR_S, 0 = off). Never set = age since
+                                     the join; while hook lines arrive only the board counts.
+                                     Plain (non --json) join output: `!! stale: <message>`
+                                     after every user turn.
 """
 from __future__ import annotations
 
@@ -464,6 +473,7 @@ class _Control:
         # 0.13.0 activity_due: remind the agent when the log stays silent while it works
         self.activity_due = vactivity.ActivityDue(due_s=vactivity.activity_due_seconds())
         self.activity_path: Path | None = None
+        self.stale_s = relay.stale_error_seconds()  # 0.13.0 stale_error threshold
         self.leaving = False
         # 0.10.1: no-human guard. Starts at join (nobody seen yet), stops while a
         # human is in the room, restarts when the last one leaves. Spans reconnects.
@@ -578,6 +588,9 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
             hints.update(ctl.agent_said.take())
             hints.update(ctl.say_status.take())
             hints.update(_activity_hints(ctl))
+            stale = _stale_error(ctl)
+            if stale:
+                hints["stale_error"] = stale
         if ev is None:
             return {"ok": True, "type": "timeout", "pending": 0, **hints}
         if ev.get("type") == "user":
@@ -677,6 +690,34 @@ def _activity_hints(ctl: _Control) -> dict:
     except Exception as e:  # noqa: BLE001
         print(f"[warn] activity_due: {e!r}", file=sys.stderr, flush=True)
         return {}
+
+
+def _stale_error(ctl: _Control) -> dict:
+    """0.13.0: stale_error payload for `next` / the plain stream, or {} (never raises).
+    No rate limit: every call while stale returns it."""
+    try:
+        s = ctl.stale_s
+        if s <= 0 or not ctl.clock.active(stale_s=s):
+            return {}
+        st = ctl.clock.status_age()
+        now = ctl.activity_clock()
+        act = None
+        if not ctl.activity_due.hook_active(now):  # hook fills the log: only the board counts
+            a = ctl.activity_due.age(now)
+            act = a if a > s else None
+        return relay.stale_error_payload(st if st > s else None, act)
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] stale_error: {e!r}", file=sys.stderr, flush=True)
+        return {}
+
+
+def _print_stale(ctl: _Control, json_mode: bool) -> None:
+    """Plain (non --json) join output: `!! stale: <message>` while stale."""
+    if json_mode:
+        return
+    err = _stale_error(ctl)
+    if err:
+        print(f"!! stale: {err['message']}", flush=True)
 
 
 async def _publish_activity(ctl: _Control, lines: list[str]) -> bool:
@@ -1074,6 +1115,7 @@ async def _connect_and_listen(
                 if ev is not None:
                     ctl.events.put_nowait(ev)
                     ctl.clock.user()
+                    _print_stale(ctl, json_mode)  # 0.13.0
             # #9 — a fresh user turn supersedes any older queued say.
             if role == "user":
                 say_tracker.note_user_turn()
@@ -1412,6 +1454,7 @@ async def _join(
     voice: str | None = None,
     status_due: float | None = None,
     activity_due: float | None = None,
+    stale_error: float | None = None,
 ) -> int:
     missing = _missing_self_report(agent_name, model)
     if missing:
@@ -1473,6 +1516,8 @@ async def _join(
         ctl.clock.due_s = status_due
     if activity_due is not None:
         ctl.activity_due.due_s = activity_due
+    if stale_error is not None:
+        ctl.stale_s = stale_error
     server: vsession.ControlServer | None = None
     sess_dir = vsession.session_dir(slug, ident)
     if control and hasattr(asyncio, "start_unix_server"):
@@ -1881,6 +1926,10 @@ def main(argv: list[str] | None = None) -> None:
         help=f"`next` adds activity_due + activity_age_s + activity_hint when no new activity.log line came for SEC seconds while work is in progress (default {vactivity.ACTIVITY_DUE_S:g}, env {vactivity.ACTIVITY_DUE_ENV}; 0 = off). Silent while the Claude Code hook writes lines.",
     )
     p_join.add_argument(
+        "--stale-error", type=float, default=None, metavar="SEC",
+        help=f"`next` adds stale_error {{status_age_s, activity_age_s, message}} on EVERY output while you are active and your board or activity log is older than SEC seconds (default {relay.STALE_ERROR_S:g}, env {relay.STALE_ERROR_ENV}; 0 = off).",
+    )
+    p_join.add_argument(
         "--no-control", action="store_true", default=False,
         help="do not open the local control socket (disables say/next/leave/status).",
     )
@@ -1991,7 +2040,7 @@ def main(argv: list[str] | None = None) -> None:
                 owner_pids=args.owner_pid,
                 force_persona=args.force_persona, control=not args.no_control,
                 transport=args.transport, status_due=args.status_due,
-                activity_due=args.activity_due,
+                activity_due=args.activity_due, stale_error=args.stale_error,
                 voice=args.voice,
             ))
         except KeyboardInterrupt:

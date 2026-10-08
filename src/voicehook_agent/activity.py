@@ -380,12 +380,12 @@ class ActivityPublisher:
 ACTIVITY_DUE_S = 60.0          # no new line for this long while working -> activity_due
 ACTIVITY_DUE_ENV = "VOICEHOOK_ACTIVITY_DUE"
 HOOK_QUIET_S = 600.0           # a hook line within this window = hook active, stay silent
-ACTIVITY_CMD = 'voicehook-agent activity "<3-8 words>"'
-ACTIVITY_HINT = ("Activity log silent while you work: Delta only reads lines younger than "
-                 "60 s and cannot tell what is happening. Send your own short status line "
-                 "1:1, do not rephrase it: " + ACTIVITY_CMD + " (what is happening now, "
-                 "current phase; no paths, secrets or personal data). Claude Code: "
-                 "`voicehook-agent hook install` does this automatically.")
+ACTIVITY_CMD = 'voicehook-agent activity "<3-8 Wörter>"'
+ACTIVITY_HINT = ("Aktivitätslog still, während du arbeitest: Delta liest nur Zeilen jünger als "
+                 "60 s vor und weiss sonst nicht, was gerade passiert. Deine eigene kurze "
+                 "Statuszeile 1:1 senden, nicht umformulieren: " + ACTIVITY_CMD + " (was gerade "
+                 "passiert, aktuelle Phase; keine Pfade, Secrets oder personenbezogenen Daten). "
+                 "Claude Code: `voicehook-agent hook install` erledigt das automatisch.")
 
 
 def activity_due_seconds(value: float | str | None = None) -> float:
@@ -435,6 +435,13 @@ class ActivityDue:
         self.line_at = now
         if any(not _is_note(ln) for ln in new):
             self.hook_at = now
+
+    def age(self, now: float) -> float:
+        """Seconds since the newest line (since the join when none came)."""
+        return now - (self.line_at if self.line_at is not None else self.started)
+
+    def hook_active(self, now: float) -> bool:
+        return self.hook_at is not None and now - self.hook_at < HOOK_QUIET_S
 
     def check(self, now: float, working: bool) -> dict:
         if self.due_s <= 0 or not working:
