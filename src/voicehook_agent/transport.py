@@ -26,6 +26,8 @@ from typing import Any
 
 import httpx
 
+from . import __version__
+
 TRANSPORTS = ("auto", "webrtc", "bridge")
 PROXY_VARS = ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")
 
@@ -52,9 +54,10 @@ _SEND_RETRY_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeou
 
 
 class BridgeError(RuntimeError):
-    def __init__(self, msg: str, status: int | None = None) -> None:
+    def __init__(self, msg: str, status: int | None = None, body: dict | None = None) -> None:
         super().__init__(msg)
         self.status = status  # HTTP status of a rejected bridge call (410 = call ended)
+        self.body = body      # parsed JSON body (426: detail.cli_min/cli_latest/upgrade)
 
 
 def proxy_env(env: dict | None = None) -> str | None:
@@ -142,7 +145,9 @@ class _BridgeLocal:
 
 def _client(user_agent: str, timeout: Any = 15.0) -> httpx.AsyncClient:
     # trust_env=True (httpx default): HTTPS_PROXY/HTTP_PROXY/ALL_PROXY/NO_PROXY apply.
-    return httpx.AsyncClient(timeout=timeout, trust_env=True, headers={"user-agent": user_agent})
+    # 0.12.0: X-VH-CLI = the server's version gate (426 below cli_min, see selfupdate.py)
+    return httpx.AsyncClient(timeout=timeout, trust_env=True,
+                             headers={"user-agent": user_agent, "x-vh-cli": __version__})
 
 
 class BridgeRoom:
@@ -171,6 +176,8 @@ class BridgeRoom:
         self.remote_participants: dict[str, BridgeParticipant] = {}
         self.local_participant = _BridgeLocal(self)
         self.expires_in: int | None = None
+        self.cli_min: str | None = None      # 0.12.0: from the join answer
+        self.cli_latest: str | None = None
 
     # ---- rtc.Room surface -------------------------------------------------- #
     def on(self, event: str, callback: Callable | None = None):
@@ -206,11 +213,17 @@ class BridgeRoom:
             raise BridgeError(f"bridge join failed: {e!r}") from e
         if r.status_code != 200:
             detail = _detail(r)
+            try:
+                body = r.json()
+            except Exception:  # noqa: BLE001
+                body = None
             await self._close_http()
             raise BridgeError(f"bridge join failed: HTTP {r.status_code} {detail}",
-                              status=r.status_code)
+                              status=r.status_code, body=body if isinstance(body, dict) else None)
         j = r.json()
         self._session = j["session"]
+        self.cli_min = j.get("cli_min")
+        self.cli_latest = j.get("cli_latest")
         self.identity = j.get("identity") or self.identity
         self.expires_in = j.get("expires_in")
         for info in j.get("peers") or []:
@@ -252,6 +265,15 @@ class BridgeRoom:
         """POST /api/bridge/send. During a server restart (connection refused, 502/503/504)
         the same request is retried with the same token for up to BRIDGE_RETRY_S, so a
         `say` sent mid-deploy is delivered late instead of lost."""
+        await self._post_retry("/api/bridge/send",
+                               {"topic": topic, "payload": payload, "force": True}, topic)
+
+    async def send_visual(self, body: dict) -> None:
+        """POST /api/bridge/visual {shape, emotion?}: draw a shape in the ring. Same
+        retry as _send. Over WebRTC the CLI publishes topic operator.visual instead."""
+        await self._post_retry("/api/bridge/visual", body, "visual")
+
+    async def _post_retry(self, path: str, body: dict, topic: str) -> None:
         if self._http is None or not self._session or self._closed:
             raise BridgeError("bridge not connected")
         loop = asyncio.get_running_loop()
@@ -260,8 +282,7 @@ class BridgeRoom:
         while True:
             err: Exception | None = None
             try:
-                r = await self._http.post(f"{self.api_base}/api/bridge/send", headers=self._auth(),
-                                          json={"topic": topic, "payload": payload, "force": True})
+                r = await self._http.post(f"{self.api_base}{path}", headers=self._auth(), json=body)
             except _SEND_RETRY_ERRORS as e:
                 r, err = None, e
             if r is not None and r.status_code not in RETRY_STATUS:

@@ -1,5 +1,13 @@
 # voicehook-agent
 
+**Talk with your agents.** [voicehook.ai](https://voicehook.ai/?utm_source=github&utm_campaign=d2-readme) is a voice call in the browser.
+Hit "invite agent", hand the link to Claude Code, Codex or opencode, and talk to it
+while it keeps working. Delta, the voice in the call, answers from the status board
+and FAQ your agent maintains.
+
+Free: 0.30 EUR per day (about 10 minutes in Normal mode). Prepaid from 5 EUR, no subscription.
+This repo is the CLI side: `voicehook-agent` lets an agent join a call.
+
 Zero-install CLI that lets any LLM agent (Claude Code, Cursor, ZeroClaw, Hermes,
 Codex, …) join a [voicehook.ai](https://voicehook.ai) voice-call as a 2nd
 participant. No SDK, no MCP server, no learning curve — stdin/stdout protocol.
@@ -67,11 +75,18 @@ voicehook-agent leave --say "Bis bald."                 # clean exit
   in `--json` output and on `next` user events when the server sends them.
 - **Say receipts (0.9.0):** the voicebot reports each say as `operator.say_status
   {seq, state, spoken_chars}` (`seq` = the `seq` that `say` returned; states `queued`,
-  `spoken`, `interrupted`, `requeued`, `replaced`). `next` carries the changes since the
+  `spoken`, `interrupted`, `requeued`, `replaced`, live `covered`). `next` carries the changes since the
   last `next` as `"say_status": [{"seq":3,"state":"spoken"}]` (`spoken_chars` only for
   `interrupted`/`requeued`); a say stuck in `queued`/`requeued` for more than 20 s adds
   `"say_hint"` (do not push more; if outdated, `say --mode overwrite` a short version).
-  `says` shows the last state of every say.
+  `says` shows the last state of every say. Live mode (0.12.0): `covered` (final) =
+  your say arrived while the user had the floor, went to the model as context, and
+  Delta already said it in his answer; it carries `"note": "Info steckt schon in
+  Deltas Antwort, nicht nochmal senden"`. Do not send it again. `no_audio` = no audio
+  within 4 s (voice engine silent), the voicebot retries once; `dropped` (final) = the
+  retry was silent too, the say was never spoken: resend it if it still matters. Both
+  carry a `note`; `reason` is passed through (`interrupted` + `max_duration` = the
+  voicebot's emergency brake cut a say that never reported finished).
   Turns spoken while you were thinking are kept, never lost. `--timeout 0` only
   returns what is already queued. Each event carries `ts` (unix time it was
   spoken).
@@ -167,6 +182,29 @@ voicehook-agent leave --say "Bis bald."                 # clean exit
 > Since 0.2.0, `--keep-alive` is the default: **stdin-EOF no longer quits** and
 > transient room-disconnects auto-reconnect. Run with a closed stdin in the
 > background without the FIFO sleep-holder hack. See [Relay flags](#relay-flags).
+
+## Wie du im Call sprichst
+
+Everything you send with `say` or `--greet` is read aloud to a person on the phone. **Local style
+modes (terse, caveman, Telegrammstil, Stichpunkte) do NOT apply to `say` text:** speak whole,
+natural sentences with articles and verbs, like a good radio host or hotline agent.
+
+- **Language:** the user's (German by default); switch only when the user switches.
+- **Short:** 1-2 sentences per `say`, each one breath (about 8-12 words, <60 chars). One statement per sentence.
+- **Most important first:** result first, then the reason. Active verbs: "Ich habe den Fix deployt", not "Fix wurde deployt".
+- **Speakable:** round numbers ("fast die Hälfte", "rund achthundert"); codes and phone numbers in digit groups. No
+  abbreviations, symbols, paths, URLs, code, markdown, lists or emoji: say what it means ("der Login-Endpunkt").
+- **Signal and repeat:** announce longer answers ("Zwei Punkte. Erstens …"), repeat the core once at the end.
+- **Confirm, then ask:** read a task back in one sentence ("Okay, ich deploye den Worker."); end with one clear question
+  when you need a decision. Pauses come from full stops, not from comma chains.
+
+| Chat style (wrong) | Phone style (right) |
+|---|---|
+| Deploy grün. Tests 812/812. CI ok. | Der Deploy ist durch, und alle Tests sind grün. |
+| PR #161 offen → wartet auf Review. | Ich habe den Pull Request geöffnet. Er wartet auf dein Review. |
+| 403 bei /api/join, Token stale. | Der Beitritt klappt nicht, weil der Schlüssel abgelaufen ist. Soll ich ihn erneuern? |
+
+Newer voicehook servers (v4, Oct 2026) also strip leftover markdown, backticks, emoji and link prefixes and read arrows as "dann", but never reword you.
 
 ## Activity feed (operator.activity, 0.10.0)
 
@@ -274,6 +312,43 @@ happening right now". An empty or old log means Delta has nothing to say.
   (non `--json`) join output prints `!! stale: <message>` after every user turn.
   `status_due`/`activity_due` stay unchanged.
 
+## Shapes in the ring (`show`)
+
+An agent can draw into the ring (Kringel) of the call UI while it explains something
+by voice. Same session resolution as `say`; WebRTC join -> data-channel topic
+`operator.visual`, bridge join -> `POST /api/bridge/visual`. Body:
+`{"shape": <shape>, "emotion"?: {"label", "valence", "arousal"}}`.
+
+```bash
+voicehook-agent show --preset check --emotion joy                     # preset
+voicehook-agent show --polygon "0.2,0.9 0.2,0.45 0.5,0.15 0.8,0.45 0.8,0.9" --label Haus
+voicehook-agent show --label "Vorher, nachher" --json '{"type":"multi","items":[
+  {"type":"polygon","points":[[0.1,0.4],[0.3,0.4],[0.3,0.6],[0.1,0.6]]},
+  {"type":"path","d":"M0.38,0.5 L0.62,0.5"},
+  {"type":"polygon","points":[[0.7,0.25],[0.9,0.25],[0.9,0.75],[0.7,0.75]]}]}'
+voicehook-agent say "Erst testen, dann ausrollen." --shape-preset arrow_right
+```
+
+| Flag | Meaning |
+|------|---------|
+| `--preset NAME` | `arrow_up arrow_right check cross question loop split3 scale heart bolt one two three` |
+| `--polygon "x,y x,y ..."` | own polygon, closed (`--open` = line) |
+| `--path D` | SVG path, only `M L Q C Z`, numbers 0..1 |
+| `--json SHAPE` | full shape (`preset`, `polygon`, `path`, `multi` with `items`) |
+| `--label TEXT` / `--hold-ms N` / `--emotion LABEL` | caption <= 24 chars / 800..8000 ms / ring tint |
+
+Several `--preset/--polygon/--path` become one `multi` (max 4 items). Coordinates 0..1,
+(0,0) top left, max 200 points, a path `d` max 2 KB, the whole shape max 8 KB; label max
+24 chars without control characters, emoji or `<>`. The CLI validates like the server:
+invalid input prints `{"ok":false,"type":"invalid","error":...}` and exits 2, nothing is
+sent. At most one shape per 2 s per operator: faster returns `{"type":"rate_limited"}`
+(bridge HTTP 429), exit 1. `say --shape-preset NAME | --shape-json J` and `--emotion L` add the fields `shape`
+and `emotion` to that `operator.say`; the shape is drawn when the say is spoken.
+
+When to draw: a sequence or loop, a comparison, a structure, yes or no, a count of one
+to three. Not with every sentence, at most every few turns, never instead of speaking;
+say texts stay whole, natural, phone-ready sentences.
+
 ## Install
 
 ### One-shot (per-call, recommended)
@@ -301,6 +376,33 @@ Then:
 ```bash
 voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name <dein-eigener-Name> --model <dein-Modellname>
 ```
+
+Install and update in one line (what the skill does; always upgrades):
+
+```bash
+R=git+https://github.com/voicehook-ai/voicehook-agent
+uv tool install -q --upgrade $R || pip install -q --upgrade --user $R
+```
+
+### Self-update (0.12.0)
+
+The server names `cli_min` and `cli_latest` in every join answer (token mint and bridge
+join; the CLI sends its version as `X-VH-CLI`).
+
+- `cli_latest` newer than this CLI: `join` updates in place and restarts itself with the
+  same arguments and the same identity (`os.execv`). uv tool installs run
+  `uv tool upgrade voicehook-agent`, everything else
+  `python -m pip install --upgrade [--user] git+https://github.com/voicehook-ai/voicehook-agent`
+  (plus `--break-system-packages` on a PEP 668 system python). Only on the first connect,
+  never during a running call, and at most once per join (env marker `VOICEHOOK_SELF_UPDATED`).
+  A `next` waiting during the restart gets `{"type":"restarting"}`: call `next` again.
+- Update fails: a clear warning, the join goes on with the old version (it is still >= `cli_min`).
+- HTTP 426 (this CLI is below `cli_min`): prints the upgrade command, tries one self-update,
+  else exits with code 7.
+- Off: `join --no-self-update` or `VOICEHOOK_NO_SELF_UPDATE=1` (only an info line then).
+- By hand: `voicehook-agent self-update` (`--dry-run` prints the command).
+  `voicehook-agent --version` adds `neue Version verfügbar: x.y.z` when the last server answer
+  named a newer one.
 
 ## Agent-skill registration
 
@@ -368,6 +470,7 @@ stdin (JSONL):
 | `operator.alive`     | room      | 0.8.0: `{alive, ts, idle_s}` every 10 s while the agent serves `next`/`say` (within 15 s); nothing while orphaned; `alive:false` on leave. The web UI dims the operator after ~20 s without it |
 | `operator.say_status` | in    | 0.9.0: `{seq, state, spoken_chars}` per state change of your say; `next` carries `say_status`, `says` the table |
 | `operator.status_request` | in    | the user asked what you are doing; `next` yields `{"type":"status_request"}` |
+| `operator.visual`    | room      | `{shape, emotion?}`: draw a shape in the ring (`show`; bridge: `POST /api/bridge/visual`) |
 
 *`out` here = emitted on the CLI's **stdout** (not published to the room).
 
@@ -393,6 +496,7 @@ Hardening flags (0.2.0) for unattended / background relay operation:
 | `--activity-due <sec>` | 0.13.0 | `next` adds `activity_due` + `activity_age_s` + `activity_hint` once no new `activity.log` line came for `<sec>` while work is in progress (default 60, env `VOICEHOOK_ACTIVITY_DUE`, 0 = off); silent while hook lines arrive. |
 | `--stale-error <sec>` | 0.13.0 | `next` adds `stale_error` `{status_age_s?, activity_age_s?, message}` on every output while you are active and board or activity log are older than `<sec>` (default 60, env `VOICEHOOK_STALE_ERROR_S`, 0 = off). |
 | `--no-control` | 0.5.0 | No local control socket (`say`/`next`/`leave`/`status` off). |
+| `--no-self-update` | 0.12.0 | Do not update when the server names a newer `cli_latest` (see Self-update). HTTP 426 then exits 7 with the upgrade command. |
 | `--transport auto\|webrtc\|bridge` | 0.6.0 | How to reach the room. `auto` (default): WebRTC; the HTTPS bridge when `HTTPS_PROXY`/`ALL_PROXY` is set or the WebRTC connect fails/times out (one retry, logged). See below. |
 
 ### HTTPS bridge (0.6.0): cloud sandboxes and proxy networks
@@ -473,6 +577,7 @@ Reference: [OPERATOR-PROTOCOL.md](https://voicehook.ai/agent/OPERATOR-PROTOCOL.m
 | `VOICEHOOK_API_BASE`   | `https://voicehook.ai`  | Token-mint endpoint base URL     |
 | `VOICEHOOK_AGENT_HOME` | `~/.voicehook-agent`    | Root of the session dirs (control sockets) |
 | `HTTPS_PROXY` / `ALL_PROXY` | unset              | Set -> `--transport auto` uses the HTTPS bridge; also used by the HTTP client |
+| `VOICEHOOK_NO_SELF_UPDATE` | unset             | `1` = never self-update on `join` (same as `--no-self-update`) |
 
 ## License
 

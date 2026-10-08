@@ -59,6 +59,8 @@ Say receipts (0.9.0, voicebot sends operator.say_status {seq, state, spoken_char
     next                             adds "say_status": [{"seq":N,"state":"spoken"}, ...]
                                      (changes since the last next) and "say_hint" when a
                                      say sits in queued/requeued for more than 20 s.
+                                     Live mode (0.12.0): state "covered" + "note" = Delta
+                                     already said it in his answer, do not send it again.
     says                             last state of every own say (sent until the first
                                      receipt): {"type":"says","says":[{seq,state,...}]}
     join --username NAME             also sent to the server (vh.user): Delta knows the user.
@@ -76,6 +78,19 @@ Several operators (0.11.0): one shared say queue for all agents in the call.
     revise / say_status              only for the say's owner (field owner); transcript
                                      lines carry speaker (display name) + op (identity)
 
+Shapes in the ring (show): draw when a picture explains better than words.
+    show --preset check              preset: arrow_up arrow_right check cross question
+                                     loop split3 scale heart bolt one two three
+    show --polygon "x,y x,y ..."     own form, coordinates 0..1 (0,0 top left); --open =
+                                     not closed; --path "M0.1,0.9 L0.9,0.1" (only M L Q C Z)
+    show --json '<shape>'            full shape; several --preset/--polygon/--path = multi
+    show ... --label T --hold-ms N   label <= 24 chars, hold 800..8000 ms; --emotion LABEL;
+                                     one shape per 2 s, faster: "type":"rate_limited"
+    say --shape-preset NAME          shape/emotion ride along with the say (operator.say
+    say --shape-json J --emotion L   fields shape, emotion), drawn when it is spoken
+                                     WebRTC: topic operator.visual; bridge: POST
+                                     /api/bridge/visual. Invalid shape: exit 2, nothing sent.
+
 Activity feed (0.10.0): Delta sees what you are doing, one line per tool call.
     hook install [--settings PATH]   add the Claude Code PreToolUse + PostToolUse hooks to
                                      settings.json (0.13.0: idempotent, adds Pre to an
@@ -84,6 +99,15 @@ Activity feed (0.10.0): Delta sees what you are doing, one line per tool call.
     hook pre-tool-use|post-tool-use  the hooks themselves (fast path: voicehook-agent-hook)
                                      join publishes the newest 15 lines as operator.activity
                                      {lines, ts}, on change, at most every 5 s.
+
+Self-update (0.12.0): the server names cli_min / cli_latest in every join answer.
+    join                             cli_latest newer than this CLI: update in place (uv tool
+                                     upgrade, else pip --upgrade) and restart the join with the
+                                     same arguments (once per join). Update fails: warn, go on.
+                                     HTTP 426 (below cli_min): print the upgrade command, try
+                                     one self-update, else exit 7.
+    join --no-self-update            off (env VOICEHOOK_NO_SELF_UPDATE=1)
+    self-update                      update now; --version shows "neue Version verfügbar"
 
 Activity log (0.13.0): keep it filled, Delta reads it in speech pauses.
     Delta only reads lines younger than 60 s ("what is happening right now"). Claude
@@ -137,8 +161,10 @@ from livekit import rtc
 
 from . import __version__, relay
 from . import activity as vactivity
+from . import selfupdate as vselfupdate
 from . import session as vsession
 from . import transport as vtransport
+from . import visual as vvisual
 
 _SLUG_RX = re.compile(r"^[a-z]+-[a-z]+-[a-z]+-[A-Z0-9]{4,8}$")
 _VERSION = __version__
@@ -205,9 +231,10 @@ class TokenMintError(Exception):
     """Token mint rejected. The message never contains the request URL, so the
     operator invite (`op_invite`) cannot leak into logs or stderr."""
 
-    def __init__(self, status: int, detail: str):
+    def __init__(self, status: int, detail: str, body: dict | None = None):
         self.status = status
         self.detail = detail
+        self.body = body  # parsed JSON (426: detail.cli_min/cli_latest/upgrade)
         super().__init__(f"HTTP {status} {detail}".strip())
 
 
@@ -250,7 +277,9 @@ async def _mint_token(api_base: str, slug: str, identity: str,
         params["username"] = username
     if voice:  # 0.11.0: wish voice for our says (Chirp3-HD, e.g. 'Puck') -> vh.voice
         params["voice"] = voice
-    async with httpx.AsyncClient(timeout=10.0, headers={"user-agent": _USER_AGENT}) as cli:
+    # 0.12.0: X-VH-CLI = the server's version gate (426 below cli_min)
+    async with httpx.AsyncClient(timeout=10.0, headers={"user-agent": _USER_AGENT,
+                                                        "x-vh-cli": _VERSION}) as cli:
         r = await cli.get(url, params=params)
         if r.status_code >= 400:
             try:
@@ -259,7 +288,11 @@ async def _mint_token(api_base: str, slug: str, identity: str,
                 detail = ""
             if op_invite:
                 detail = detail.replace(op_invite, "***")
-            raise TokenMintError(r.status_code, detail)
+            try:
+                body = r.json() if r.status_code == 426 else None
+            except ValueError:
+                body = None
+            raise TokenMintError(r.status_code, detail, body if isinstance(body, dict) else None)
         return r.json()
 
 
@@ -535,6 +568,57 @@ async def _publish_say(room: rtc.Room, text: str, extra: dict,
     return {"ok": True, "seq": say.seq}
 
 
+async def _publish_visual(room, body: dict) -> dict:
+    """Shape for the ring: bridge -> POST /api/bridge/visual, WebRTC -> data channel
+    topic operator.visual. Same body either way."""
+    send_visual = getattr(room, "send_visual", None)
+    try:
+        if send_visual is not None:
+            await send_visual(body)
+            via = "bridge"
+        else:
+            data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            await room.local_participant.publish_data(data, reliable=True, topic=vvisual.TOPIC)
+            via = "datachannel"
+    except vtransport.BridgeError as e:
+        if e.status == 429:
+            return {"ok": False, "type": "rate_limited", "error": VISUAL_RATE_ERROR}
+        if e.status == 400:
+            return {"ok": False, "type": "invalid", "error": f"server rejected the shape: {e}"}
+        return {"ok": False, "type": "visual", "error": f"visual not sent: {e}"}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "type": "visual", "error": f"visual not sent: {e}"}
+    return {"ok": True, "type": "visual", "via": via, "shape": body["shape"]["type"]}
+
+
+VISUAL_RATE_ERROR = ("rate limit: at most one shape per 2 s per operator, "
+                     "nothing drawn; send it again in 2 s or skip it")
+
+
+SHOW_HELP = """\
+Draw a shape in the ring (Kringel) while you explain something by voice.
+
+When to draw: a sequence or loop (arrow_right, loop), a comparison (scale, split3),
+a structure (own polygon, multi with label), yes or no (check, cross), a count of
+one to three (one, two, three). When not: not with every sentence, at most every few
+turns, never instead of speaking. Your says stay whole, natural, phone-ready sentences.
+
+Coordinates 0..1, (0,0) top left. Max 200 points, path d max 2 KB, whole shape
+max 8 KB, multi max 4 items, label max 24 chars (no control chars, emoji, <>),
+hold 800..8000 ms. Invalid input: exit 2, nothing sent. At most one shape per 2 s
+per operator: faster gives {"type":"rate_limited"}, exit 1.
+
+Examples:
+  voicehook-agent show --preset check --emotion joy
+  voicehook-agent show --polygon "0.2,0.9 0.2,0.45 0.5,0.15 0.8,0.45 0.8,0.9" --label Haus
+  voicehook-agent show --label "Vorher, nachher" --json '{"type":"multi","items":[
+      {"type":"polygon","points":[[0.1,0.4],[0.3,0.4],[0.3,0.6],[0.1,0.6]]},
+      {"type":"path","d":"M0.38,0.5 L0.62,0.5"},
+      {"type":"polygon","points":[[0.7,0.25],[0.9,0.25],[0.9,0.75],[0.7,0.75]]}]}'
+  voicehook-agent say "Erst testen, dann ausrollen." --shape-preset arrow_right
+"""
+
+
 # 0.11.0 (multi-operator): append is the default; a running say is never cut (only own
 # operator.interrupt / --urgent). overwrite/revise replace only our OWN not-started says.
 _SAY_MODES = ("append", "overwrite", "revise")
@@ -557,6 +641,13 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         extra: dict = {"mode": mode}
         if req.get("urgent"):
             extra["priority"] = "urgent"
+        try:  # shape / emotion for the ring, checked again (stdin-free path, same rules)
+            if req.get("shape") is not None:
+                extra["shape"] = vvisual.validate_shape(req["shape"])
+            if req.get("emotion") is not None:
+                extra["emotion"] = vvisual.validate_emotion(req["emotion"])
+        except vvisual.VisualError as e:
+            return {"ok": False, "type": "invalid", "error": str(e)}
         nudge = ctl.clock.said(text=text)  # 0.9.0: progress said, board older -> hint
         room = await ctl.wait_room(10.0)
         if room is None:
@@ -565,6 +656,28 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         if res.get("ok"):
             ctl.say_status.sent(res["seq"], text)
         return {**res, **nudge} if res.get("ok") else res
+    if cmd == "visual":
+        ctl.watchdog.touch()
+        try:
+            shape = vvisual.validate_shape(req.get("shape"))
+            emo = req.get("emotion")
+            emo = vvisual.validate_emotion(emo) if emo is not None else None
+        except vvisual.VisualError as e:
+            return {"ok": False, "type": "invalid", "error": str(e)}
+        # the server draws one shape per 2 s per operator; the data channel drops the
+        # rest silently, so refuse here with the same message the bridge gives (429)
+        now = time.monotonic()
+        last = getattr(ctl, "visual_at", None)
+        if last is not None and now - last < vvisual.RATE_S:
+            return {"ok": False, "type": "rate_limited", "retry_after_s":
+                    round(vvisual.RATE_S - (now - last), 1), "error": VISUAL_RATE_ERROR}
+        room = await ctl.wait_room(10.0)
+        if room is None:
+            return {"ok": False, "error": "not connected to the room (yet)"}
+        res = await _publish_visual(room, vvisual.payload(shape, emo))
+        if res.get("ok"):
+            ctl.visual_at = now
+        return res
     if cmd == "board":
         ctl.watchdog.touch()
         board = req.get("board")
@@ -1037,6 +1150,79 @@ async def _stdin_publisher(
             await _handle_line(line)
 
 
+RC_RESTART = 75  # internal: _join left the call for a self-update, main() re-execs
+
+
+class _Updater:
+    """0.12.0 self-update state of one join (see selfupdate.py). `restart` + `identity`
+    tell main() to re-exec after _join has cleaned up."""
+
+    def __init__(self, opt_out: bool = False, *, env=None, runner=None) -> None:
+        self.env = os.environ if env is None else env
+        self.opt_out = vselfupdate.opted_out(opt_out, self.env)
+        self.restarted = vselfupdate.already_restarted(self.env)
+        self.runner = runner
+        self.tried = False
+        self.restart = False
+        self.identity: str | None = None
+
+    async def _upgrade(self) -> bool:
+        self.tried = True
+        cmd = vselfupdate.upgrade_command()
+        kw = {"runner": self.runner} if self.runner is not None else {}
+        return await asyncio.to_thread(vselfupdate.run_upgrade, cmd, **kw)
+
+    async def on_versions(self, info: dict, emit, *, check: bool) -> bool:
+        """After a successful join answer. True = updated, leave and restart now."""
+        vselfupdate.remember(info)
+        latest = info.get("cli_latest")
+        if not check:
+            return False
+        why = vselfupdate.decide(latest, _VERSION, opt_out=self.opt_out,
+                                 restarted=self.restarted or self.tried)
+        if why == "current":
+            return False
+        if why == "opt-out":
+            msg = (f"voicehook-agent {latest} available (this is {_VERSION}, self-update off): "
+                   "voicehook-agent self-update")
+            emit(msg)
+            print(f"[info] {msg}", file=sys.stderr, flush=True)
+            return False
+        if why == "restarted":
+            msg = (f"self-update ran, but this is still {_VERSION} (latest {latest}); "
+                   f"{vselfupdate.manual_hint()}")
+            emit(msg)
+            print(f"[warn] {msg}", file=sys.stderr, flush=True)
+            return False
+        emit(f"self-update: {_VERSION} -> {latest}, restarting the join afterwards")
+        print(f"[info] self-update: voicehook-agent {_VERSION} -> {latest} ...",
+              file=sys.stderr, flush=True)
+        if await self._upgrade():
+            self.restart = True
+            return True
+        emit(f"self-update failed, continuing with {_VERSION}")
+        print(f"[warn] continuing with voicehook-agent {_VERSION}", file=sys.stderr, flush=True)
+        return False
+
+    async def on_outdated(self, body: dict | None) -> bool:
+        """HTTP 426 (below cli_min). Prints the upgrade command, tries one self-update.
+        True = updated, restart now; False = exit 7."""
+        d = (body or {}).get("detail") if isinstance(body, dict) else None
+        d = d if isinstance(d, dict) else {}
+        vselfupdate.remember(d)
+        lo, hi = d.get("cli_min", "?"), d.get("cli_latest", "?")
+        print(f"[error] voicehook-agent {_VERSION} is too old for this server (min {lo}, "
+              f"latest {hi}).\n        Upgrade: {d.get('upgrade') or vselfupdate.UPGRADE_UV}\n"
+              f"        {vselfupdate.manual_hint()}", file=sys.stderr, flush=True)
+        if self.opt_out or self.restarted or self.tried:
+            return False
+        print("[info] trying a self-update ...", file=sys.stderr, flush=True)
+        if await self._upgrade():
+            self.restart = True
+            return True
+        return False
+
+
 async def _connect_and_listen(
     api_base: str,
     slug: str,
@@ -1064,6 +1250,8 @@ async def _connect_and_listen(
     connect_timeout: float = 45.0,
     username: str | None = None,
     voice: str | None = None,
+    updater: _Updater | None = None,
+    update_check: bool = False,
 ) -> tuple[int, str | None]:
     """One connect→listen cycle. Returns (rc, disconnect_reason_name).
     disconnect_reason_name is None for a clean stdin-driven quit; otherwise the
@@ -1079,6 +1267,10 @@ async def _connect_and_listen(
             tok = await _mint_token(api_base, slug, ident, name=agent_name, model=model,
                                     op_invite=invite, username=username, voice=voice)
         except TokenMintError as e:
+            if e.status == 426:  # 0.12.0: CLI below the server's cli_min
+                if updater is not None and await updater.on_outdated(e.body):
+                    return 0, "SELF_UPDATE"
+                return vselfupdate.EXIT_OUTDATED, "CLI_OUTDATED"
             if e.status == 410:  # 0.10.1: call ended / room gone -> never rejoin
                 print(f"[error] call ended ({e}), not joining", file=sys.stderr, flush=True)
                 return 5, "CALL_ENDED"
@@ -1096,6 +1288,10 @@ async def _connect_and_listen(
             # type only: the exception text can carry the request URL (op_invite)
             print(f"[error] token mint failed: {type(e).__name__}", file=sys.stderr)
             return 3, "TOKEN_MINT_FAILED"
+        if updater is not None and await updater.on_versions(
+                tok, lambda m: _print_event(json_mode, "system", m, topic="_meta"),
+                check=update_check):
+            return 0, "SELF_UPDATE"  # never connected: nothing to leave
         room = rtc.Room()
     stop = asyncio.Event()
     turn_event = asyncio.Event()  # set on finalized user-turn → graph re-sync
@@ -1253,6 +1449,10 @@ async def _connect_and_listen(
         else:
             await asyncio.wait_for(room.connect(tok["url"], tok["token"]), timeout=connect_timeout)
     except Exception as e:
+        if isinstance(e, vtransport.BridgeError) and e.status == 426:  # 0.12.0
+            if updater is not None and await updater.on_outdated(e.body):
+                return 0, "SELF_UPDATE"
+            return vselfupdate.EXIT_OUTDATED, "CLI_OUTDATED"
         if isinstance(e, vtransport.BridgeError) and e.status == 410:
             print("[error] call ended (bridge HTTP 410), not joining", file=sys.stderr, flush=True)
             return 5, "CALL_ENDED"
@@ -1265,6 +1465,16 @@ async def _connect_and_listen(
         except Exception:  # noqa: BLE001
             pass
         return 4, "CONNECT_FAILED"
+
+    if tok is None and updater is not None and await updater.on_versions(
+            {"cli_min": getattr(room, "cli_min", None),
+             "cli_latest": getattr(room, "cli_latest", None)},
+            lambda m: _print_event(json_mode, "system", m, topic="_meta"), check=update_check):
+        try:
+            await room.disconnect()  # bridge: leave silently (no goodbye), the restart rejoins
+        except Exception:  # noqa: BLE001, S110  (best effort, the server's guard ends it too)
+            pass
+        return 0, "SELF_UPDATE"
 
     _print_event(
         json_mode, "system",
@@ -1478,6 +1688,7 @@ async def _join(
     status_due: float | None = None,
     activity_due: float | None = None,
     stale_error: float | None = None,
+    updater: _Updater | None = None,
 ) -> int:
     missing = _missing_self_report(agent_name, model)
     if missing:
@@ -1498,6 +1709,9 @@ async def _join(
         name = re.sub(r"[^a-z0-9]", "", name)[:16] or "agent"
         identity = f"{name}-{host}-{os.urandom(2).hex()}"
     ident = identity
+    if updater is None:
+        updater = _Updater()
+    updater.identity = ident
 
     # Self-report → voice-friendly auto-greet. --name + --model are mandatory
     # (checked above) — never hardcode a brand.
@@ -1606,8 +1820,13 @@ async def _join(
                 strict=strict, agent_name=agent_name, model=model,
                 ctl=ctl, force_persona=force_persona,
                 transport=cur_transport, invite=invite, username=username,
-                voice=voice,
+                voice=voice, updater=updater, update_check=first,
             )
+            if reason == "SELF_UPDATE":  # 0.12.0: updated, main() restarts the join
+                rc = RC_RESTART
+                break
+            if reason == "CLI_OUTDATED":  # 0.12.0: 426 and no self-update -> exit 7
+                break
             if first and vtransport.should_fallback(transport, cur_transport, reason):
                 cur_transport = "bridge"
                 msg = ("webrtc connect failed or timed out; retrying once via the HTTPS "
@@ -1664,6 +1883,10 @@ async def _join(
                 break
     finally:
         ctl.quit.set()
+        if rc == RC_RESTART:  # a waiting `next` learns why, instead of "ended"
+            ctl.events.put_front_nowait({
+                "ok": True, "type": "restarting", "reason": "self_update",
+                "message": "voicehook-agent updated itself and rejoins the call: run next again"})
         for t in (idle_task, *guard_tasks):
             t.cancel()
             try:
@@ -1791,7 +2014,16 @@ def _client_request(args) -> dict:
         req = {"cmd": "say", "text": text.strip(), "mode": args.mode or SAY_DEFAULT_MODE}
         if getattr(args, "urgent", False):
             req["urgent"] = True
+        req.update(vvisual.say_fields(getattr(args, "shape_preset", None),
+                                      getattr(args, "shape_json", None),
+                                      getattr(args, "emotion", None)))
         return req
+    if args.cmd == "show":
+        shape = vvisual.shape_from_args(
+            presets=args.preset, polygons=args.polygon, paths=args.path,
+            json_text=args.json, open_=args.open, label=args.label, hold_ms=args.hold_ms)
+        emo = vvisual.parse_emotion_arg(args.emotion)
+        return {"cmd": "visual", **vvisual.payload(shape, emo)}
     if args.cmd == "next":
         return {"cmd": "next", "timeout": args.timeout}
     if args.cmd == "says":
@@ -1842,6 +2074,11 @@ def _run_client(args) -> int:
     next timeout), 1 = request failed, 3 = no running join / join ended."""
     try:
         req = _client_request(args)
+    except vvisual.VisualError as e:  # bad shape/emotion: nothing sent, exit 2
+        print(json.dumps({"ok": False, "type": "invalid", "error": str(e)}, ensure_ascii=False),
+              flush=True)
+        print(f"[error] {e}", file=sys.stderr, flush=True)
+        return 2
     except (OSError, ValueError) as e:
         print(json.dumps({"ok": False, "type": "error", "error": str(e)}, ensure_ascii=False), flush=True)
         return 1
@@ -1863,10 +2100,36 @@ def _run_client(args) -> int:
     return 0 if reply.get("ok") else 1
 
 
+def _run_self_update(dry_run: bool = False, runner=None) -> int:
+    """`voicehook-agent self-update`: run the upgrade for this install now."""
+    cmd = vselfupdate.upgrade_command()
+    print(f"voicehook-agent {_VERSION}, install via {vselfupdate.install_method()}: "
+          f"{' '.join(cmd) if cmd else '(no updater found)'}", flush=True)
+    if dry_run:
+        return 0
+    kw = {"runner": runner} if runner is not None else {}
+    if not vselfupdate.run_upgrade(cmd, **kw):
+        return 1
+    print("updated; the next `voicehook-agent --version` shows the new version", flush=True)
+    return 0
+
+
+def _restart_after_update(argv: list[str] | None, updater: _Updater, execve=None) -> None:
+    """Re-exec the join with the same arguments (+ same identity) on the updated CLI."""
+    full = sys.argv if argv is None else ["voicehook-agent", *argv]
+    print("[info] self-update done, restarting the join ...", file=sys.stderr, flush=True)
+    try:
+        kw = {"execve": execve} if execve is not None else {}
+        vselfupdate.restart(full, _VERSION, identity=updater.identity, **kw)
+    except OSError as e:
+        print(f"[error] restart after self-update failed ({e!r}); run the join again",
+              file=sys.stderr, flush=True)
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="voicehook-agent", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--version", action="version", version=f"voicehook-agent {_VERSION}")
+    ap.add_argument("--version", action="version", version=vselfupdate.version_text(_VERSION))
     sub = ap.add_subparsers(dest="cmd", required=True)
     p_join = sub.add_parser(
         "join", help="join a voicehook.ai call as an agent",
@@ -1978,14 +2241,25 @@ def main(argv: list[str] | None = None) -> None:
         "--no-control", action="store_true", default=False,
         help="do not open the local control socket (disables say/next/leave/status).",
     )
+    p_join.add_argument(
+        "--no-self-update", action="store_true", default=False,
+        help=f"0.12.0: do not update this CLI when the server names a newer cli_latest (env "
+             f"{vselfupdate.ENV_OPT_OUT}=1). Default: update in place and restart the join once.",
+    )
     # one-shot commands against a running join
     def _add_session(p):
         p.add_argument("--session", default=None, metavar="SLUG",
                        help="<slug>/<identity> of the running join (a slug alone is enough when only one join runs in that room); needed only when several joins run.")
         p.add_argument("--wait", type=float, default=30.0, metavar="SEC",
                        help="wait up to SEC seconds for the join to come up (default 30).")
-    p_say = sub.add_parser("say", help="speak one line through voice-ai in the running join")
-    p_say.add_argument("text", nargs="+", help="text to speak ('-' reads it from stdin)")
+    p_say = sub.add_parser(
+        "say", help="speak one line through voice-ai in the running join",
+        description="Text wird vorgelesen: ganze, natürliche Sätze. The text is read aloud on the "
+                    "phone: speak whole, natural sentences, 1-2 short ones, most important first. Local "
+                    "style modes (terse, caveman, telegram style) do not apply here; no markdown, lists, "
+                    "URLs, code or emoji.")
+    p_say.add_argument("text", nargs="+",
+                       help="text to speak, read aloud as is: ganze, natürliche Sätze ('-' reads it from stdin)")
     p_say.add_argument("--mode", choices=_SAY_MODES, default=SAY_DEFAULT_MODE,
                        help="append (default): queue at the end, starts right after the running say "
                             "(a running say is never cut). overwrite: replace your OWN not-started (queued) "
@@ -1995,6 +2269,14 @@ def main(argv: list[str] | None = None) -> None:
     p_say.add_argument("--urgent", action="store_true", default=False,
                        help="priority urgent: interrupt whoever is speaking (Delta or another operator) "
                             "and go first. Use sparingly.")
+    p_say.add_argument("--shape-preset", default=None, metavar="NAME", choices=vvisual.PRESETS,
+                       help="draw this preset in the ring while the say is spoken (field shape): "
+                            + " ".join(vvisual.PRESETS))
+    p_say.add_argument("--shape-json", default=None, metavar="JSON",
+                       help="full shape for the say (preset/polygon/path/multi, see `show --help`)")
+    p_say.add_argument("--emotion", default=None, metavar="LABEL",
+                       help="tint of the ring for this say: " + " ".join(vvisual.EMOTIONS)
+                            + " (or JSON {label, valence, arousal})")
     _add_session(p_say)
     p_next = sub.add_parser("next", help="block until the next finalized user turn (or operator.revise); prints one JSON line")
     p_next.add_argument("--timeout", type=float, default=60.0, metavar="SEC",
@@ -2002,7 +2284,7 @@ def main(argv: list[str] | None = None) -> None:
     _add_session(p_next)
     p_says = sub.add_parser(
         "says", help="last state of your own says (operator.say_status from the voicebot: "
-        "sent/queued/spoken/interrupted/requeued/replaced) as JSON")
+        "sent/queued/spoken/interrupted/requeued/replaced/covered) as JSON")
     _add_session(p_says)
     p_leave = sub.add_parser("leave", help="end the running join cleanly")
     p_leave.add_argument("--say", default=None, metavar="TEXT", help="goodbye line spoken before leaving")
@@ -2022,6 +2304,29 @@ def main(argv: list[str] | None = None) -> None:
     p_status.add_argument("-f", "--file", default=None, metavar="JSON",
                           help="board file {doing, open[], done[]}; flags add to it")
     _add_session(p_status)
+    p_show = sub.add_parser(
+        "show", help="draw a shape in the ring (operator.visual): preset, polygon, path or multi",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=SHOW_HELP)
+    p_show.add_argument("--preset", action="append", default=[], metavar="NAME",
+                        choices=vvisual.PRESETS, help="preset shape (repeatable): "
+                        + " ".join(vvisual.PRESETS))
+    p_show.add_argument("--polygon", action="append", default=[], metavar="'x,y x,y ...'",
+                        help="own polygon, points 0..1 (0,0 = top left), closed (repeatable)")
+    p_show.add_argument("--open", action="store_true", default=False,
+                        help="--polygon is an open line, not closed")
+    p_show.add_argument("--path", action="append", default=[], metavar="D",
+                        help="SVG path, only M L Q C Z, numbers 0..1 (repeatable)")
+    p_show.add_argument("--json", default=None, metavar="SHAPE",
+                        help="full shape JSON (not combinable with --preset/--polygon/--path)")
+    p_show.add_argument("--label", default=None, metavar="TEXT",
+                        help=f"short caption, max {vvisual.LABEL_MAX} chars")
+    p_show.add_argument("--hold-ms", type=int, default=None, metavar="N",
+                        help=f"how long the shape stays, {vvisual.HOLD_MS_MIN}..{vvisual.HOLD_MS_MAX} ms "
+                             "(default: server)")
+    p_show.add_argument("--emotion", default=None, metavar="LABEL",
+                        help="tint of the ring: " + " ".join(vvisual.EMOTIONS))
+    _add_session(p_show)
     # log-summary: the 2nd micro agent (digests the call log into operator.graph)
     p_sum = sub.add_parser("log-summary", help="watch a call log and emit operator.graph digests")
     p_sum.add_argument("log", help="path to the CLI's --json transcript log (JSONL)")
@@ -2044,6 +2349,9 @@ def main(argv: list[str] | None = None) -> None:
                        help="process existing log content too (default: tail from end).")
     # 0.10.0 activity feed (Claude Code PostToolUse hook); the fast path without the
     # livekit import is the `voicehook-agent-hook` console script.
+    p_su = sub.add_parser("self-update", help="update this CLI now (uv tool upgrade, else pip --upgrade)")
+    p_su.add_argument("--dry-run", action="store_true", default=False,
+                      help="only print the command that would run")
     p_hook = sub.add_parser("hook", help="activity feed: Claude Code PreToolUse + PostToolUse hooks (pre-tool-use | post-tool-use | print | install [--settings PATH])")
     p_hook.add_argument("action", choices=["pre-tool-use", "post-tool-use", "print", "install"])
     p_hook.add_argument("--settings", default=None, metavar="PATH",
@@ -2069,6 +2377,8 @@ def main(argv: list[str] | None = None) -> None:
     args = ap.parse_args(argv)
     if args.cmd == "bridge-session":
         sys.exit(_run_bridge_session(args))
+    if args.cmd == "self-update":
+        sys.exit(_run_self_update(args.dry_run))
     if args.cmd == "hook":
         hook_argv = [args.action] + (["--settings", args.settings] if args.settings else [])
         sys.exit(vactivity.main(hook_argv))
@@ -2082,6 +2392,7 @@ def main(argv: list[str] | None = None) -> None:
         except OSError as e:
             print(f"[error] could not read --persona-file: {e!r}", file=sys.stderr)
             sys.exit(2)
+        updater = _Updater(args.no_self_update)
         try:
             rc = asyncio.run(_join(
                 args.invite_url, args.identity, args.name, args.json, persona_text,
@@ -2098,12 +2409,17 @@ def main(argv: list[str] | None = None) -> None:
                 force_persona=args.force_persona, control=not args.no_control,
                 transport=args.transport, status_due=args.status_due,
                 activity_due=args.activity_due, stale_error=args.stale_error,
-                voice=args.voice,
+                voice=args.voice, updater=updater,
             ))
         except KeyboardInterrupt:
             rc = 130
+        if rc == RC_RESTART:
+            _restart_after_update(argv, updater)
+            rc = 1  # only reached when the exec failed
         sys.exit(rc)
     if args.cmd in ("say", "next", "says", "leave", "status", "activity"):
+        sys.exit(_run_client(args))
+    if args.cmd == "show":
         sys.exit(_run_client(args))
     if args.cmd == "log-summary":
         try:
