@@ -488,6 +488,61 @@ def mentions_progress(text: str) -> bool:
 def board_is_empty(board: dict | None) -> bool:
     b = board or {}
     return not (str(b.get("doing") or "").strip() or b.get("open") or b.get("done"))
+WORK_WINDOW_S = 300.0      # 0.13.0: said/board within this window counts as working
+# 0.13.0 stale_error: on EVERY `next` while the operator is active and board/log are old
+STALE_ERROR_S = 60.0
+STALE_ERROR_ENV = "VOICEHOOK_STALE_ERROR_S"
+STALE_STATUS_CMD = 'voicehook-agent status --doing "…"'
+STALE_ACTIVITY_CMD = 'voicehook-agent activity "…"'
+
+
+def stale_error_seconds(value: float | str | None = None) -> float:
+    """Threshold for stale_error: explicit value (--stale-error), else
+    $VOICEHOOK_STALE_ERROR_S, else STALE_ERROR_S. 0 or less switches it off."""
+    for v in (value, os.environ.get(STALE_ERROR_ENV)):
+        if v is None or v == "":
+            continue
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            continue
+    return STALE_ERROR_S
+
+
+def human_age(seconds: float) -> str:
+    """German, readable: "45 s", "1 Min 35 s" (below 3 min), "3 Min", "1 Std 5 Min"."""
+    s = max(0, int(seconds))
+    if s < 60:
+        return f"{s} s"
+    if s < 180:
+        m, r = divmod(s, 60)
+        return f"{m} Min {r} s" if r else f"{m} Min"
+    if s < 3600:
+        return f"{s // 60} Min"
+    h, m = s // 3600, (s % 3600) // 60
+    return f"{h} Std {m} Min" if m else f"{h} Std"
+
+
+def stale_error_payload(status_age: float | None, activity_age: float | None) -> dict:
+    """{"status_age_s", "activity_age_s", "message"} (same shape as the server's bridge
+    `next`): an age is null when that part is fresh, the message names only what is
+    overdue; {} when nothing is."""
+    out: dict = {"status_age_s": None if status_age is None else int(status_age),
+                 "activity_age_s": None if activity_age is None else int(activity_age)}
+    if status_age is not None and activity_age is not None:
+        msg = (f"FEHLER: Statusboard seit {human_age(status_age)} nicht aktualisiert, "
+               f"Aktivitätslog seit {human_age(activity_age)}. "
+               f"Jetzt: {STALE_STATUS_CMD} und {STALE_ACTIVITY_CMD}")
+    elif status_age is not None:
+        msg = (f"FEHLER: Statusboard seit {human_age(status_age)} nicht aktualisiert. "
+               f"Jetzt: {STALE_STATUS_CMD}")
+    elif activity_age is not None:
+        msg = (f"FEHLER: Aktivitätslog seit {human_age(activity_age)} nicht aktualisiert. "
+               f"Jetzt: {STALE_ACTIVITY_CMD}")
+    else:
+        return {}
+    out["message"] = msg
+    return out
 LATENCY_WARN_S = 8.0       # user turn delivered by `next` -> next `say` slower -> latency_warning
 LATENCY_HINT = "delegate slow work, keep main loop free"
 
@@ -555,6 +610,7 @@ class TurnClock:
 
     def __init__(self, now: float | None = None, due_s: float | None = None) -> None:
         t = time.monotonic() if now is None else now
+        self.joined_at = t
         self.delivered_at: float | None = None
         self.board_at = t          # join counts as the start
         self.user_at: float | None = None
@@ -564,6 +620,7 @@ class TurnClock:
         self.board_set_at: float | None = None   # last real `status` push (None = never)
         self.board_empty = True
         self.board_live = False                  # doing or open set = work in progress
+        self.board_doing = ""                    # 0.13.0 board_now
         self.request_at: float | None = None     # open status_request
         self.said_at: float | None = None
 
@@ -602,6 +659,7 @@ class TurnClock:
         self.board_set_at = t
         self.board_empty = board_is_empty(board)
         b = board or {}
+        self.board_doing = str(b.get("doing") or "").strip()
         self.board_live = bool(str(b.get("doing") or "").strip() or b.get("open"))
         self.request_at = None
 
@@ -633,6 +691,37 @@ class TurnClock:
 
     def user(self, now: float | None = None) -> None:
         self.user_at = self._t(now)
+
+    def working(self, now: float | None = None, window: float = WORK_WINDOW_S) -> bool:
+        """0.13.0 (activity_due): work in progress = doing/open set on the board, or
+        the agent said something / sent a board within the last `window` s."""
+        t = self._t(now)
+        if self.board_live:
+            return True
+        return any(at is not None and t - at <= window
+                   for at in (self.said_at, self.board_set_at))
+
+    def active(self, now: float | None = None, stale_s: float = STALE_ERROR_S) -> bool:
+        """0.13.0 (stale_error): doing/open set, OR a say in the last WORK_WINDOW_S,
+        OR no board yet and the join is older than stale_s. A finished/empty board
+        without a recent say is idle: no forced idle updates."""
+        t = self._t(now)
+        if self.board_live:
+            return True
+        if self.said_at is not None and t - self.said_at <= WORK_WINDOW_S:
+            return True
+        return self.board_set_at is None and t - self.joined_at > stale_s
+
+    def board_now(self, now: float | None = None) -> dict | None:
+        """0.13.0: {doing, age_s} of the last board Delta has, None before the first."""
+        if self.board_set_at is None:
+            return None
+        return {"doing": self.board_doing, "age_s": round(self._t(now) - self.board_set_at, 1)}
+
+    def status_age(self, now: float | None = None) -> float:
+        """Seconds since the last board (since the join when none was sent)."""
+        ref = self.board_set_at if self.board_set_at is not None else self.joined_at
+        return self._t(now) - ref
 
     def hints(self, now: float | None = None) -> dict:
         t = self._t(now)

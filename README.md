@@ -208,10 +208,11 @@ Newer voicehook servers (v4, Oct 2026) also strip leftover markdown, backticks, 
 
 ## Activity feed (operator.activity, 0.10.0)
 
-Delta knows what the coding agent is doing in the background, without asking. A Claude
-Code `PostToolUse` hook writes ONE short line per tool call into `activity.log` of the
-running join's session dir; the join publishes the newest 15 lines (oldest first) as
-`operator.activity` `{"lines": ["17:12:03 Bash: Tests laufen lassen", "17:12:09 Edit"],
+Delta knows what the coding agent is doing in the background, without asking. Claude
+Code hooks write ONE short line per tool call into `activity.log` of the running join's
+session dir (0.13.0: `PreToolUse` writes it when the tool starts, `PostToolUse` only for
+a call Pre did not log); the join publishes the newest 15 lines (oldest first) as
+`operator.activity` `{"lines": ["17:12:03 Bash: Tests laufen lassen", "17:12:09 Edit: relay.py"],
 "ts": 1759418000.0}`, only on change and at most once per 5 s (a change inside the
 window goes out when it ends, last one wins).
 
@@ -224,19 +225,28 @@ voicehook-agent hook print                # the snippet, to paste by hand
 ```
 
 ```json
-{"hooks": {"PostToolUse": [{"matcher": "*", "hooks": [
-  {"type": "command", "command": "voicehook-agent-hook post-tool-use", "timeout": 5}]}]}}
+{"hooks": {
+  "PreToolUse": [{"matcher": "*", "hooks": [
+    {"type": "command", "command": "voicehook-agent-hook pre-tool-use || true", "timeout": 5}]}],
+  "PostToolUse": [{"matcher": "*", "hooks": [
+    {"type": "command", "command": "voicehook-agent-hook post-tool-use", "timeout": 5}]}]}}
 ```
 
 `voicehook-agent-hook` is a light console script (no livekit import, starts fast);
-`voicehook-agent hook post-tool-use` does the same. The hook always exits 0 and prints
-nothing.
+`voicehook-agent hook pre-tool-use|post-tool-use` does the same. The hook always exits 0
+and prints nothing (`|| true`: a PreToolUse hook exiting 2 would block the tool, and an
+older `voicehook-agent-hook` < 0.13 exits 2 on the unknown `pre-tool-use`). 0.13.0:
+`hook install` on an older Post-only install adds the Pre hook, idempotently. Pre and
+Post log the same call once (dedupe by `tool_use_id`, kept in `activity.ids` next to the
+log, never published).
 
 - **A line contains:** local time, the tool name (`[A-Za-z0-9_.:-]`, max 40) and the
-  tool's own `description` if it has one (Bash, Agent/Task), max 120 chars:
-  `HH:MM:SS Tool: description` or `HH:MM:SS Tool`.
-- **A line never contains:** command text, arguments, file paths, file contents or
-  tool output. The description runs through a secret scrubber (API keys like `sk_`,
+  tool's own `description` if it has one (Bash, Agent/Task), max 120 chars, taken 1:1
+  (Claude Code writes 3-8 words anyway); file tools without one (Read, Edit, Write,
+  MultiEdit, NotebookEdit) log the file's basename (0.13.0); Grep/Glob and others only
+  the tool name: `HH:MM:SS Tool: description`, `HH:MM:SS Read: relay.py` or `HH:MM:SS Tool`.
+- **A line never contains:** command text, arguments, full paths, search patterns, file
+  contents or tool output. The description runs through a secret scrubber (API keys like `sk_`,
   `rk_`, `re_`, `whsec_`, `vhw_`, `ghp_`, `github_pat_`, `xox?-`, `AKIA`, `AIza`,
   `Bearer ...`, JWTs, `key=`/`token=`/`password=`/`secret=` values, long base64/hex
   strings become `[redacted]`); the join scrubs again before publishing.
@@ -244,6 +254,63 @@ nothing.
   join on this machine. With zero or several live joins nothing is written, so one
   Claude session never leaks into another call. The file is cleared when a join starts
   and ends, mode 0600, trimmed to the last 50 lines above 200.
+
+### Aktivitätslog: keep it filled (activity_due, 0.13.0)
+
+Why: in speech pauses Delta reads only fresh entries (younger than 60 s) aloud, "what is
+happening right now". An empty or old log means Delta has nothing to say.
+
+- **Claude Code (recommended):** `voicehook-agent hook install` once. Every tool call logs
+  its own short description 1:1 when it starts; nothing else to do.
+- **Agents without hooks** (any other LLM agent): send your own short status line 1:1,
+  3-8 words, do not rephrase it:
+
+  ```bash
+  voicehook-agent activity "Running database migrations"
+  # {"ok": true, "type": "activity", "line": "17:14:02 note: Running database migrations"}
+  ```
+
+  The running join appends `HH:MM:SS note: <text>` to its `activity.log` (same scrubber,
+  max 120 chars; no paths, secrets or personal data). `--session` / `--wait` as for `say`;
+  exit 3 = no running join, 1 = empty text.
+- **`next` reminds you:** while work is in progress (`doing`/`open` set on the board, or you
+  spoke / sent a board in the last 5 min) and no new line came for `--activity-due SEC`
+  (default 60, env `VOICEHOOK_ACTIVITY_DUE`, 0 = off), `next` adds:
+
+  ```json
+  {"ok": true, "type": "timeout", "pending": 0, "activity_due": true, "activity_age_s": 61.0,
+   "activity_hint": "Aktivitätslog still, während du arbeitest: ... voicehook-agent activity \"<3-8 Wörter>\" ..."}
+  ```
+
+  Silent while hook lines arrive (any hook line in the last 10 min); at most one hint per
+  SEC. Its own key `activity_hint`, so a `status_due` `hint` in the same reply stays intact.
+- **Automatic flow:** `join` writes a pointer `~/.voicehook/joins/<pid>.json` (0600), so the hook
+  finds the join even when it runs with its own `VOICEHOOK_AGENT_HOME` (Quickstart B wrapper);
+  several live joins still mean nothing is written. For a curl bridge join (Quickstart A)
+  `voicehook-agent bridge-session --save join.json --base https://voicehook.ai` (or the
+  Quickstart's own line) stores only `{base, session}` in `~/.voicehook/bridge-session.json`
+  (0600; `--clear`, leave/ended and an HTTP 401/404/410 remove it). The hook then POSTs the tool's
+  description to `<base>/api/bridge/activity` `{"text"}` with the bridge Bearer token: 2 s
+  timeout, never blocking (exit 0), at most one POST per 5 s, the latest line wins (a detached
+  flusher sends it when the window ends). `VOICEHOOK_STATE_DIR` moves `~/.voicehook`.
+- **`activity_now` / `board_now`:** every `next` shows what Delta currently knows about you:
+  `"activity_now": {"text": "Bash: Sending deploy to JEV", "age_s": 12.0}` (newest line last
+  published as `operator.activity`, without its time) and `"board_now": {"doing": "...", "age_s": 12.0}`;
+  `null` before the first.
+- **`stale_error` (no rate limit):** while you are active (`doing`/`open` set, a `say` in the
+  last 5 min, or no board yet and the join older than SEC) and your board or your log is
+  older than `--stale-error SEC` (default 60, env `VOICEHOOK_STALE_ERROR_S`, 0 = off), EVERY
+  `next` carries:
+
+  ```json
+  "stale_error": {"status_age_s": 187, "activity_age_s": 95, "message": "FEHLER: Statusboard seit 3 Min nicht aktualisiert, Aktivitätslog seit 1 Min 35 s. Jetzt: voicehook-agent status --doing \"…\" und voicehook-agent activity \"…\""}
+  ```
+
+  An age is `null` when that part is fresh and the message names only what is overdue (same
+  shape as the server's bridge `next`); never set = age since the join; while hook lines arrive only
+  the board counts. A finished/empty board without a `say` for 5 min stays silent. Plain
+  (non `--json`) join output prints `!! stale: <message>` after every user turn.
+  `status_due`/`activity_due` stay unchanged.
 
 ## Shapes in the ring (`show`)
 
@@ -399,7 +466,7 @@ stdin (JSONL):
 | `operator.inject`     | out       | force voice-ai to react (user-role)    |
 | `operator.backchannel`| out       | silent operator↔agent side-channel, relayed as-is (#10) |
 | `operator.status`     | out       | your status board `{doing, open[], done[], faq?[{q, a}]}` (0.7.0, `status` command; `faq` 0.10.0); replaces the last one, never spoken |
-| `operator.activity`   | room      | 0.10.0: `{lines[], ts}`, newest 15 tool-call lines of the coding agent (PostToolUse hook), on change, at most every 5 s |
+| `operator.activity`   | room      | 0.10.0: `{lines[], ts}`, newest 15 tool-call lines of the coding agent (Pre/PostToolUse hook, 0.13.0 also `voicehook-agent activity` notes), on change, at most every 5 s |
 | `operator.alive`     | room      | 0.8.0: `{alive, ts, idle_s}` every 10 s while the agent serves `next`/`say` (within 15 s); nothing while orphaned; `alive:false` on leave. The web UI dims the operator after ~20 s without it |
 | `operator.say_status` | in    | 0.9.0: `{seq, state, spoken_chars}` per state change of your say; `next` carries `say_status`, `says` the table |
 | `operator.status_request` | in    | the user asked what you are doing; `next` yields `{"type":"status_request"}` |
@@ -426,6 +493,8 @@ Hardening flags (0.2.0) for unattended / background relay operation:
 | `--force-persona` | 0.5.0 | Push persona/mode/graph even if another operator agent is in the room. |
 | `--username <name>` | 0.9.0 | The user's first name: in the greeting and, since 0.9.0, sent to the server (token `username=`, bridge join `username`) as participant attribute `vh.user`, so the voicebot knows whom it talks to. |
 | `--status-due <sec>` | 0.9.0 | `next` adds `status_due` + `hint` once the board is older than `<sec>` while work is in progress (default 45, env `VOICEHOOK_STATUS_DUE`, 0 = age rule off). |
+| `--activity-due <sec>` | 0.13.0 | `next` adds `activity_due` + `activity_age_s` + `activity_hint` once no new `activity.log` line came for `<sec>` while work is in progress (default 60, env `VOICEHOOK_ACTIVITY_DUE`, 0 = off); silent while hook lines arrive. |
+| `--stale-error <sec>` | 0.13.0 | `next` adds `stale_error` `{status_age_s?, activity_age_s?, message}` on every output while you are active and board or activity log are older than `<sec>` (default 60, env `VOICEHOOK_STALE_ERROR_S`, 0 = off). |
 | `--no-control` | 0.5.0 | No local control socket (`say`/`next`/`leave`/`status` off). |
 | `--no-self-update` | 0.12.0 | Do not update when the server names a newer `cli_latest` (see Self-update). HTTP 426 then exits 7 with the upgrade command. |
 | `--transport auto\|webrtc\|bridge` | 0.6.0 | How to reach the room. `auto` (default): WebRTC; the HTTPS bridge when `HTTPS_PROXY`/`ALL_PROXY` is set or the WebRTC connect fails/times out (one retry, logged). See below. |

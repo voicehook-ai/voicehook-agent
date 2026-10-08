@@ -116,8 +116,8 @@ def test_edit_line_has_no_path_and_no_content(home):
         "file_path": "/home/x/secret-project/app.py", "old_string": "a = 1", "new_string": "a = 2"},
         tool_response={"filePath": "/home/x/secret-project/app.py"}))
     (line,) = _lines(d)
-    assert LINE_RX.match(line) and line.endswith(" Edit")
-    for leak in ("/home", "app.py", "secret-project", "a = 1", "a = 2"):
+    assert LINE_RX.match(line) and line.endswith(" Edit: app.py")   # 0.13.0: basename only
+    for leak in ("/home", "secret-project", "a = 1", "a = 2"):
         assert leak not in line
 
 
@@ -214,8 +214,11 @@ def test_hook_cli_exit_0_and_silent_stdout(home, tmp_path):
 
 # ----- installer ----------------------------------------------------------------------
 def test_snippet_shape():
-    assert activity.snippet() == {"hooks": {"PostToolUse": [{"matcher": "*", "hooks": [
-        {"type": "command", "command": "voicehook-agent-hook post-tool-use", "timeout": 5}]}]}}
+    assert activity.snippet() == {"hooks": {
+        "PreToolUse": [{"matcher": "*", "hooks": [
+            {"type": "command", "command": "voicehook-agent-hook pre-tool-use || true", "timeout": 5}]}],
+        "PostToolUse": [{"matcher": "*", "hooks": [
+            {"type": "command", "command": "voicehook-agent-hook post-tool-use", "timeout": 5}]}]}}
 
 
 def test_install_idempotent_keeps_other_keys(tmp_path):
