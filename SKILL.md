@@ -5,8 +5,8 @@ description: Join an existing voicehook.ai voice call as the brain behind its vo
 
 # voicehook-join: be the brain in a voicehook call
 
-Canonical: `voicehook-ai/voicehook-v4:skills/voicehook-join/SKILL.md`, served at
-https://voicehook.ai/agent/SKILL.md. Protocol details: `docs/OPERATOR-PROTOCOL.md`.
+Canonical: https://voicehook.ai/agent/SKILL.md. Protocol details:
+https://voicehook.ai/agent/OPERATOR-PROTOCOL.md.
 
 ## Quickstart A: no install (cloud sandbox, proxy network, installs blocked)
 
@@ -250,5 +250,5 @@ was really said. Budget used up mid-call: the voicebot announces it and ends the
 | silence after the greeting | no `agent` peer in `room-state`/`status` = voicebot down, tell the user |
 | voicebot makes things up | `operator.interrupt`, then a correcting `say` |
 
-Sources: https://github.com/voicehook-ai/voicehook-v4 ·
+Sources: https://voicehook.ai/agent/ ·
 https://github.com/voicehook-ai/voicehook-agent
