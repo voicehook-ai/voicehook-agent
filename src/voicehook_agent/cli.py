@@ -77,11 +77,29 @@ Several operators (0.11.0): one shared say queue for all agents in the call.
                                      lines carry speaker (display name) + op (identity)
 
 Activity feed (0.10.0): Delta sees what you are doing, one line per tool call.
-    hook install [--settings PATH]   add the Claude Code PostToolUse hook to settings.json
+    hook install [--settings PATH]   add the Claude Code PreToolUse + PostToolUse hooks to
+                                     settings.json (0.13.0: idempotent, adds Pre to an
+                                     older Post-only install)
     hook print                       print the settings.json snippet
-    hook post-tool-use               the hook itself (fast path: voicehook-agent-hook)
+    hook pre-tool-use|post-tool-use  the hooks themselves (fast path: voicehook-agent-hook)
                                      join publishes the newest 15 lines as operator.activity
                                      {lines, ts}, on change, at most every 5 s.
+
+Activity log (0.13.0): keep it filled, Delta reads it in speech pauses.
+    Delta only reads lines younger than 60 s ("what is happening right now"). Claude
+    Code: run `voicehook-agent hook install` once (recommended): every tool call logs its
+    own short description 1:1 when it starts (PreToolUse), file tools log the basename,
+    never a path. Agents without hooks:
+    voicehook-agent activity "<3-8 words>"
+                                     append `HH:MM:SS note: <text>` to activity.log of the
+                                     running join (scrubbed, capped at 120 chars); send
+                                     your own short status line 1:1, do not rephrase
+    next                             adds activity_due:true + activity_age_s +
+                                     activity_hint when work is in progress (doing/open
+                                     set, or you spoke / sent a board in the last 5 min)
+                                     and no new line came for --activity-due SEC (default
+                                     60, env VOICEHOOK_ACTIVITY_DUE, 0 = off). Silent while
+                                     hook lines arrive; at most one hint per SEC.
 """
 from __future__ import annotations
 
@@ -443,6 +461,9 @@ class _Control:
         self.activity_window = vactivity.PUBLISH_WINDOW
         self.activity_lines = vactivity.PUBLISH_LINES
         self.activity_clock = time.monotonic
+        # 0.13.0 activity_due: remind the agent when the log stays silent while it works
+        self.activity_due = vactivity.ActivityDue(due_s=vactivity.activity_due_seconds())
+        self.activity_path: Path | None = None
         self.leaving = False
         # 0.10.1: no-human guard. Starts at join (nobody seen yet), stops while a
         # human is in the room, restarts when the last one leaves. Spans reconnects.
@@ -503,7 +524,7 @@ SAY_DEFAULT_MODE = "append"
 
 
 async def _control_handler(ctl: _Control, req: dict) -> dict:
-    """One request from `voicehook-agent say|next|leave|status`."""
+    """One request from `voicehook-agent say|next|leave|status|activity`."""
     cmd = req.get("cmd")
     if cmd == "say":
         ctl.watchdog.touch()
@@ -556,6 +577,7 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         if ev is None or ev.get("type") != "ended":
             hints.update(ctl.agent_said.take())
             hints.update(ctl.say_status.take())
+            hints.update(_activity_hints(ctl))
         if ev is None:
             return {"ok": True, "type": "timeout", "pending": 0, **hints}
         if ev.get("type") == "user":
@@ -574,6 +596,19 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
                 print(f"[error] leave say failed: {e!r}", file=sys.stderr, flush=True)
         ctl.quit.set()
         return {"ok": True, "type": "leaving"}
+    if cmd == "activity":
+        # 0.13.0: manual line for agents without the hook; the join owns the log
+        try:
+            line = vactivity.note_line(str(req.get("text") or ""))
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        if ctl.activity_path is None:
+            return {"ok": False, "error": "activity log not available in this join"}
+        try:
+            vactivity.append_line(ctl.activity_path.parent, line)
+        except OSError as e:
+            return {"ok": False, "error": f"activity log not writable: {e!r}"}
+        return {"ok": True, "type": "activity", "line": line}
     if cmd == "says":
         return {"ok": True, "type": "says", "says": ctl.say_status.table(),
                 **({"say_hint": h} if (h := ctl.say_status.stuck()) else {})}
@@ -632,6 +667,18 @@ async def _alive_loop(ctl: _Control) -> None:
             pass
 
 
+def _activity_hints(ctl: _Control) -> dict:
+    """0.13.0: activity_due keys for `next` (never raises)."""
+    try:
+        now = ctl.activity_clock()
+        if ctl.activity_path is not None:
+            ctl.activity_due.observe(vactivity.read_tail(ctl.activity_path, ctl.activity_lines), now)
+        return ctl.activity_due.check(now, ctl.clock.working())
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] activity_due: {e!r}", file=sys.stderr, flush=True)
+        return {}
+
+
 async def _publish_activity(ctl: _Control, lines: list[str]) -> bool:
     """One `operator.activity` packet {lines, ts}; best effort (never raises)."""
     room = ctl.room
@@ -659,6 +706,7 @@ async def _activity_loop(ctl: _Control, path: Path) -> None:
             pub.window = ctl.activity_window
             lines = vactivity.read_tail(path, ctl.activity_lines)
             now = ctl.activity_clock()
+            ctl.activity_due.observe(lines, now)  # 0.13.0 activity_due
             if ctl.room is not None and not ctl.leaving and pub.due(lines, now):
                 if await _publish_activity(ctl, lines):
                     pub.sent(lines, now)
@@ -1363,6 +1411,7 @@ async def _join(
     transport: str = "auto",
     voice: str | None = None,
     status_due: float | None = None,
+    activity_due: float | None = None,
 ) -> int:
     missing = _missing_self_report(agent_name, model)
     if missing:
@@ -1422,6 +1471,8 @@ async def _join(
     ctl = _Control(slug, ident, say_tracker, echo, idle_timeout, no_human_timeout)
     if status_due is not None:
         ctl.clock.due_s = status_due
+    if activity_due is not None:
+        ctl.activity_due.due_s = activity_due
     server: vsession.ControlServer | None = None
     sess_dir = vsession.session_dir(slug, ident)
     if control and hasattr(asyncio, "start_unix_server"):
@@ -1453,6 +1504,7 @@ async def _join(
             _print_event(json_mode, "system",
                          f"control socket ready: {server.sock_path}", topic="_meta")
     vactivity.clear(sess_dir)  # 0.10.0: no activity lines of a previous call leak in
+    ctl.activity_path = sess_dir / vactivity.ACTIVITY_NAME
     loop = asyncio.get_running_loop()
     for sig in _quit_signals():
         try:
@@ -1674,6 +1726,12 @@ def _client_request(args) -> dict:
         return {"cmd": "next", "timeout": args.timeout}
     if args.cmd == "says":
         return {"cmd": "says"}
+    if args.cmd == "activity":
+        text = " ".join(args.text)
+        if text == "-":
+            text = sys.stdin.read()
+        vactivity.note_line(text)  # ValueError when empty -> exit 1 before connecting
+        return {"cmd": "activity", "text": text.strip()}
     if args.cmd == "leave":
         return {"cmd": "leave", "say": args.say} if args.say else {"cmd": "leave"}
     faq_raw = getattr(args, "faq", None) or []
@@ -1720,7 +1778,10 @@ def main(argv: list[str] | None = None) -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=f"voicehook-agent {_VERSION}")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p_join = sub.add_parser("join", help="join a voicehook.ai call as an agent")
+    p_join = sub.add_parser(
+        "join", help="join a voicehook.ai call as an agent",
+        epilog=__doc__[__doc__.index("Activity log (0.13.0)"):],
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p_join.add_argument("invite_url", help="full invite link https://voicehook.ai/r/<slug>?invite=<code>  OR  bare <slug>")
     p_join.add_argument("--name", default=None, help="REQUIRED. Your OWN display name in the call (<dein-eigener-Name>). Shown in the web Agent chip as 'Name · model', becomes the identity prefix and the name spoken in the auto-greet. Nenn deinen echten Modell-/Herstellernamen, nie 'Claude', wenn du nicht Claude bist.")
     p_join.add_argument("--identity", default=None, help="explicit full identity (overrides --name)")
@@ -1816,6 +1877,10 @@ def main(argv: list[str] | None = None) -> None:
         help=f"`next` adds status_due + hint when your board is older than SEC seconds while work is in progress (default {relay.STATUS_DUE_S:g}, env {relay.STATUS_DUE_ENV}; 0 = age rule off). Empty board and status_request always count.",
     )
     p_join.add_argument(
+        "--activity-due", type=float, default=None, metavar="SEC",
+        help=f"`next` adds activity_due + activity_age_s + activity_hint when no new activity.log line came for SEC seconds while work is in progress (default {vactivity.ACTIVITY_DUE_S:g}, env {vactivity.ACTIVITY_DUE_ENV}; 0 = off). Silent while the Claude Code hook writes lines.",
+    )
+    p_join.add_argument(
         "--no-control", action="store_true", default=False,
         help="do not open the local control socket (disables say/next/leave/status).",
     )
@@ -1885,10 +1950,18 @@ def main(argv: list[str] | None = None) -> None:
                        help="process existing log content too (default: tail from end).")
     # 0.10.0 activity feed (Claude Code PostToolUse hook); the fast path without the
     # livekit import is the `voicehook-agent-hook` console script.
-    p_hook = sub.add_parser("hook", help="activity feed: Claude Code PostToolUse hook (post-tool-use | print | install [--settings PATH])")
-    p_hook.add_argument("action", choices=["post-tool-use", "print", "install"])
+    p_hook = sub.add_parser("hook", help="activity feed: Claude Code PreToolUse + PostToolUse hooks (pre-tool-use | post-tool-use | print | install [--settings PATH])")
+    p_hook.add_argument("action", choices=["pre-tool-use", "post-tool-use", "print", "install"])
     p_hook.add_argument("--settings", default=None, metavar="PATH",
                         help="install: settings.json to merge into (default ~/.claude/settings.json)")
+    # 0.13.0: manual activity line for agents without the hook
+    p_act = sub.add_parser(
+        "activity", help="append one line `HH:MM:SS note: <text>` to the activity log of the "
+        "running join (for agents without the Claude Code hook); send your own short status "
+        "line 1:1, 3-8 words")
+    p_act.add_argument("text", nargs="+", help="what is happening now ('-' reads it from stdin); "
+                       "scrubbed, capped at 120 chars; no paths, secrets or personal data")
+    _add_session(p_act)
     args = ap.parse_args(argv)
     if args.cmd == "hook":
         hook_argv = [args.action] + (["--settings", args.settings] if args.settings else [])
@@ -1918,12 +1991,13 @@ def main(argv: list[str] | None = None) -> None:
                 owner_pids=args.owner_pid,
                 force_persona=args.force_persona, control=not args.no_control,
                 transport=args.transport, status_due=args.status_due,
+                activity_due=args.activity_due,
                 voice=args.voice,
             ))
         except KeyboardInterrupt:
             rc = 130
         sys.exit(rc)
-    if args.cmd in ("say", "next", "says", "leave", "status"):
+    if args.cmd in ("say", "next", "says", "leave", "status", "activity"):
         sys.exit(_run_client(args))
     if args.cmd == "log-summary":
         try:

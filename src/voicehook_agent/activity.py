@@ -1,20 +1,29 @@
 """Activity feed (0.10.0): what the background coding agent is doing right now.
 
-A Claude Code PostToolUse hook (`voicehook-agent-hook post-tool-use`, also
-reachable as `voicehook-agent hook post-tool-use`) appends ONE short line per
-tool call to `<session_dir>/activity.log` of the running join:
+Claude Code hooks (`voicehook-agent-hook pre-tool-use` / `post-tool-use`, also
+reachable as `voicehook-agent hook ...`) append ONE short line per tool call to
+`<session_dir>/activity.log` of the running join:
 
     17:12:03 Bash: Tests laufen lassen
-    17:12:09 Edit
+    17:12:09 Edit: relay.py
+    17:12:15 note: Running migrations
+
+0.13.0: the PreToolUse hook writes the line when the tool STARTS (a long Bash or
+Agent run shows up while it runs); PostToolUse writes only for a tool_use_id that
+Pre did not log (an old Post-only install keeps working). Tools without a
+`description` (Read/Edit/Write/...) log the file's basename, never a path; Grep/Glob
+log the tool name only. Agents without hooks add a line with
+`voicehook-agent activity "<text>"` (tool name `note`), and `next` reminds them
+(activity_due, see ActivityDue) when the log stays silent while they work.
 
 The running `join` publishes the newest lines as `operator.activity` (see
 ActivityPublisher + cli._activity_loop), so Delta can answer "was machst du
 gerade?" without asking the agent.
 
 Privacy: a line holds only the local time, the sanitized tool name and the
-tool's own `description` (Bash/Agent/Task carry one), passed through a secret
-scrubber. Never command text, arguments, file paths, file contents or tool
-output. With zero or several live joins the hook writes nothing, so one Claude
+tool's own `description` (Bash/Agent/Task carry one) or a file's basename, passed
+through a secret scrubber. Never command text, arguments, full paths, search
+patterns, file contents or tool output. With zero or several live joins the hook writes nothing, so one Claude
 session never leaks into another call.
 
 This module stays stdlib-only (no livekit/httpx) so the hook starts fast.
@@ -32,18 +41,34 @@ from pathlib import Path
 from . import session as vsession
 
 ACTIVITY_NAME = "activity.log"
+IDS_NAME = "activity.ids"   # 0.13.0: tool_use_ids logged by PreToolUse (dedupe, never published)
+IDS_KEEP = 200
 TRIM_AT = 200          # lines; above this the file is rewritten ...
 TRIM_KEEP = 50         # ... keeping the newest 50
 DESC_MAX = 120
 TOOL_MAX = 40
+NAME_MAX = 60          # basename of a file tool's path
+NOTE_TOOL = "note"     # tool name of a manual `voicehook-agent activity` line
+# Tools without `description` whose file basename is logged (never the path).
+FILE_TOOLS = {"Read": "file_path", "Edit": "file_path", "Write": "file_path",
+              "MultiEdit": "file_path", "NotebookEdit": "notebook_path",
+              "NotebookRead": "notebook_path"}
 PUBLISH_LINES = 15     # newest lines per operator.activity packet
 PUBLISH_WINDOW = 5.0   # s, at most one packet per window (last one wins)
 POLL_INTERVAL = 1.0    # s, how often the join looks at activity.log
 TOPIC = "operator.activity"
 
 HOOK_COMMAND = "voicehook-agent-hook post-tool-use"
+# 0.13.0. `|| true`: a PreToolUse hook exiting 2 BLOCKS the tool in Claude Code, and an
+# older voicehook-agent-hook on PATH (<0.13) answers an unknown subcommand with exit 2.
+HOOK_COMMAND_PRE = "voicehook-agent-hook pre-tool-use || true"
+HOOK_COMMANDS = {"PreToolUse": HOOK_COMMAND_PRE, "PostToolUse": HOOK_COMMAND}
 # Commands that count as "our hook is already installed" (idempotent install).
 _OUR_COMMANDS = (HOOK_COMMAND, "voicehook-agent hook post-tool-use")
+_OUR_COMMANDS_BY_EVENT = {"PreToolUse": (HOOK_COMMAND_PRE, "voicehook-agent-hook pre-tool-use",
+                                         "voicehook-agent hook pre-tool-use",
+                                         "voicehook-agent hook pre-tool-use || true"),
+                          "PostToolUse": _OUR_COMMANDS}
 HOOK_TIMEOUT = 5
 
 REDACTED = "[redacted]"
@@ -92,22 +117,44 @@ def sanitize_tool(name: object) -> str:
     return out or "Tool"
 
 
-def describe(tool_input: object) -> str:
-    """The tool's own description (Bash/Agent/Task), scrubbed and capped; else ''."""
+def basename(path: object) -> str:
+    """Last path component (POSIX or Windows separators), scrubbed and capped; else ''."""
+    if not isinstance(path, str):
+        return ""
+    name = re.split(r"[/\\]", path.strip())[-1]
+    return scrub(name)[:NAME_MAX].strip()
+
+
+def describe(tool_input: object, tool_name: object = None) -> str:
+    """The tool's own description (Bash/Agent/Task), scrubbed and capped; for a file
+    tool without one (Read/Edit/Write/...) the file's basename; else ''."""
     if not isinstance(tool_input, dict):
         return ""
     desc = tool_input.get("description")
-    if not isinstance(desc, str):
-        return ""
-    return scrub(desc)[:DESC_MAX].strip()
+    if isinstance(desc, str) and desc.strip():
+        return scrub(desc)[:DESC_MAX].strip()
+    key = FILE_TOOLS.get(str(tool_name or ""))
+    return basename(tool_input.get(key)) if key else ""
+
+
+def _ts(now: float | None) -> str:
+    return time.strftime("%H:%M:%S", time.localtime(time.time() if now is None else now))
 
 
 def format_line(event: dict, now: float | None = None) -> str:
     """`HH:MM:SS Tool: description` (local time) or `HH:MM:SS Tool`."""
-    ts = time.strftime("%H:%M:%S", time.localtime(time.time() if now is None else now))
     tool = sanitize_tool(event.get("tool_name"))
-    desc = describe(event.get("tool_input"))
-    return f"{ts} {tool}: {desc}" if desc else f"{ts} {tool}"
+    desc = describe(event.get("tool_input"), event.get("tool_name"))
+    return f"{_ts(now)} {tool}: {desc}" if desc else f"{_ts(now)} {tool}"
+
+
+def note_line(text: str, now: float | None = None) -> str:
+    """0.13.0: manual line `HH:MM:SS note: <text>` (`voicehook-agent activity`),
+    scrubbed and capped like a hook description. ValueError when empty."""
+    desc = scrub(str(text or ""))[:DESC_MAX].strip()
+    if not desc:
+        raise ValueError("empty activity text")
+    return f"{_ts(now)} {NOTE_TOOL}: {desc}"
 
 
 def scrub_line(line: str) -> str:
@@ -205,9 +252,56 @@ def _trim(path: Path) -> None:
     os.replace(tmp, path)
 
 
-def post_tool_use(raw: str, now: float | None = None) -> bool:
-    """Handle one PostToolUse event (JSON text). True if a line was written.
-    Never raises."""
+def _tool_use_id(event: dict) -> str:
+    tid = event.get("tool_use_id")
+    return re.sub(r"[^A-Za-z0-9_\-]", "", tid)[:100] if isinstance(tid, str) else ""
+
+
+def _remember_id(dir_: Path, tid: str) -> None:
+    """Pre: note tid as logged (file 0600, newest IDS_KEEP kept)."""
+    path = dir_ / IDS_NAME
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        _lock(fd)
+        ids = os.read(fd, 1 << 20).decode("utf-8", "replace").split()
+        ids = (ids + [tid])[-IDS_KEEP:]
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        os.write(fd, ("\n".join(ids) + "\n").encode("utf-8"))
+    finally:
+        os.close(fd)
+
+
+def _take_id(dir_: Path, tid: str) -> bool:
+    """Post: True (and forget it) if Pre already logged tid."""
+    path = dir_ / IDS_NAME
+    try:
+        fd = os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return False
+    try:
+        _lock(fd)
+        ids = os.read(fd, 1 << 20).decode("utf-8", "replace").split()
+        if tid not in ids:
+            return False
+        ids.remove(tid)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        os.write(fd, ("\n".join(ids) + "\n").encode("utf-8") if ids else b"")
+        return True
+    finally:
+        os.close(fd)
+
+
+def _lock(fd: int) -> None:
+    try:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except (ImportError, OSError):
+        pass
+
+
+def _handle(raw: str, phase: str, now: float | None) -> bool:
     try:
         event = json.loads(raw) if raw and raw.strip() else {}
         if not isinstance(event, dict):
@@ -215,10 +309,27 @@ def post_tool_use(raw: str, now: float | None = None) -> bool:
         dir_ = target_dir()
         if dir_ is None:
             return False
+        tid = _tool_use_id(event)
+        if phase == "post" and tid and _take_id(dir_, tid):
+            return False  # Pre already logged this call
         append_line(dir_, format_line(event, now))
+        if phase == "pre" and tid:
+            _remember_id(dir_, tid)
         return True
     except Exception:  # noqa: BLE001 - a hook must never disturb Claude Code
         return False
+
+
+def pre_tool_use(raw: str, now: float | None = None) -> bool:
+    """0.13.0: handle one PreToolUse event (JSON text): the line is in the log while
+    the tool runs. True if a line was written. Never raises."""
+    return _handle(raw, "pre", now)
+
+
+def post_tool_use(raw: str, now: float | None = None) -> bool:
+    """Handle one PostToolUse event (JSON text). Skips a tool_use_id that the
+    PreToolUse hook already logged. True if a line was written. Never raises."""
+    return _handle(raw, "post", now)
 
 
 def read_tail(path: Path, n: int = PUBLISH_LINES) -> list[str]:
@@ -236,10 +347,11 @@ def read_tail(path: Path, n: int = PUBLISH_LINES) -> list[str]:
 
 
 def clear(dir_: Path) -> None:
-    try:
-        (dir_ / ACTIVITY_NAME).unlink()
-    except OSError:
-        pass
+    for name in (ACTIVITY_NAME, IDS_NAME):
+        try:
+            (dir_ / name).unlink()
+        except OSError:
+            pass
 
 
 class ActivityPublisher:
@@ -263,34 +375,113 @@ class ActivityPublisher:
 
 
 # --------------------------------------------------------------------------- #
+# 0.13.0 activity_due: remind agents without the hook to fill the log
+# --------------------------------------------------------------------------- #
+ACTIVITY_DUE_S = 60.0          # no new line for this long while working -> activity_due
+ACTIVITY_DUE_ENV = "VOICEHOOK_ACTIVITY_DUE"
+HOOK_QUIET_S = 600.0           # a hook line within this window = hook active, stay silent
+ACTIVITY_CMD = 'voicehook-agent activity "<3-8 words>"'
+ACTIVITY_HINT = ("Activity log silent while you work: Delta only reads lines younger than "
+                 "60 s and cannot tell what is happening. Send your own short status line "
+                 "1:1, do not rephrase it: " + ACTIVITY_CMD + " (what is happening now, "
+                 "current phase; no paths, secrets or personal data). Claude Code: "
+                 "`voicehook-agent hook install` does this automatically.")
+
+
+def activity_due_seconds(value: float | str | None = None) -> float:
+    """N for activity_due: explicit value (--activity-due), else
+    $VOICEHOOK_ACTIVITY_DUE, else ACTIVITY_DUE_S. 0 or less switches it off."""
+    for v in (value, os.environ.get(ACTIVITY_DUE_ENV)):
+        if v is None or v == "":
+            continue
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            continue
+    return ACTIVITY_DUE_S
+
+
+def _is_note(line: str) -> bool:
+    m = _LINE_RX.match(line)
+    return bool(m) and m.group(2) == NOTE_TOOL
+
+
+class ActivityDue:
+    """Is the activity log silent while the agent works?
+
+    `observe(lines, now)` with the newest lines of activity.log (the join's
+    activity loop and `next` call it); `check(now, working)` returns
+    {"activity_due", "activity_age_s", "activity_hint"} or {}. Due when work is in
+    progress and no new line came for `due_s` s (counted from the join without any
+    line). Silent while hook lines (any tool but `note`) arrived within HOOK_QUIET_S:
+    with the hook the log fills itself. At most one hint per `due_s` s."""
+
+    def __init__(self, due_s: float = ACTIVITY_DUE_S, now: float | None = None) -> None:
+        self.due_s = due_s
+        self.started = time.monotonic() if now is None else now
+        self.line_at: float | None = None
+        self.hook_at: float | None = None
+        self.hinted_at: float | None = None
+        self._last: list[str] = []
+
+    def observe(self, lines: list[str], now: float) -> None:
+        if lines == self._last:
+            return
+        old = set(self._last)
+        new = [ln for ln in lines if ln not in old] or lines[-1:]
+        self._last = list(lines)
+        if not new:
+            return
+        self.line_at = now
+        if any(not _is_note(ln) for ln in new):
+            self.hook_at = now
+
+    def check(self, now: float, working: bool) -> dict:
+        if self.due_s <= 0 or not working:
+            return {}
+        if self.hook_at is not None and now - self.hook_at < HOOK_QUIET_S:
+            return {}
+        age = now - (self.line_at if self.line_at is not None else self.started)
+        if age <= self.due_s:
+            return {}
+        if self.hinted_at is not None and now - self.hinted_at < self.due_s:
+            return {}
+        self.hinted_at = now
+        return {"activity_due": True, "activity_age_s": round(age, 1),
+                "activity_hint": ACTIVITY_HINT}
+
+
+# --------------------------------------------------------------------------- #
 # settings.json snippet + installer
 # --------------------------------------------------------------------------- #
-def hook_entry() -> dict:
+def hook_entry(event: str = "PostToolUse") -> dict:
     return {"matcher": "*",
-            "hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": HOOK_TIMEOUT}]}
+            "hooks": [{"type": "command", "command": HOOK_COMMANDS[event], "timeout": HOOK_TIMEOUT}]}
 
 
 def snippet() -> dict:
-    return {"hooks": {"PostToolUse": [hook_entry()]}}
+    return {"hooks": {ev: [hook_entry(ev)] for ev in HOOK_COMMANDS}}
 
 
 def default_settings_path() -> Path:
     return Path.home() / ".claude" / "settings.json"
 
 
-def _installed(entries: list) -> bool:
+def _installed(entries: list, event: str = "PostToolUse") -> bool:
+    ours = _OUR_COMMANDS_BY_EVENT[event]
     for e in entries:
         if not isinstance(e, dict):
             continue
         for h in e.get("hooks") or []:
-            if isinstance(h, dict) and str(h.get("command", "")).strip() in _OUR_COMMANDS:
+            if isinstance(h, dict) and str(h.get("command", "")).strip() in ours:
                 return True
     return False
 
 
 def install(path: Path) -> tuple[int, str]:
-    """Merge the PostToolUse hook into settings.json. Idempotent; refuses to
-    touch a file that is not a JSON object."""
+    """Merge the PreToolUse + PostToolUse hooks into settings.json. Idempotent (an
+    older Post-only install gets the Pre hook added); refuses to touch a file that
+    is not a JSON object."""
     data: dict = {}
     if path.exists():
         try:
@@ -304,29 +495,32 @@ def install(path: Path) -> tuple[int, str]:
         hooks = data["hooks"] = {}
     if not isinstance(hooks, dict):
         return 1, f"[error] {path}: 'hooks' is not an object; not changed."
-    post = hooks.get("PostToolUse")
-    if post is None:
-        post = hooks["PostToolUse"] = []
-    if not isinstance(post, list):
-        return 1, f"[error] {path}: 'hooks.PostToolUse' is not a list; not changed."
-    if _installed(post):
+    for ev in HOOK_COMMANDS:
+        if hooks.get(ev) is not None and not isinstance(hooks.get(ev), list):
+            return 1, f"[error] {path}: 'hooks.{ev}' is not a list; not changed."
+    added = []
+    for ev in HOOK_COMMANDS:
+        entries = hooks.setdefault(ev, [])
+        if not _installed(entries, ev):
+            entries.append(hook_entry(ev))
+            added.append(ev)
+    if not added:
         return 0, f"already installed in {path}"
-    post.append(hook_entry())
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    return 0, f"installed PostToolUse hook in {path}"
+    return 0, f"installed {' + '.join(added)} hook{'s' if len(added) > 1 else ''} in {path}"
 
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     cmd = args[0] if args else ""
-    if cmd == "post-tool-use":
+    if cmd in ("pre-tool-use", "post-tool-use"):
         try:
             raw = sys.stdin.read()
         except Exception:  # noqa: BLE001
             raw = ""
-        post_tool_use(raw)
-        return 0  # always 0, nothing on stdout
+        (pre_tool_use if cmd == "pre-tool-use" else post_tool_use)(raw)
+        return 0  # always 0, nothing on stdout (PreToolUse: no output = allow)
     if cmd == "print":
         print(json.dumps(snippet(), indent=2))
         return 0
@@ -343,7 +537,7 @@ def main(argv: list[str] | None = None) -> int:
         rc, msg = install(path)
         print(msg, file=sys.stderr if rc else sys.stdout)
         return rc
-    print("usage: voicehook-agent hook {post-tool-use|print|install [--settings PATH]}",
+    print("usage: voicehook-agent hook {pre-tool-use|post-tool-use|print|install [--settings PATH]}",
           file=sys.stderr)
     return 2
 

@@ -124,12 +124,27 @@ Delta answers the user from your board while you work in the background. Stale b
 ### Activity feed (operator.activity, CLI 0.10.0)
 
 Delta sees what you do, one line per tool call. Install once: `voicehook-agent hook install`
-(merges a PostToolUse hook, command `voicehook-agent-hook post-tool-use`, into
-`~/.claude/settings.json`; `hook print` shows the snippet). A line is `HH:MM:SS Tool: description`
-(only the tool's own `description`, scrubbed for secrets); never commands, arguments, paths, file
-contents or output. The join publishes the newest 15 lines `{lines[], ts}` on change, at most every
-5 s. Several live joins: nothing is written (set `VOICEHOOK_SESSION=<slug>/<identity>`). So: give
-Bash/Agent calls a short, speakable `description`.
+(merges PreToolUse + PostToolUse hooks, commands `voicehook-agent-hook pre-tool-use || true` /
+`post-tool-use`, into `~/.claude/settings.json`; CLI 0.13.0 adds Pre to an older install; `hook
+print` shows the snippet). A line is `HH:MM:SS Tool: description` (the tool's own `description` 1:1,
+scrubbed for secrets), written when the tool starts; file tools without one log the basename
+(`Read: relay.py`); never commands, arguments, full paths, patterns, file contents or output. The
+join publishes the newest 15 lines `{lines[], ts}` on change, at most every 5 s. Several live joins:
+nothing is written (set `VOICEHOOK_SESSION=<slug>/<identity>`). So: give Bash/Agent calls a short,
+speakable `description`.
+
+### Aktivitätslog füllen (activity_due, CLI 0.13.0)
+
+In speech pauses Delta reads only fresh lines (< 60 s) aloud: what is happening right now.
+- Claude Code: `voicehook-agent hook install` (recommended), then nothing else to do.
+- Without hooks: on every step send your own short status line 1:1, 3-8 words, never rephrased:
+  `vh activity "Running database migrations"` (appends `HH:MM:SS note: <text>`; scrubbed, max 120
+  chars; no paths, secrets or personal data). CLI only (Quickstart B); the curl wrapper of
+  Quickstart A has no `activity` yet.
+- `next` adds `activity_due: true` + `activity_age_s` + `activity_hint` when work is in progress
+  (`doing`/`open` set, or you spoke / sent a board in the last 5 min) and the log got no line for
+  60 s (`--activity-due SEC` / env `VOICEHOOK_ACTIVITY_DUE`, 0 = off). Run the command in
+  `activity_hint`. Silent while hook lines arrive; at most one hint per 60 s.
 - Idle guard: no `say`/`next` for 10 min (`--idle-timeout MIN`, 0 = off) = join leaves, also across
   reconnects. `--owner-pid $PPID` (CLI 0.8.0) leaves as soon as your session ends; a dead FIFO holder too.
 - Call end (CLI 0.10.1): server `call_end`, room deleted or HTTP 410 = join exits, never reconnects; `next` returns `{"type":"call_end"}`. No human for 2.5 min (`--no-human-timeout MIN`; the server ends the call after 120 s) = join leaves. HTTP 409 at join (CLI 0.10.2: no human in the room yet) = join says so and retries every 5 s for up to 2 min, then exits (rc 6).
@@ -187,7 +202,7 @@ Quickstart B: `$D/out` (JSON lines) should show within ~5 s:
 | `operator.interrupt` | `{}` | stop your own running say; your unspoken rest comes back as `operator.revise` |
 | `operator.inject` | `{text, role?}` | context entry, not spoken |
 | `operator.status` | `{doing, open[], done[], faq?[{q, a}]}` | your status board (`vh status`), replaces the last one, never spoken |
-| `operator.activity` | `{lines[], ts}` | sent by the CLI itself (0.10.0) from the PostToolUse hook: newest 15 tool-call lines, at most every 5 s |
+| `operator.activity` | `{lines[], ts}` | sent by the CLI itself (0.10.0) from the Pre/PostToolUse hook and `vh activity` notes (0.13.0): newest 15 lines, at most every 5 s |
 | `operator.say_status` | ← `{seq, state, spoken_chars}` | CLI 0.9.0: fate of your say (`queued`/`spoken`/`interrupted`/`requeued`/`replaced`); `next` carries `say_status`, `vh says` the last state, `say_hint` = stuck > 20 s |
 | `operator.alive` | `{alive, ts, idle_s}` | sent by the CLI itself (0.8.0) every 10 s while you serve `next`/`say`; `alive:false` on leave |
 | `transcript` | ← `{role, text, speaker?, op?}` | `user` = the human; `operator` = an operator's spoken text (`op` = whose); `agent` = voicebot's own answer |

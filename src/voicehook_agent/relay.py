@@ -488,6 +488,7 @@ def mentions_progress(text: str) -> bool:
 def board_is_empty(board: dict | None) -> bool:
     b = board or {}
     return not (str(b.get("doing") or "").strip() or b.get("open") or b.get("done"))
+WORK_WINDOW_S = 300.0      # 0.13.0: said/board within this window counts as working
 LATENCY_WARN_S = 8.0       # user turn delivered by `next` -> next `say` slower -> latency_warning
 LATENCY_HINT = "delegate slow work, keep main loop free"
 
@@ -633,6 +634,15 @@ class TurnClock:
 
     def user(self, now: float | None = None) -> None:
         self.user_at = self._t(now)
+
+    def working(self, now: float | None = None, window: float = WORK_WINDOW_S) -> bool:
+        """0.13.0 (activity_due): work in progress = doing/open set on the board, or
+        the agent said something / sent a board within the last `window` s."""
+        t = self._t(now)
+        if self.board_live:
+            return True
+        return any(at is not None and t - at <= window
+                   for at in (self.said_at, self.board_set_at))
 
     def hints(self, now: float | None = None) -> dict:
         t = self._t(now)
