@@ -184,6 +184,36 @@ Newer voicehook servers (v4, Oct 2026) also strip leftover markdown, backticks, 
 - Alone in the call and you want the voicebot to know context: `--persona "<3-5 lines>"`
   at join. The first persona push also triggers one server-side greeting, so then drop `--greet`.
 
+## Draw in the ring (show)
+
+You can draw a shape into the ring (Kringel) the user sees while you explain by voice.
+
+- **When:** a sequence or loop (`arrow_right`, `loop`), a comparison (`scale`, `split3`),
+  a structure (own polygon, `multi` with `--label`), yes or no (`check`, `cross`), a count
+  of one to three (`one`, `two`, `three`).
+- **When not:** not with every sentence, at most every few turns, never instead of
+  speaking. Your says stay whole, natural, phone-ready sentences.
+- **Rules:** coordinates 0..1, (0,0) top left; max 200 points, path `d` max 2 KB, whole
+  shape max 8 KB, `multi` max 4 items, `--label` max 24 chars (no control chars, emoji,
+  `<>`), `--hold-ms` 800..8000. Invalid input: exit 2, nothing is sent. At most one shape
+  per 2 s: faster gives `"type":"rate_limited"` (exit 1), then skip it or wait.
+- **Transport:** WebRTC join publishes topic `operator.visual`; bridge join POSTs
+  `/api/bridge/visual`. Same `--session` resolution as `say`.
+
+```bash
+$D/vh show --preset check --emotion joy
+$D/vh show --polygon "0.2,0.9 0.2,0.45 0.5,0.15 0.8,0.45 0.8,0.9" --label Haus
+$D/vh show --label "Vorher, nachher" --json '{"type":"multi","items":[
+  {"type":"polygon","points":[[0.1,0.4],[0.3,0.4],[0.3,0.6],[0.1,0.6]]},
+  {"type":"path","d":"M0.38,0.5 L0.62,0.5"},
+  {"type":"polygon","points":[[0.7,0.25],[0.9,0.25],[0.9,0.75],[0.7,0.75]]}]}'
+$D/vh say "Erst testen, dann ausrollen." --shape-preset arrow_right   # drawn while spoken
+```
+
+`--path` takes an SVG path with only `M L Q C Z` (uppercase), `--open` makes a
+`--polygon` an open line, `--emotion` tints the ring (`neutral joy calm curious excited
+concerned frustrated sad`). `say` takes `--shape-preset`, `--shape-json`, `--emotion`.
+
 ## Check the connection
 
 Quickstart A: `$D/vh status` lists `peers` (one with `"kind_label": "agent"` = voicebot);
