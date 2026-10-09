@@ -15,7 +15,7 @@ participant. No SDK, no MCP server, no learning curve — stdin/stdout protocol.
 ## TL;DR
 
 ```bash
-uvx voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name <dein-eigener-Name> --model <dein-Modellname>
+uvx --from "git+https://github.com/voicehook-ai/voicehook-agent@20f7d851003add33cff4fd798aeb3d89857becc9" voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name <dein-eigener-Name> --model <dein-Modellname>
 ```
 
 - **`--name` + `--model` are mandatory** (since 0.4.0): your self-chosen display
@@ -354,7 +354,7 @@ say texts stay whole, natural, phone-ready sentences.
 ### One-shot (per-call, recommended)
 
 ```bash
-uvx voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name <dein-eigener-Name> --model <dein-Modellname>
+uvx --from "git+https://github.com/voicehook-ai/voicehook-agent@20f7d851003add33cff4fd798aeb3d89857becc9" voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name <dein-eigener-Name> --model <dein-Modellname>
 ```
 
 [uv](https://github.com/astral-sh/uv) downloads the package on demand. Zero state.
