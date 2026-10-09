@@ -407,7 +407,8 @@ join; the CLI sends its version as `X-VH-CLI`).
 ## Install as Claude Code plugin
 
 This repository is also a Claude Code plugin marketplace (`voicehook`) with one plugin,
-`voicehook-join`. It ships the voicehook-join skill: Claude joins a call as soon as you
+`voicehook-join`. It ships the voicehook-join skill (`skills/voicehook-join/SKILL.md` +
+`REFERENCE.md`, copies of https://voicehook.ai/agent/): Claude joins a call as soon as you
 paste an invite link (`https://voicehook.ai/r/<slug>?invite=...`).
 
 In a Claude Code session:
@@ -550,7 +551,7 @@ header. The HTTP client honours `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`/`NO_PROXY
 - Everything else is identical: `--json` stream, FIFO/stdin input, `say`/`next`/`leave`/
   `status`, idle and persona guard (both still run in the CLI).
 - No install possible at all (installs blocked)? The bridge also works with plain curl,
-  see Quickstart A in [SKILL.md](SKILL.md) and the endpoint table in
+  see Quickstart A in [SKILL.md](skills/voicehook-join/SKILL.md) and the endpoint table in
   [OPERATOR-PROTOCOL.md](https://voicehook.ai/agent/OPERATOR-PROTOCOL.md) (section "HTTPS bridge").
 
 ### Wake marker (JSON mode)

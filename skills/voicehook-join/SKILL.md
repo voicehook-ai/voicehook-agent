@@ -6,7 +6,7 @@ description: Join an existing voicehook.ai voice call as the brain behind its vo
 # voicehook-join: be the brain in a voicehook call
 
 Canonical: https://voicehook.ai/agent/SKILL.md. Protocol details:
-https://voicehook.ai/agent/OPERATOR-PROTOCOL.md.
+https://voicehook.ai/agent/OPERATOR-PROTOCOL.md. CLI details (activity hook, `activity_due`, join flags): [REFERENCE.md](REFERENCE.md) = https://voicehook.ai/agent/REFERENCE.md.
 
 ## Quickstart A: no install (cloud sandbox, proxy network, installs blocked)
 
@@ -63,7 +63,7 @@ tool calls, so every later call uses the absolute wrapper, e.g. `/tmp/vh-ab12cd/
 - `--name` / `--model` are mandatory (exit 2 without them): your real name and the exact
   model id you run on. Nenn deinen echten Modell-/Herstellernamen, nie 'Claude', wenn du nicht
   Claude bist (the server renames "Claude" on a foreign model anyway). Unknown: `--model unbekannt`.
-  Optional `--voice <Chirp3-HD name, e.g. Puck>` (bridge join: `"voice"`): your own TTS voice.
+  Optional `--voice <Chirp3-HD name, e.g. Puck>` (bridge join: `"voice"`): your own TTS voice. Optional `--username <Vorname>` (bridge join: `"username"`): Delta knows whom he talks to.
 - `--greet` is spoken right after connect. Write it in the language of the invite
   message (German invite → German greeting). One short sentence.
 - No `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` takes a few seconds and beats pip.
@@ -80,7 +80,7 @@ tool calls, so every later call uses the absolute wrapper, e.g. `/tmp/vh-ab12cd/
 ```
 
 `next` prints ONE JSON line (exit 3 once the call is over), with `agent_said` = Delta's own lines
-since the last `next`, `status_stale`/`status_due: true` = run the command in `hint` NOW (board below):
+since the last `next`, `status_stale`/`status_due: true` = run the command in `hint` NOW (board below), `activity_due: true` = run `activity_hint` NOW:
 
 | `type` | meaning | do |
 |---|---|---|
@@ -97,8 +97,8 @@ since the last `next`, `status_stale`/`status_due: true` = run the command in `h
   `operator.persona` (facts, e.g. "Das Projekt heißt Ring."); it replaces your previous persona block, so send your full persona plus the fix.
 - **Statusboard dicht halten:** Delta answers the user from your board while you work in the background; stale board = wrong answer. Set it on EVERY request, delegation, result and deploy step: `vh status --doing "deployt den Worker, ETA 2 min" --open "Tests" --done "Analyse"` (whole board, replaces the last, never spoken; `doing` = interim state + ETA, max 400 chars, whole board max 2000). Finished: `--done "..."`, not `vh status ""` (empty = due). Only ONE `say` per turn. **FAQ on EVERY board update:** add `--faq "Frage::Antwort"` (repeatable, max 6 pairs, 200 chars each, cut first when the board is full) with the 3 questions the user most likely asks next, answered in advance; Delta answers them directly. Delta also answers from what you already said in this call, never from nowhere.
   CLI 0.9.0: `next` adds `status_due: true` + `status_reason` (`empty`, `status_request`, `stale` = older than 45 s while `doing`/`open` is set; `--status-due SEC`, env `VOICEHOOK_STATUS_DUE`) + `hint` with the exact command; run it before your `say`. A progress `say` ("fertig", "live", "deploye") without a fresh board returns `status_reason: "say_progress"`. CLI 0.10.0: the hint also asks for `--faq`.
-- Idle guard: no `say`/`next` for 10 min (`--idle-timeout MIN`, 0 = off) = join leaves. Heartbeat (CLI 0.8.0): `operator.alive` every 10 s while you serve `next`/`say`; silent 20 s = no chip, Delta: "<Name> ist gerade nicht erreichbar." (Bridge: the server sends it for you while you call `next`/`say`.) No human in the room for 120 s (300 s while an operator waits and the human dropped unexpectedly, e.g. laptop sleep) = call over, room deleted, join exits; the bridge `ended` event then carries `detail` + `message` (why, in plain words) for you to tell the user (CLI `--no-human-timeout`, never reconnects after `call_end` / 410).
-- **Activity feed, recommended setup step** (CLI 0.10.0, Claude Code on the same machine): run `voicehook-agent hook install` once. Since CLI 0.13.0 it adds a PreToolUse AND a PostToolUse hook (re-run it after an update): one line per tool call, written when the tool starts, so a long run shows up while it runs (`17:12:03 Bash: Tests laufen lassen`: time, tool, your `description`; never commands, args, paths, contents or output; secrets scrubbed); the join sends the last 15 lines as `operator.activity` (on change, max every 5 s; the voicebot applies it at most every 5 s, in Live every 20 s) and Delta answers "what is <Name> doing" from it, briefly in his own words and the user's language, never the raw line; no `doing` needed. Write short, clear Bash `description`s. **Status takt** (pipeline mode): once per call, after your greeting, Delta asks the user how often he should say what you do in the background (every minute, every five minutes, only when something happens, not at all; default off; switchable any time, the switch phrase does not reach you as a `user` turn). Then, only in real pauses, Delta says ONE sentence from your current `doing`, a new `done` or the newest feed line, only if it is new and under 60 s old; your `say` always goes first, a user cut-in drops it for good. Keep board and feed fresh.
+- Idle guard: no `say`/`next` for 10 min (`--idle-timeout MIN`, 0 = off) = join leaves; `--owner-pid <pid>` (CLI 0.8.0) also leaves once that process (your session) ends. Heartbeat (CLI 0.8.0): `operator.alive` every 10 s while you serve `next`/`say`; silent 20 s = no chip, Delta: "<Name> ist gerade nicht erreichbar." (Bridge: the server sends it for you while you call `next`/`say`.) No human in the room for 120 s (300 s while an operator waits and the human dropped unexpectedly, e.g. laptop sleep) = call over, room deleted, join exits; the bridge `ended` event then carries `detail` + `message` (why, in plain words) for you to tell the user (CLI `--no-human-timeout`, never reconnects after `call_end` / 410).
+- **Activity feed, recommended setup step** (CLI 0.10.0, Claude Code on the same machine): run `voicehook-agent hook install` once. Since CLI 0.13.0 it adds a PreToolUse AND a PostToolUse hook (re-run it after an update): one line per tool call, written when the tool starts, so a long run shows up while it runs (`17:12:03 Bash: Tests laufen lassen`: time, tool, your `description`; never commands, args, paths, contents or output; secrets scrubbed); the join sends the last 15 lines as `operator.activity` (on change, max every 5 s; the voicebot applies it at most every 5 s, in Live every 20 s) and Delta answers "what is <Name> doing" from it, briefly in his own words and the user's language, never the raw line; no `doing` needed. Write short, clear Bash `description`s. **Status takt** (pipeline mode): once per call, after your greeting, Delta asks the user how often he should say what you do in the background (every minute, every five minutes, only when something happens, not at all; default off; switchable any time, the switch phrase does not reach you as a `user` turn). Then, only in real pauses, Delta says ONE sentence from your current `doing`, a new `done` or the newest feed line, only if it is new and under 60 s old; your `say` always goes first, a user cut-in drops it for good. Keep board and feed fresh. Feed for a Quickstart A join, several joins, `activity_due`: REFERENCE.md.
 
 ## Operator rhythm (mandatory, learned in calls 06.–08.10.2026)
 
