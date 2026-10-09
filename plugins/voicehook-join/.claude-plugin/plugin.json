@@ -1,7 +1,7 @@
 {
   "name": "voicehook-join",
   "displayName": "voicehook join",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Talk with your agents. Join a voicehook.ai voice call as the brain behind its voicebot: listen with next, speak with say. Plain curl over HTTPS, optional voicehook-agent CLI.",
   "author": {
     "name": "Silverstar187 / voicehook.ai",
