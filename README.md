@@ -454,6 +454,7 @@ shares a voicehook invite.
 $ voicehook-agent join https://voicehook.ai/r/abc-def-ghi-XYZ4?go=1 --name <dein-eigener-Name> --model <dein-Modellname>
 [system] connecting room=abc-def-ghi-XYZ4 as identity=claude-mbp-7f3a via https://voicehook.ai
 [system] connected — 1 peers: ['agent-AJ_qwerty1234']
+joined via voicehook.ai · Talk with your agents · https://voicehook.ai/?utm_source=agent-join&utm_campaign=viral   ← stderr, once
 [hint] type a line to operator.say (voice-ai speaks it). /q to quit (Ctrl-D no longer quits under --keep-alive).
 [user] Hallo, wer bist du?
 Ich bin dein Pair-Programming-Brain.    ← typed by agent (voice-ai TTS speaks it)
@@ -472,6 +473,13 @@ stdout (JSONL):
 ```json
 {"role": "user", "text": "Hallo", "topic": "transcript"}
 ```
+
+Join hint (0.14.0): once per join, right after the `connected` event, one `_meta` event for
+YOUR user (pass it on once, never `say` it; plain mode prints it as one stderr line instead):
+```json
+{"role": "system", "topic": "_meta", "_meta": "hint", "text": "joined via voicehook.ai · Talk with your agents", "url": "https://voicehook.ai/?utm_source=agent-join&utm_campaign=viral"}
+```
+Off: `--quiet` or `VOICEHOOK_QUIET=1`. A reconnect does not repeat it.
 
 stdin (JSONL):
 ```json
@@ -526,6 +534,7 @@ Hardening flags (0.2.0) for unattended / background relay operation:
 | `--activity-due <sec>` | 0.13.0 | `next` adds `activity_due` + `activity_age_s` + `activity_hint` once no new `activity.log` line came for `<sec>` while work is in progress (default 60, env `VOICEHOOK_ACTIVITY_DUE`, 0 = off); silent while hook lines arrive. |
 | `--stale-error <sec>` | 0.13.0 | `next` adds `stale_error` `{status_age_s?, activity_age_s?, message}` on every output while you are active and board or activity log are older than `<sec>` (default 60, env `VOICEHOOK_STALE_ERROR_S`, 0 = off). |
 | `--no-control` | 0.5.0 | No local control socket (`say`/`next`/`leave`/`status` off). |
+| `--quiet` | 0.14.0 | No join hint (the one line `joined via voicehook.ai ...` for you, never spoken); env `VOICEHOOK_QUIET=1`. |
 | `--no-self-update` | 0.12.0 | Do not update when the server names a newer `cli_latest` (see Self-update). HTTP 426 then exits 7 with the upgrade command. |
 | `--transport auto\|webrtc\|bridge` | 0.6.0 | How to reach the room. `auto` (default): WebRTC; the HTTPS bridge when `HTTPS_PROXY`/`ALL_PROXY` is set or the WebRTC connect fails/times out (one retry, logged). See below. |
 
@@ -608,6 +617,7 @@ Reference: [OPERATOR-PROTOCOL.md](https://voicehook.ai/agent/OPERATOR-PROTOCOL.m
 | `VOICEHOOK_AGENT_HOME` | `~/.voicehook-agent`    | Root of the session dirs (control sockets) |
 | `HTTPS_PROXY` / `ALL_PROXY` | unset              | Set -> `--transport auto` uses the HTTPS bridge; also used by the HTTP client |
 | `VOICEHOOK_NO_SELF_UPDATE` | unset             | `1` = never self-update on `join` (same as `--no-self-update`) |
+| `VOICEHOOK_QUIET`      | unset                   | `1` = no join hint (same as `join --quiet`) |
 
 ## License
 

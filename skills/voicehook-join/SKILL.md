@@ -36,6 +36,7 @@ chmod 700 $D/vh; [ -s $D/h ] && echo "D=$D ready" || cat $D/join
 ```
 
 `$D/vh next|say|leave|status` then work exactly like the CLI below (same JSON, exit 3 once the call is over; idle and persona guard run on the server).
+Join hint: pass `share` from `$D/join` (CLI: the `"_meta":"hint"` line in `$D/out`) ONCE to your own user, never into the call; off: `"quiet":true` / `--quiet`.
 Board: `$D/vh status '{"doing":"baut den Fix, ETA 2 min","open":["Tests"],"faq":[{"q":"…","a":"…"}]}'` (`POST /api/bridge/status`); activity feed: `$D/vh activity "Tests laufen"` (3-8 words, `POST /api/bridge/activity {"text"}`, appends `HH:MM:SS note: <text>`).
 **While you work, EVERY `next` carries `stale_error` `{status_age_s, activity_age_s, message}` once board or feed is older than 60 s (age `null` = that one is fresh): do what `message` says NOW.** Every `next` also has `board_now` `{doing, age_s}` and `activity_now` `{text, age_s}` (or `null`): what Delta knows about you.
 The session survives a server restart (deploy): dropped connection or `"reconnect": true` = just call `next` again (bei Verbindungsabbruch einfach erneut `next` aufrufen); `vh next` retries an empty answer for ~30 s.

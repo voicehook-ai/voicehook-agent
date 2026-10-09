@@ -107,6 +107,11 @@ Self-update (0.12.0): the server names cli_min / cli_latest in every join answer
                                      HTTP 426 (below cli_min): print the upgrade command, try
                                      one self-update, else exit 7.
     join --no-self-update            off (env VOICEHOOK_NO_SELF_UPDATE=1)
+
+Join hint (0.14.0): once per join, after the connect, one line for YOU (never spoken):
+    plain mode                       stderr: joined via voicehook.ai · Talk with your agents · <url>
+    --json                           stdout: {"role":"system","topic":"_meta","_meta":"hint","text":..,"url":..}
+    join --quiet                     off (env VOICEHOOK_QUIET=1)
     self-update                      update now; --version shows "neue Version verfügbar"
 
 Activity log (0.13.0): keep it filled, Delta reads it in speech pauses.
@@ -333,6 +338,29 @@ def _emit_wake(json_mode: bool, payload: dict) -> None:
         print(json.dumps(obj, ensure_ascii=False), flush=True)
     else:
         print(f"[wake] user-turn role={payload.get('role')} text={payload.get('text')!r}", flush=True)
+
+
+# 0.14.0: one discreet line per join for the agent's own user (terminal only, never
+# spoken, never in persona/say). Off with --quiet or VOICEHOOK_QUIET=1.
+SHARE_TEXT = "joined via voicehook.ai · Talk with your agents"
+SHARE_URL = "https://voicehook.ai/?utm_source=agent-join&utm_campaign=viral"
+QUIET_ENV = "VOICEHOOK_QUIET"
+
+
+def _quiet_from_env(env=None) -> bool:
+    val = (os.environ if env is None else env).get(QUIET_ENV, "")
+    return val.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _emit_share_hint(json_mode: bool) -> None:
+    """Plain: one line on stderr (stdout stays the transcript). --json: one `_meta`
+    event with `_meta: "hint"` on stdout, so JSON parsers never see free text."""
+    if json_mode:
+        obj = {"role": "system", "topic": "_meta", "_meta": "hint",
+               "text": SHARE_TEXT, "url": SHARE_URL}
+        print(json.dumps(obj, ensure_ascii=False), flush=True)
+    else:
+        print(f"{SHARE_TEXT} · {SHARE_URL}", file=sys.stderr, flush=True)
 
 
 def _load_persona(persona: str | None, persona_file: str | None,
@@ -1252,6 +1280,7 @@ async def _connect_and_listen(
     voice: str | None = None,
     updater: _Updater | None = None,
     update_check: bool = False,
+    share_hint: dict | None = None,
 ) -> tuple[int, str | None]:
     """One connect→listen cycle. Returns (rc, disconnect_reason_name).
     disconnect_reason_name is None for a clean stdin-driven quit; otherwise the
@@ -1482,6 +1511,9 @@ async def _connect_and_listen(
         f"{[p.identity for p in room.remote_participants.values()]}",
         topic="_meta",
     )
+    if share_hint is not None and not share_hint.get("shown"):
+        share_hint["shown"] = True  # once per join: never again on a reconnect cycle
+        _emit_share_hint(json_mode)
     for p in room.remote_participants.values():
         for pub in p.track_publications.values():
             if int(getattr(pub, "kind", 0)) == 1 and getattr(pub, "subscribed", False):
@@ -1689,6 +1721,7 @@ async def _join(
     activity_due: float | None = None,
     stale_error: float | None = None,
     updater: _Updater | None = None,
+    quiet: bool = False,
 ) -> int:
     missing = _missing_self_report(agent_name, model)
     if missing:
@@ -1735,6 +1768,8 @@ async def _join(
     # transient reconnect.
     notifier = relay.TurnNotifier(wake_only_user=wake_only_user)
     echo = relay.EchoSuppressor(enabled=suppress_echo)
+    # 0.14.0: the join hint, shared by all reconnect cycles -> at most once per join.
+    share_hint = {"shown": quiet or _quiet_from_env()}
     say_tracker = relay.SayTracker(ttl=say_ttl)
 
     # Live-context holder — seeded once from --graph (if any), then fed live
@@ -1821,6 +1856,7 @@ async def _join(
                 ctl=ctl, force_persona=force_persona,
                 transport=cur_transport, invite=invite, username=username,
                 voice=voice, updater=updater, update_check=first,
+                share_hint=share_hint,
             )
             if reason == "SELF_UPDATE":  # 0.12.0: updated, main() restarts the join
                 rc = RC_RESTART
@@ -2246,6 +2282,11 @@ def main(argv: list[str] | None = None) -> None:
         help=f"0.12.0: do not update this CLI when the server names a newer cli_latest (env "
              f"{vselfupdate.ENV_OPT_OUT}=1). Default: update in place and restart the join once.",
     )
+    p_join.add_argument(
+        "--quiet", action="store_true", default=False,
+        help=f"0.14.0: no join hint (the one line 'joined via voicehook.ai ...' for you, never "
+             f"spoken; env {QUIET_ENV}=1 works too).",
+    )
     # one-shot commands against a running join
     def _add_session(p):
         p.add_argument("--session", default=None, metavar="SLUG",
@@ -2409,7 +2450,7 @@ def main(argv: list[str] | None = None) -> None:
                 force_persona=args.force_persona, control=not args.no_control,
                 transport=args.transport, status_due=args.status_due,
                 activity_due=args.activity_due, stale_error=args.stale_error,
-                voice=args.voice, updater=updater,
+                voice=args.voice, updater=updater, quiet=args.quiet,
             ))
         except KeyboardInterrupt:
             rc = 130
