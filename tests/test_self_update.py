@@ -291,7 +291,7 @@ def test_426_opt_out_prints_command_and_exits_7(clean_env, monkeypatch, capsys):
     assert rc == su.EXIT_OUTDATED == 7
     assert runner.calls == [] and len(calls) == 1 and _FakeRoom.instances == []
     err = capsys.readouterr().err
-    assert "too old for this server (min 0.13.0" in err and "uv tool upgrade voicehook-agent" in err
+    assert "too old for this server (min 0.13.0" in err and "pip install -U voicehook-agent" in err
 
 
 def test_426_self_update_then_restart(clean_env, monkeypatch):

@@ -35,6 +35,11 @@ UPGRADE_UV = f"uv tool upgrade {PACKAGE}"
 UPGRADE_UV_FORCE = f"uv tool install --force {REPO}"
 UPGRADE_PIP = f"pip install --upgrade --user {REPO}"
 
+# 0.14.2: update commands shown to the user (PyPI), see update_commands()
+INSTALL_UV = f"uv tool install --upgrade {PACKAGE}"
+INSTALL_PIP = f"pip install -U {PACKAGE}"
+INSTALL_UVX = f"uvx {PACKAGE}@latest"
+
 _VER_RX = re.compile(r"^\s*v?(\d+)\.(\d+)(?:\.(\d+))?")
 
 
@@ -87,6 +92,20 @@ def install_method(prefix: str | None = None) -> str:
     if (p / "uv-receipt.toml").exists() or "/uv/tools/" in p.as_posix() + "/":
         return "uv"
     return "pip"
+
+
+def update_commands(prefix: str | None = None) -> list[str]:
+    """0.14.2: the PyPI update commands, the one matching this install first
+    (uvx runs from uv's cache: .../uv/archive-v0/...)."""
+    prefix = prefix or sys.prefix
+    p = Path(prefix).as_posix() + "/"
+    if "/uv/archive-" in p:
+        first = INSTALL_UVX
+    elif install_method(prefix) == "uv":
+        first = INSTALL_UV
+    else:
+        first = INSTALL_PIP
+    return [first, *(c for c in (INSTALL_UV, INSTALL_PIP, INSTALL_UVX) if c != first)]
 
 
 def externally_managed(stdlib: str | None = None) -> bool:

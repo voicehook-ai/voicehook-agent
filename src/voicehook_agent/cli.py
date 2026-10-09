@@ -107,6 +107,10 @@ Self-update (0.12.0): the server names cli_min / cli_latest in every join answer
                                      HTTP 426 (below cli_min): print the upgrade command, try
                                      one self-update, else exit 7.
     join --no-self-update            off (env VOICEHOOK_NO_SELF_UPDATE=1)
+    version notice (0.14.2)          always, also with self-update off: stderr [warn] plus,
+                                     with --json, {"_meta":"update","latest":..,"commands":[..]}
+                                     (uv tool install --upgrade / pip install -U / uvx @latest);
+                                     HTTP 426: stderr [error] plus {"_meta":"outdated"}, exit 7
 
 Join hint (0.14.0): once per join, after the connect, one line for YOU (never spoken):
     plain mode                       stderr: joined via voicehook.ai · Talk with your agents · <url>
@@ -361,6 +365,21 @@ def _emit_share_hint(json_mode: bool) -> None:
         print(json.dumps(obj, ensure_ascii=False), flush=True)
     else:
         print(f"{SHARE_TEXT} · {SHARE_URL}", file=sys.stderr, flush=True)
+
+
+def _emit_version_notice(json_mode: bool, kind: str, text: str, **extra) -> None:
+    """0.14.2: version notice the user always sees. stderr always (also with --json);
+    --json adds one `_meta` event on stdout: kind "update" (cli_latest newer, join goes on)
+    or "outdated" (HTTP 426 below cli_min, exit 7)."""
+    print(f"[{'warn' if kind == 'update' else 'error'}] {text}", file=sys.stderr, flush=True)
+    if json_mode:
+        obj = {"role": "system", "topic": "_meta", "_meta": kind, "text": text,
+               "current": _VERSION, **extra}
+        print(json.dumps(obj, ensure_ascii=False), flush=True)
+
+
+def _update_text(cmds: list[str]) -> str:
+    return f"Update: {cmds[0]}" + "".join(f"  or: {c}" for c in cmds[1:])
 
 
 def _load_persona(persona: str | None, persona_file: str | None,
@@ -1185,8 +1204,10 @@ class _Updater:
     """0.12.0 self-update state of one join (see selfupdate.py). `restart` + `identity`
     tell main() to re-exec after _join has cleaned up."""
 
-    def __init__(self, opt_out: bool = False, *, env=None, runner=None) -> None:
+    def __init__(self, opt_out: bool = False, *, env=None, runner=None,
+                 json_mode: bool = False) -> None:
         self.env = os.environ if env is None else env
+        self.json_mode = json_mode  # 0.14.2: version notices also as a --json _meta event
         self.opt_out = vselfupdate.opted_out(opt_out, self.env)
         self.restarted = vselfupdate.already_restarted(self.env)
         self.runner = runner
@@ -1206,6 +1227,12 @@ class _Updater:
         latest = info.get("cli_latest")
         if not check:
             return False
+        if vselfupdate.is_newer(latest, _VERSION):  # 0.14.2: always visible, once per join
+            cmds = vselfupdate.update_commands()
+            _emit_version_notice(
+                self.json_mode, "update",
+                f"voicehook-agent {latest} is available (this is {_VERSION}). {_update_text(cmds)}",
+                latest=latest, commands=cmds)
         why = vselfupdate.decide(latest, _VERSION, opt_out=self.opt_out,
                                  restarted=self.restarted or self.tried)
         if why == "current":
@@ -1239,9 +1266,12 @@ class _Updater:
         d = d if isinstance(d, dict) else {}
         vselfupdate.remember(d)
         lo, hi = d.get("cli_min", "?"), d.get("cli_latest", "?")
-        print(f"[error] voicehook-agent {_VERSION} is too old for this server (min {lo}, "
-              f"latest {hi}).\n        Upgrade: {d.get('upgrade') or vselfupdate.UPGRADE_UV}\n"
-              f"        {vselfupdate.manual_hint()}", file=sys.stderr, flush=True)
+        cmds = vselfupdate.update_commands()  # 0.14.2: PyPI commands, this install first
+        _emit_version_notice(
+            self.json_mode, "outdated",
+            f"voicehook-agent {_VERSION} is too old for this server (min {lo}, latest {hi}). "
+            f"{_update_text(cmds)}", cli_min=lo, latest=hi, commands=cmds,
+            exit_code=vselfupdate.EXIT_OUTDATED)
         if self.opt_out or self.restarted or self.tried:
             return False
         print("[info] trying a self-update ...", file=sys.stderr, flush=True)
@@ -2433,7 +2463,7 @@ def main(argv: list[str] | None = None) -> None:
         except OSError as e:
             print(f"[error] could not read --persona-file: {e!r}", file=sys.stderr)
             sys.exit(2)
-        updater = _Updater(args.no_self_update)
+        updater = _Updater(args.no_self_update, json_mode=args.json)
         try:
             rc = asyncio.run(_join(
                 args.invite_url, args.identity, args.name, args.json, persona_text,
