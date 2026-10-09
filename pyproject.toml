@@ -1,19 +1,20 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]  # PEP 639: SPDX license + license-files
 build-backend = "hatchling.build"
 
 [project]
 name = "voicehook-agent"
 version = "0.14.0"
 description = "Zero-install CLI for any LLM agent to join a voicehook.ai voice call as a 2nd participant"
-readme = "README.md"
+readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "voicehook.ai" }]
-keywords = ["voicehook", "livekit", "agent", "voice", "llm"]
+keywords = ["voicehook", "livekit", "agent", "voice", "llm", "claude-code", "voicebot", "speech"]
 classifiers = [
   "Development Status :: 3 - Alpha",
-  "License :: OSI Approved :: MIT License",
+  "Intended Audience :: Developers",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
@@ -22,6 +23,7 @@ classifiers = [
   "Environment :: Console",
   "Operating System :: POSIX",
   "Topic :: Communications :: Conferencing",
+  "Topic :: Multimedia :: Sound/Audio :: Speech",
 ]
 dependencies = [
   "livekit>=0.18.0",
@@ -35,7 +37,8 @@ voicehook-agent-hook = "voicehook_agent.activity:console_main"
 [project.urls]
 Homepage = "https://voicehook.ai"
 Repository = "https://github.com/voicehook-ai/voicehook-agent"
-Documentation = "https://voicehook.ai/agent"
+Issues = "https://github.com/voicehook-ai/voicehook-agent/issues"
+Documentation = "https://voicehook.ai/agent/SKILL.md"
 
 [tool.hatch.build.targets.sdist]
 # Nur was zum Bauen/Installieren noetig ist; tests/, assets/, plugins/, scripts/ bleiben im Repo.
