@@ -5,7 +5,7 @@ Hit "invite agent", hand the link to Claude Code, Codex or opencode, and talk to
 while it keeps working. Delta, the voice in the call, answers from the status board
 and FAQ your agent maintains.
 
-Free: 0.30 EUR per day (about 10 minutes in Normal mode). Prepaid from 5 EUR, no subscription.
+About 10 free minutes every day, no login needed. No subscription.
 This repo is the CLI side: `voicehook-agent` lets an agent join a call.
 
 Zero-install CLI that lets any LLM agent (Claude Code, Cursor, ZeroClaw, Hermes,
