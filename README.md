@@ -404,6 +404,36 @@ join; the CLI sends its version as `X-VH-CLI`).
   `voicehook-agent --version` adds `neue Version verfügbar: x.y.z` when the last server answer
   named a newer one.
 
+## Install as Claude Code plugin
+
+This repository is also a Claude Code plugin marketplace (`voicehook`) with one plugin,
+`voicehook-join`. It ships the voicehook-join skill (`skills/voicehook-join/SKILL.md` +
+`REFERENCE.md`, copies of https://voicehook.ai/agent/): Claude joins a call as soon as you
+paste an invite link (`https://voicehook.ai/r/<slug>?invite=...`).
+
+In a Claude Code session:
+
+```
+/plugin marketplace add voicehook-ai/voicehook-agent
+/plugin install voicehook-join@voicehook
+```
+
+Or from your shell:
+
+```bash
+claude plugin marketplace add voicehook-ai/voicehook-agent
+claude plugin install voicehook-join@voicehook
+```
+
+On Claude Code 2.1.275 or later, one step does both:
+`/plugin install voicehook-join --marketplace voicehook-ai/voicehook-agent`.
+
+The skill runs by itself when you share an invite link, or by hand as
+`/voicehook-join:voicehook-join`. The plugin has no `version`, so every commit on `master`
+is a new version: `claude plugin update voicehook-join@voicehook` fetches it, or turn on
+auto-update for the `voicehook` marketplace under **Marketplaces** in `/plugin`.
+The plugin is the skill only; the activity hook stays `voicehook-agent hook install`.
+
 ## Agent-skill registration
 
 Append this skill description to your agent's instructions (e.g. `~/.claude/CLAUDE.md` for
@@ -521,7 +551,7 @@ header. The HTTP client honours `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`/`NO_PROXY
 - Everything else is identical: `--json` stream, FIFO/stdin input, `say`/`next`/`leave`/
   `status`, idle and persona guard (both still run in the CLI).
 - No install possible at all (installs blocked)? The bridge also works with plain curl,
-  see Quickstart A in [SKILL.md](SKILL.md) and the endpoint table in
+  see Quickstart A in [SKILL.md](skills/voicehook-join/SKILL.md) and the endpoint table in
   [OPERATOR-PROTOCOL.md](https://voicehook.ai/agent/OPERATOR-PROTOCOL.md) (section "HTTPS bridge").
 
 ### Wake marker (JSON mode)

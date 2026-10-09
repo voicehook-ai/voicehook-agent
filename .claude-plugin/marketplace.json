@@ -1,0 +1,16 @@
+{
+  "name": "voicehook",
+  "description": "voicehook.ai plugins for Claude Code. Talk with your agents.",
+  "owner": {
+    "name": "Silverstar187 / voicehook.ai",
+    "url": "https://voicehook.ai"
+  },
+  "plugins": [
+    {
+      "name": "voicehook-join",
+      "source": "./",
+      "description": "Talk with your agents. Join a voicehook.ai voice call as the brain behind its voicebot.",
+      "category": "communication"
+    }
+  ]
+}
