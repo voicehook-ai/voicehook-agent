@@ -83,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
         print("NEUE ruff-Befunde (ueber Baseline):")
         print("\n".join(f"  {x}" for x in new))
         files = sorted({path for path, _ in current if current[(path, _)] > baseline.get((path, _), 0)})
+        sys.stdout.flush()  # Zusammenfassung vor der ruff-Detailausgabe im CI-Log
         subprocess.run(["ruff", "check", *files], cwd=ROOT, check=False)
         print("Fix: Befund beheben (ruff check --fix hilft bei [*]). Baseline NICHT hochsetzen.")
         return 1
