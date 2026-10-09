@@ -407,8 +407,9 @@ join; the CLI sends its version as `X-VH-CLI`).
 ## Install as Claude Code plugin
 
 This repository is also a Claude Code plugin marketplace (`voicehook`) with one plugin,
-`voicehook-join`. It ships the voicehook-join skill (`skills/voicehook-join/SKILL.md` +
-`REFERENCE.md`, copies of https://voicehook.ai/agent/): Claude joins a call as soon as you
+`voicehook-join` in `plugins/voicehook-join/`. It ships the voicehook-join skill
+(`plugins/voicehook-join/skills/voicehook-join/SKILL.md` + `REFERENCE.md`, byte-identical
+copies of https://voicehook.ai/agent/): Claude joins a call as soon as you
 paste an invite link (`https://voicehook.ai/r/<slug>?invite=...`).
 
 In a Claude Code session:
@@ -429,9 +430,17 @@ On Claude Code 2.1.275 or later, one step does both:
 `/plugin install voicehook-join --marketplace voicehook-ai/voicehook-agent`.
 
 The skill runs by itself when you share an invite link, or by hand as
-`/voicehook-join:voicehook-join`. The plugin has no `version`, so every commit on `master`
-is a new version: `claude plugin update voicehook-join@voicehook` fetches it, or turn on
-auto-update for the `voicehook` marketplace under **Marketplaces** in `/plugin`.
+`/voicehook-join:voicehook-join`. `claude plugin update voicehook-join@voicehook` fetches a
+new version, or turn on auto-update for the `voicehook` marketplace under **Marketplaces**
+in `/plugin`.
+
+Releasing (maintainers): the plugin is pinned by `version` in
+`plugins/voicehook-join/.claude-plugin/plugin.json`; users get a change ONLY when that
+string changes. On every change under `plugins/voicehook-join/`: copy `SKILL.md` and
+`REFERENCE.md` byte-identical from voicehook-v4 `skills/voicehook-join/` (= live
+https://voicehook.ai/agent/), bump `version` (skill text or protocol change = minor
+`1.x.0`, typo/wording = patch `1.0.x`, breaking = major), run
+`claude plugin validate plugins/voicehook-join` and `claude plugin validate .`.
 The plugin is the skill only; the activity hook stays `voicehook-agent hook install`.
 
 ## Agent-skill registration
@@ -560,7 +569,7 @@ header. The HTTP client honours `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`/`NO_PROXY
 - Everything else is identical: `--json` stream, FIFO/stdin input, `say`/`next`/`leave`/
   `status`, idle and persona guard (both still run in the CLI).
 - No install possible at all (installs blocked)? The bridge also works with plain curl,
-  see Quickstart A in [SKILL.md](skills/voicehook-join/SKILL.md) and the endpoint table in
+  see Quickstart A in [SKILL.md](plugins/voicehook-join/skills/voicehook-join/SKILL.md) and the endpoint table in
   [OPERATOR-PROTOCOL.md](https://voicehook.ai/agent/OPERATOR-PROTOCOL.md) (section "HTTPS bridge").
 
 ### Wake marker (JSON mode)
