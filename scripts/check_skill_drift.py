@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Drift-Check Plugin-Skill vs. oeffentliche Quelle (CI-Job "skill-drift").
 
-Die kanonische Fassung von SKILL.md/REFERENCE.md liegt im (privaten) voicehook-v4-Repo
-und wird unter https://voicehook.ai/agent/ ausgeliefert. Das Plugin muss byte-gleich sein.
+Die kanonische Fassung des Plugin-Skills (MCP-Variante seit Plugin 1.2.0) liegt im
+(privaten) voicehook-v4-Repo unter skills/voicehook-join-mcp/SKILL.md und wird unter
+https://voicehook.ai/agent/mcp/ ausgeliefert. Das Plugin muss byte-gleich sein.
 Drift ist zeitweise legitim (v4 deployt vor dem Plugin-Sync), deshalb eigener Job.
 """
 from __future__ import annotations
@@ -15,8 +16,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL_DIR = Path("plugins/voicehook-join/skills/voicehook-join")
-FILES = ("SKILL.md", "REFERENCE.md")
-DEFAULT_BASE = "https://voicehook.ai/agent/"
+FILES = ("SKILL.md",)
+DEFAULT_BASE = "https://voicehook.ai/agent/mcp/"
 
 
 class FetchError(RuntimeError):
@@ -38,7 +39,7 @@ def diff(local: bytes, remote: bytes, name: str, limit: int = 40) -> str:
     lines = list(difflib.unified_diff(
         local.decode("utf-8", "replace").splitlines(),
         remote.decode("utf-8", "replace").splitlines(),
-        fromfile=f"plugin/{name}", tofile=f"voicehook.ai/agent/{name}", lineterm=""))
+        fromfile=f"plugin/{name}", tofile=f"voicehook.ai/agent/mcp/{name}", lineterm=""))
     more = len(lines) - limit
     return "\n".join(lines[:limit]) + (f"\n... (+{more} Zeilen)" if more > 0 else "")
 

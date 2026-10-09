@@ -407,10 +407,11 @@ join; the CLI sends its version as `X-VH-CLI`).
 ## Install as Claude Code plugin
 
 This repository is also a Claude Code plugin marketplace (`voicehook`) with one plugin,
-`voicehook-join` in `plugins/voicehook-join/`. It ships the voicehook-join skill
-(`plugins/voicehook-join/skills/voicehook-join/SKILL.md` + `REFERENCE.md`, byte-identical
-copies of https://voicehook.ai/agent/): Claude joins a call as soon as you
-paste an invite link (`https://voicehook.ai/r/<slug>?invite=...`).
+`voicehook-join` in `plugins/voicehook-join/`. Since 1.2.0 it connects Claude to the
+voicehook MCP server (`https://voicehook.ai/mcp`, `.mcp.json`, no headers, no keys) and ships
+the MCP variant of the voicehook-join skill (`plugins/voicehook-join/skills/voicehook-join/SKILL.md`,
+byte-identical copy of https://voicehook.ai/agent/mcp/SKILL.md): Claude joins a call as soon
+as you paste an invite link (`https://voicehook.ai/r/<slug>?invite=...`).
 
 In a Claude Code session:
 
@@ -436,12 +437,13 @@ in `/plugin`.
 
 Releasing (maintainers): the plugin is pinned by `version` in
 `plugins/voicehook-join/.claude-plugin/plugin.json`; users get a change ONLY when that
-string changes. On every change under `plugins/voicehook-join/`: copy `SKILL.md` and
-`REFERENCE.md` byte-identical from voicehook-v4 `skills/voicehook-join/` (= live
-https://voicehook.ai/agent/), bump `version` (skill text or protocol change = minor
+string changes. On every change under `plugins/voicehook-join/`: copy `SKILL.md`
+byte-identical from voicehook-v4 `skills/voicehook-join-mcp/` (= live
+https://voicehook.ai/agent/mcp/SKILL.md), bump `version` (skill text or protocol change = minor
 `1.x.0`, typo/wording = patch `1.0.x`, breaking = major), run
 `claude plugin validate plugins/voicehook-join` and `claude plugin validate .`.
-The plugin is the skill only; the activity hook stays `voicehook-agent hook install`.
+The plugin is the MCP server entry plus the skill; the CLI and its activity hook
+(`voicehook-agent hook install`) are separate and not part of the plugin.
 
 ## Agent-skill registration
 
@@ -638,7 +640,7 @@ CI (`.github/workflows/ci.yml`) runs on every PR and on pushes to `master`:
 | `ruff (neue Befunde brechen)` | ruff 0.16.10 against `scripts/ruff-baseline.json` (legacy findings counted per file and rule; any new one fails). After cleaning up: `python scripts/ruff_baseline.py --update` |
 | `plugin validate` | `claude plugin validate --strict` for the plugin and the marketplace (no login needed) |
 | `secret-scan (gitleaks)` | gitleaks over the full history; known fake test secrets are allowlisted by exact value and file in `.gitleaks.toml` |
-| `skill-drift (voicehook.ai/agent)` | plugin `SKILL.md`/`REFERENCE.md` byte-identical to https://voicehook.ai/agent/. Drift right after a website deploy is expected; resync with the command the job prints |
+| `skill-drift (voicehook.ai/agent/mcp)` | plugin `SKILL.md` byte-identical to https://voicehook.ai/agent/mcp/SKILL.md. Drift right after a website deploy is expected; resync with the command the job prints |
 
 Releases (`.github/workflows/release.yml`) use two independent tag families:
 
