@@ -2,13 +2,52 @@
 
 Companion to [SKILL.md](SKILL.md) (https://voicehook.ai/agent/SKILL.md). Read it when you
 need one of the details below; the skill itself is enough to join and talk. `$D/vh` is the
-wrapper from Quickstart A or B. Protocol: https://voicehook.ai/agent/OPERATOR-PROTOCOL.md.
+wrapper from Quickstart A (SKILL.md) or from the optional CLI below. Protocol:
+https://voicehook.ai/agent/OPERATOR-PROTOCOL.md.
+
+## Optional: the voicehook-agent CLI (local machine)
+
+Quickstart A in SKILL.md needs no install and is the default. The CLI is for a local machine
+that wants more: a direct WebRTC connection, the hooks that keep status board and activity
+log fresh on their own, persona and mode control at join, and self-update. It installs
+software from GitHub: **install it only with the user's OK.** The install is pinned to one
+reviewed commit (CLI 0.14.0).
+
+```bash
+R=git+https://github.com/voicehook-ai/voicehook-agent@20f7d851003add33cff4fd798aeb3d89857becc9; export PATH="$HOME/.local/bin:$PATH"
+command -v voicehook-agent || uv tool install -q $R || pip install -q --user $R
+D=$(mktemp -d /tmp/vh-XXXXXX); mkfifo $D/in; (setsid sleep 86400 >$D/in & echo $! >$D/holder)
+printf '#!/bin/sh\nexport VOICEHOOK_AGENT_HOME=%s\n[ "$1" = leave ] || exec "%s" "$@"\n"%s" "$@"; rc=$?; kill $(cat %s/holder) 2>/dev/null; exit $rc\n' \
+  $D "$(command -v voicehook-agent)" "$(command -v voicehook-agent)" $D >$D/vh; chmod +x $D/vh
+(setsid nohup $D/vh join "{{INVITE_URL}}" --name "<dein-eigener-Name>" --model <dein-Modellname> --json --greet "Hallo, hier ist <dein-eigener-Name>. Worum geht's?" <$D/in >$D/out 2>&1 &)
+$D/vh next --help >/dev/null 2>&1 && echo "D=$D ready" || echo "D=$D CLI too old: uv tool install --force $R"
+```
+
+- Same `next`/`say`/`leave`/`status` JSON as Quickstart A; `$D/vh` gives the join its own
+  control socket (`VOICEHOOK_AGENT_HOME=$D`), so other agents on the machine never collide.
+  The CLI switches to the HTTPS bridge on its own behind `HTTPS_PROXY` (`--transport auto|webrtc|bridge`).
+- `--name` / `--model` are mandatory (exit 2 without them); `--voice`, `--username` as the
+  bridge fields `"voice"`, `"username"`. `setsid` matters: without it the join dies with your tool call.
+- Status board with flags: `$D/vh status --doing "deployt den Worker, ETA 2 min" --open "Tests"
+  --done "Analyse" --faq "Wann live?::in 2 min"` (`--faq` repeatable, split on the first `::`). `next`
+  adds `status_due: true` + `status_reason` (`empty`, `status_request`, `stale` = older than 45 s while
+  `doing`/`open` is set; `--status-due SEC`, env `VOICEHOOK_STATUS_DUE`) + `hint` with the exact
+  command: run it before your `say`. A progress `say` ("fertig", "live", "deploye") without a fresh
+  board returns `status_reason: "say_progress"`. Finished: `--done "..."`, not `vh status ""` (empty = due).
+- No `uv`: the `pip` fallback above (PEP 668: add `--break-system-packages`), or Quickstart A.
+  The CLI updates itself on join (self-update); `--no-self-update` keeps the pinned commit.
+- `$D/out` (JSON lines) shows within ~5 s `connected — N peers` and a `room-state` line with
+  a peer of `"kind": "agent"` (the voicebot), then `greet auto-pushed` and your greeting as
+  `"role": "operator"` once spoken. `peer-left: … (agent)` = the voicebot is gone: tell the
+  user to reload the call tab.
+
 
 ## Activity feed (CLI 0.10.0, hooks 0.13.0)
 
 Delta sees what you do, one line per tool call, and answers "what is <Name> doing" from it.
 
-- Claude Code: `voicehook-agent hook install` once. It merges a PreToolUse and a PostToolUse
+- Claude Code, **only with the user's explicit OK** (it edits the user's settings):
+  `voicehook-agent hook install` once. It merges a PreToolUse and a PostToolUse
   hook (`voicehook-agent-hook pre-tool-use || true` / `voicehook-agent-hook post-tool-use`)
   into `~/.claude/settings.json`, idempotent; re-run it after an update to add the
   PreToolUse hook to an older install. `voicehook-agent hook print` shows the snippet.
@@ -27,8 +66,8 @@ Delta sees what you do, one line per tool call, and answers "what is <Name> doin
 
 ### Hook feed for a Quickstart A (curl bridge) join (CLI 0.13.0)
 
-With the CLI installed next to a curl bridge join, the hook can feed that join too. Right
-after the Quickstart A block:
+With the CLI installed next to a curl bridge join, the hook can feed that join too, **only
+with the user's explicit OK**. Right after the Quickstart A block:
 
 ```bash
 voicehook-agent bridge-session --save $D/join --base "$(cat $D/base)"
