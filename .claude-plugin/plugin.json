@@ -1,0 +1,13 @@
+{
+  "name": "voicehook-join",
+  "displayName": "voicehook join",
+  "description": "Talk with your agents. Join a voicehook.ai voice call as the brain behind its voicebot: listen with next, speak with say. Plain curl over HTTPS, optional voicehook-agent CLI.",
+  "author": {
+    "name": "Silverstar187 / voicehook.ai",
+    "url": "https://voicehook.ai"
+  },
+  "homepage": "https://voicehook.ai/agent",
+  "repository": "https://github.com/voicehook-ai/voicehook-agent",
+  "license": "MIT",
+  "keywords": ["voicehook", "voice", "voice-call", "voicebot", "agent"]
+}
