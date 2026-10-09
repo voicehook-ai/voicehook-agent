@@ -164,21 +164,34 @@ jobs:
           mapfile -t args <<< "$out"
           printf 'DRY-RUN, wuerde ausfuehren: gh'; printf ' %q' "${args[@]}"; echo
 
-  # PyPI Trusted Publishing: vorbereitet, NICHT aktiv (if: false).
-  # Aktivieren erst nach Einrichtung auf pypi.org (siehe README, Abschnitt "Releases").
+  # PyPI via Trusted Publishing (OIDC, kein API-Token). Nur fuer cli-v*-Tags, nach
+  # Versionspruefung (plan), Build und GitHub-Release; laedt genau die Build-Artefakte hoch.
+  # Pending Publisher auf pypi.org: voicehook-ai / voicehook-agent / release.yml / Environment pypi.
   pypi-publish:
-    name: publish to PyPI (inaktiv)
+    name: publish to PyPI
     needs: [plan, build, release]
-    if: false # Aktivieren: github.event_name == 'push' && needs.plan.outputs.has_cli == 'true'
+    if: >-
+      github.event_name == 'push' && startsWith(github.ref_name, 'cli-v')
+      && needs.plan.outputs.has_cli == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     environment:
       name: pypi
-      url: https://pypi.org/p/voicehook-agent
+      url: https://pypi.org/project/voicehook-agent/
     permissions:
-      id-token: write # Trusted Publishing (OIDC), kein API-Token
+      id-token: write # nur dieser Job: OIDC-Token fuer Trusted Publishing
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: dist
           path: dist/
+      - name: Artefakte == Tag-Version (genau sdist + wheel)
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          v="${VERSION#cli-v}"
+          ls -l dist/
+          test -f "dist/voicehook_agent-${v}-py3-none-any.whl"
+          test -f "dist/voicehook_agent-${v}.tar.gz"
+          test "$(find dist -type f | wc -l)" -eq 2
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
