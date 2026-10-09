@@ -1,0 +1,26 @@
+# gitleaks-Konfiguration fuer CI (.github/workflows/ci.yml, Job "secret-scan").
+# Standardregeln bleiben vollstaendig aktiv; erlaubt sind NUR die bekannten,
+# absichtlich gefaelschten Test-Secrets, mit denen der Scrubber in
+# src/voicehook_agent/activity.py getestet wird, und NUR in diesen Testdateien.
+# Neue Fake-Secrets bewusst hier eintragen (exaktes Literal + Datei), nie ganze
+# Verzeichnisse ausnehmen.
+
+title = "voicehook-agent gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Fake-Secrets der Scrubber-Tests (tests/test_activity*.py)"
+condition = "AND"
+paths = [
+  '''^tests/test_activity(_due)?\.py$''',
+]
+regexTarget = "match"
+regexes = [
+  # Stripe-Fakes (sk_/rk_live_51H + fortlaufendes Alphabet)
+  '''sk_live_51Habcdefghijk(lmnop)?''',
+  '''rk_live_51Habcdefghijklmn''',
+  # Passwort-Fake aus den Key=Value-Scrub-Tests
+  '''hunter2''',
+]

@@ -1,0 +1,43 @@
+{
+  "src/voicehook_agent/cli.py": {
+    "ASYNC230": 3,
+    "BLE001": 17,
+    "S110": 7,
+    "SIM102": 1,
+    "SIM115": 2
+  },
+  "src/voicehook_agent/relay.py": {
+    "UP035": 1
+  },
+  "src/voicehook_agent/session.py": {
+    "S110": 3,
+    "TRY004": 1,
+    "UP035": 1
+  },
+  "src/voicehook_agent/transport.py": {
+    "S110": 2
+  },
+  "tests/test_call_end.py": {
+    "F811": 13,
+    "PLR0133": 1
+  },
+  "tests/test_cli_op_invite.py": {
+    "I001": 1,
+    "RUF059": 3
+  },
+  "tests/test_orphan_guard.py": {
+    "F811": 6,
+    "I001": 1
+  },
+  "tests/test_relay.py": {
+    "F401": 1
+  },
+  "tests/test_session.py": {
+    "RUF012": 2,
+    "UP037": 1
+  },
+  "tests/test_transport.py": {
+    "PLR0402": 1,
+    "RUF059": 2
+  }
+}

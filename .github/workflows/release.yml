@@ -1,0 +1,184 @@
+name: Release
+
+# Getrennte Tag-Familien (siehe scripts/release_check.py):
+#   cli-vX.Y.Z     == pyproject version == voicehook_agent.__version__  -> Release mit sdist + wheel
+#   plugin-vX.Y.Z  == plugins/voicehook-join/.claude-plugin/plugin.json -> Release ohne Python-Artefakte
+# Echte Releases NUR per Tag-Push. pull_request und workflow_dispatch sind Trockenlaeufe:
+# gleiche Pruefung, gleicher Build, der gh-Befehl wird nur ausgegeben.
+on:
+  push:
+    tags: ["cli-v*.*.*", "plugin-v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag fuer den Trockenlauf (z. B. cli-v0.14.0); leer = beide aus den Dateien ableiten"
+        required: false
+        default: ""
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "scripts/release_check.py"
+      - "pyproject.toml"
+      - "src/voicehook_agent/__init__.py"
+      - "plugins/voicehook-join/.claude-plugin/plugin.json"
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  plan:
+    name: release plan (Versionen pruefen)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      has_cli: ${{ steps.plan.outputs.has_cli }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # Tags fuer --notes-start-tag
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+        run: |
+          matrix=$(python scripts/release_check.py plan --event "$EVENT" --tag "$TAG")
+          echo "$matrix" | python -m json.tool
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          if echo "$matrix" | grep -q '"kind": "cli"'; then has_cli=true; else has_cli=false; fi
+          echo "has_cli=$has_cli" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build sdist + wheel
+    needs: plan
+    if: needs.plan.outputs.has_cli == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build twine -e '.[test]'
+      - name: pytest (Release nur auf gruenem Stand)
+        run: python -m pytest tests -q
+      - run: python -m build
+      - name: twine check (PyPI-tauglich)
+        run: python -m twine check --strict dist/*
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    name: release ${{ matrix.tag }}
+    needs: [plan, build]
+    # build ist bei plugin-Tags uebersprungen; plan muss gruen sein.
+    if: >-
+      always() && github.event_name == 'push'
+      && needs.plan.result == 'success'
+      && (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # gh release create
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - if: matrix.kind == 'cli'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - name: gh release create
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ matrix.tag }}
+          PREV: ${{ matrix.prev_tag }}
+          KIND: ${{ matrix.kind }}
+        run: |
+          assets=()
+          if [ "$KIND" = cli ]; then assets=(dist/*); fi
+          out=$(python3 scripts/release_check.py gh-args --tag "$TAG" --prev "$PREV" "${assets[@]}")
+          mapfile -t args <<< "$out"
+          printf '+ gh'; printf ' %q' "${args[@]}"; echo
+          gh "${args[@]}"
+
+  release-dry-run:
+    name: release dry-run ${{ matrix.tag }}
+    needs: [plan, build]
+    if: >-
+      always() && github.event_name != 'push'
+      && needs.plan.result == 'success'
+      && (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - if: matrix.kind == 'cli'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - name: Assets pruefen + gh-Befehl ausgeben (nicht ausfuehren)
+        env:
+          TAG: ${{ matrix.tag }}
+          PREV: ${{ matrix.prev_tag }}
+          KIND: ${{ matrix.kind }}
+          VERSION: ${{ matrix.version }}
+        run: |
+          assets=()
+          if [ "$KIND" = cli ]; then
+            assets=(dist/*)
+            ls -l dist/
+            test -f "dist/voicehook_agent-${VERSION}-py3-none-any.whl"
+            test -f "dist/voicehook_agent-${VERSION}.tar.gz"
+            test "${#assets[@]}" -eq 2
+          fi
+          out=$(python3 scripts/release_check.py gh-args --tag "$TAG" --prev "$PREV" "${assets[@]}")
+          mapfile -t args <<< "$out"
+          printf 'DRY-RUN, wuerde ausfuehren: gh'; printf ' %q' "${args[@]}"; echo
+
+  # PyPI Trusted Publishing: vorbereitet, NICHT aktiv (if: false).
+  # Aktivieren erst nach Einrichtung auf pypi.org (siehe README, Abschnitt "Releases").
+  pypi-publish:
+    name: publish to PyPI (inaktiv)
+    needs: [plan, build, release]
+    if: false # Aktivieren: github.event_name == 'push' && needs.plan.outputs.has_cli == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/voicehook-agent
+    permissions:
+      id-token: write # Trusted Publishing (OIDC), kein API-Token
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2

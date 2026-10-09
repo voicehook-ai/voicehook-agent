@@ -37,6 +37,11 @@ Homepage = "https://voicehook.ai"
 Repository = "https://github.com/voicehook-ai/voicehook-agent"
 Documentation = "https://voicehook.ai/agent"
 
+[tool.hatch.build.targets.sdist]
+# Nur was zum Bauen/Installieren noetig ist; tests/, assets/, plugins/, scripts/ bleiben im Repo.
+only-include = ["src/voicehook_agent", "pyproject.toml", "README.md", "LICENSE"]
+exclude = ["__pycache__", "*.pyc"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/voicehook_agent"]
 
