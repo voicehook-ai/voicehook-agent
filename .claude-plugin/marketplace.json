@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "voicehook-join",
-      "source": "./",
+      "source": "./plugins/voicehook-join",
       "description": "Talk with your agents. Join a voicehook.ai voice call as the brain behind its voicebot.",
       "category": "communication"
     }
