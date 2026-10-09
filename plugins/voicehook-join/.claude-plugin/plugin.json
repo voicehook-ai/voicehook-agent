@@ -16,5 +16,6 @@
     "voice-call",
     "voicebot",
     "agent"
-  ]
+  ],
+  "icon": "./.claude-plugin/icon.png"
 }
