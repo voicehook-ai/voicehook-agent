@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "voicehook-agent"
-version = "0.14.1"
+version = "0.14.2"
 description = "Zero-install CLI for any LLM agent to join a voicehook.ai voice call as a 2nd participant"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.10"
