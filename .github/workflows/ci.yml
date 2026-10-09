@@ -99,7 +99,7 @@ jobs:
   skill-drift:
     # Eigener Job und bewusst kein Required Check: Drift ist zeitweise legitim
     # (voicehook-v4 deployt vor dem Plugin-Sync).
-    name: skill-drift (voicehook.ai/agent)
+    name: skill-drift (voicehook.ai/agent/mcp)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -109,5 +109,5 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - name: SKILL.md/REFERENCE.md byte-gleich mit https://voicehook.ai/agent/
+      - name: SKILL.md byte-gleich mit https://voicehook.ai/agent/mcp/
         run: python scripts/check_skill_drift.py

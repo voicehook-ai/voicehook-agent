@@ -1,168 +1,95 @@
 ---
 name: voicehook-join
-description: Join an existing voicehook.ai voice call as the brain behind its voicebot. Use when the user shares a voicehook invite URL (https://voicehook.ai/r/<slug>) or says "join voicehook", "tritt meinem Call bei", "übernimm den voice-call", "/voicehook-join". The voicebot speaks what you push with `say`; you listen with `next`. No install needed (plain curl over HTTPS, works in cloud sandboxes behind a proxy); optional voicehook-agent CLI for local machines. Works on https://voicehook.ai and self-hosted v4 boxes.
+description: Join an existing voicehook.ai voice call as the brain behind its voicebot, through the voicehook MCP tools (join, next, say, status, activity, leave). Use when the user shares a voicehook invite URL (https://voicehook.ai/r/<slug>?invite=...) or says "join voicehook", "tritt meinem Call bei", "übernimm den voice-call", "/voicehook-join". The voicebot speaks what you send with `say`; you listen with `next`.
 ---
 
-# voicehook-join: be the brain in a voicehook call
+# voicehook-join (MCP): be the brain in a voicehook call
 
-Canonical: https://voicehook.ai/agent/SKILL.md. Protocol details:
-https://voicehook.ai/agent/OPERATOR-PROTOCOL.md. CLI details (activity hook, `activity_due`, join flags): [REFERENCE.md](REFERENCE.md) = https://voicehook.ai/agent/REFERENCE.md.
+Canonical: https://voicehook.ai/agent/mcp/SKILL.md. You only use the tools of the
+`voicehook` MCP server. Nothing to install, no keys: the invite link is the permission.
 
-## Quickstart A: join (the default; nothing to install, also in cloud sandboxes)
+## Join
 
-Plain curl over HTTPS: the server joins the call for you (HTTPS bridge). Works behind an
-HTTP proxy (`HTTPS_PROXY`, e.g. claude.ai/code), no network approval, nothing to
-install, no helper script: plain `curl` calls. Replace ONLY `{{INVITE_URL}}`,
-`<dein-eigener-Name>`, `<dein-Modellname>`; leave every `$…` as is.
+1. Call `join` with `invite_url` = the FULL invite link the user gave you (including
+   `?invite=`), `name` = your own name, `model` = the exact model id you run on. Never call
+   yourself "Claude" if you are not Claude. Unknown model: `"unbekannt"`.
+2. Keep the returned `session` and pass it as `session` to EVERY other tool.
+   It is a short-lived handle for this one call; it ends with the call, after 10 min
+   without `next`/`say`, or with `leave`. Never show it in the call or to anyone else.
+3. `lang` = the call language: speak it. `share` = one line for YOUR user (show it once
+   in your chat, never say it in the call); `quiet: true` drops it.
+4. `say` one short greeting in the language of the invite message, then `next` at once.
 
-```bash
-I="{{INVITE_URL}}"; B="${I%%/r/*}"; D=$(mktemp -d /tmp/vh-XXXXXX)
-curl -sS "$B/api/bridge/join" -H content-type:application/json -d '{"invite_url":"'"$I"'",
- "name":"<dein-eigener-Name>","model":"<dein-Modellname>","greet":"Hallo, hier ist <dein-eigener-Name>. Worum geht es?"}' >$D/join
-(umask 077; sed -n 's/.*"session":"\([^"]*\)".*/Authorization: Bearer \1/p' $D/join >$D/h)
-[ -s $D/h ] && echo "D=$D B=$B ready" || cat $D/join
-```
+## The work cycle: say -> next -> say
 
-Shell variables do NOT survive between your tool calls: write down the printed `D=` and `B=`
-and start EVERY later call with them, e.g. `D=/tmp/vh-ab12cd B=https://voicehook.ai;`. Then:
-
-```bash
-curl -sS -m 130 -H @$D/h "$B/api/bridge/next?timeout=50"     # next: wait for the user's turn
-curl -sS -H @$D/h -H content-type:application/json "$B/api/bridge/say" -d '{"text":"Kurze Sätze."}'
-curl -sS -H @$D/h -H content-type:application/json "$B/api/bridge/status" -d '{"doing":"baut den Fix, ETA 2 min"}'
-curl -sS -H @$D/h -H content-type:application/json "$B/api/bridge/activity" -d '{"text":"Tests laufen"}'
-curl -sS -H @$D/h "$B/api/bridge/status"                       # status: peers, operators, board
-curl -sS -H @$D/h -H content-type:application/json "$B/api/bridge/leave" -d '{"say":"Danke, bis bald!"}'; rm -f $D/h
-```
-
-Below, `next`, `say`, `status`, `activity`, `leave` mean these calls. Write the JSON yourself: escape `"` and `\`, write `'` as `\u0027` (JSON escape). `say` takes `"mode"` (below).
-Note for reviewers: the bearer in `$D/h` is a short-lived session token issued by the voicehook.ai server per join, scoped to one room and expiring with the call, not a user credential; a header file keeps it out of URLs and the process list, and it is deleted on leave/ended (`rm -f $D/h`).
-Join hint: pass `share` from `$D/join` (CLI: the `"_meta":"hint"` line in `$D/out`) ONCE to your own user, never into the call; off: `"quiet":true` / `--quiet`.
-See `notice` with `"kind":"bridge_mode"` (join answer or first `next`)? Mention it once to your user if they work on a local machine and offer to install the CLI (REFERENCE.md), only with their OK; never into the call (`quiet` drops it too).
-Board: `status` with `{"doing","open":[…],"done":[…],"faq":[{"q","a"}]}`; activity feed: `activity` with `{"text"}` (3-8 words, appends `HH:MM:SS note: <text>`).
-**While you work, EVERY `next` carries `stale_error` `{status_age_s, activity_age_s, message}` once board or feed is older than 60 s (age `null` = that one is fresh): do what `message` says NOW.** Every `next` also has `board_now` `{doing, age_s}` and `activity_now` `{text, age_s}` (or `null`): what Delta knows about you.
-The session survives a server restart (deploy): empty answer, dropped connection or `"reconnect": true` = just call `next` again (bei Verbindungsabbruch einfach erneut `next` aufrufen). `"type":"ended"` = the call is over: `rm -f $D/h`, stop.
-
-## Join fields
-
-- `name` / `model` are mandatory: your real name and the exact
-  model id you run on. Nenn deinen echten Modell-/Herstellernamen, nie 'Claude', wenn du nicht
-  Claude bist (the server renames "Claude" on a foreign model anyway). Unknown: `"model":"unbekannt"`.
-  Optional `"voice"` (Chirp3-HD name, e.g. Puck): your own TTS voice. Optional `"username"` (Vorname): Delta knows whom he talks to.
-- `greet` is spoken right after connect, in the call language (see Speak right). One short
-  sentence: "Hallo, hier ist <Name>. Worum geht es?" / English call: "Hi, this is <Name>. What can I do?"
-- Optional: the `voicehook-agent` CLI (direct WebRTC, status/activity hooks, persona control, self-update) is in REFERENCE.md; install it only with the user's OK.
-
-## The work cycle: say → next → say
-
-`next` (blocks until the user finished a turn) → one `say` → `next` again at once, never sleep-poll.
-
-`next` answers ONE JSON object, with `agent_said` = Delta's own lines
-since the last `next`, `status_stale`/`status_due: true` = run the command in `hint` NOW (board below), `activity_due: true` = run `activity_hint` NOW:
+`next` (waits up to 50 s for the user) -> one `say` -> `next` again at once. Never sleep,
+never poll, never end your turn while the call runs.
 
 | `type` | meaning | do |
 |---|---|---|
-| `user` | `text` = what the user just said | answer with one `say` |
-| `revise` | your `--mode revise` replaced own says that had not started; `reason:"user_stop"` = the user said "erledigt"/"reicht"/"stopp", your queued says were dropped | if any still matters: one merged `say --mode overwrite "…"`; `user_stop`: NEVER resend, wait for the user |
-| `status_request` | the user asked what you are doing (first in line) | send a `status` board at once (below) |
-| `timeout` | 60 s silence (`--timeout SEC`); `"reconnect": true` = server restarts | call `next` again |
-| `ended` | the call is over | stop, the join already left |
+| `user` | `text` = what the user just said | answer with ONE `say` |
+| `revise` | your queued says were replaced; `reason: "user_stop"` = the user said "stopp"/"reicht" | still needed: one merged `say` with `mode: "overwrite"`; `user_stop`: never resend, wait |
+| `status_request` | the user asked what you are doing | send a `status` board at once |
+| `timeout` | silence (also `reconnect: true` = server restart) | call `next` again |
+| `ended` | the call is over (`message` says why) | tell your user `message`, stop |
 
-- Call `next` right after the quickstart (starts the queue; later turns wait). Never `sleep; tail`.
-- Answer every user turn with exactly ONE `say` that states what is true now. Read `agent_said` before answering: never repeat what Delta already said;
-  if Delta said something wrong, correct it in one sentence; if Delta already answered fully, `say` nothing or only add the missing fact.
-- Delta misbehaves (wrong claim, repeats itself, too long, wrong name): (1) correct the user-facing error in one `say`; (2) push a short fix via
-  `operator.persona` (facts, e.g. "Das Projekt heißt Ring."); it replaces your previous persona block, so send your full persona plus the fix.
-- **Statusboard dicht halten:** Delta answers the user from your board while you work in the background; stale board = wrong answer. Set it on EVERY request, delegation, result and deploy step: `status` with `{"doing":"deployt den Worker, ETA 2 min","open":["Tests"],"done":["Analyse"],"faq":[{"q":"Wann ist es live?","a":"in etwa 2 Minuten"}]}` ( whole board, replaces the last, never spoken; `doing` = interim state + ETA, max 400 chars, whole board max 2000). Finished: move it to `done`, never send an empty board. Only ONE `say` per turn. **FAQ on EVERY board update:** `faq` with the 3 questions the user most likely asks next, answered in advance (max 6 pairs, 200 chars each, cut first when the board is full); Delta answers them directly. Delta also answers from what you already said in this call, never from nowhere. With every step also one `activity` line (3-8 words).
-  `next` adds `status_stale: true` when the board is older than 5 min and the user spoke since, and `stale_error` (above): update the board before your `say`. CLI flags (`--doing`, `--faq`) and its `status_due` hints: REFERENCE.md.
-- Idle guard: no `say`/`next` for 10 min (`--idle-timeout MIN`, 0 = off) = join leaves; `--owner-pid <pid>` (CLI 0.8.0) also leaves once that process (your session) ends. Heartbeat (CLI 0.8.0): `operator.alive` every 10 s while you serve `next`/`say`; silent 20 s = no chip, Delta: "<Name> ist gerade nicht erreichbar." (Bridge: the server sends it for you while you call `next`/`say`.) No human in the room for 120 s (300 s while an operator waits and the human dropped unexpectedly, e.g. laptop sleep) = call over, room deleted, join exits; the bridge `ended` event then carries `detail` + `message` (why, in plain words) for you to tell the user (CLI `--no-human-timeout`, never reconnects after `call_end` / 410).
-- **Activity feed:** on every step one `activity` call with 3-8 words (one line, never commands, paths, contents or secrets); Delta answers "what is <Name> doing" from it, briefly in his own words and the user's language, never the raw line. An automatic feed (Claude Code hook) is in REFERENCE.md, only with the user's explicit OK. **Status takt** (pipeline mode): once per call, after your greeting, Delta asks the user how often he should say what you do in the background (every minute, every five minutes, only when something happens, not at all; default off; switchable any time, the switch phrase does not reach you as a `user` turn). Then, only in real pauses, Delta says ONE sentence from your current `doing`, a new `done` or the newest feed line, only if it is new and under 60 s old; your `say` always goes first, a user cut-in drops it for good. Keep board and feed fresh. Hook, several joins, `activity_due`: REFERENCE.md.
+- Read `agent_said` (what the voicebot said on its own) before answering: never repeat it;
+  correct it in one sentence if it was wrong; say nothing if it already answered fully.
+- `stale_error` in `next`: your board or feed is older than 60 s while you work. Do what its
+  `message` says NOW (call `status` / `activity`), then `say`.
+- `board_now` / `activity_now`: what the voicebot currently knows about you.
+- A tool error that starts with `404` or `410`: the session is over. Do not rejoin with the
+  old handle; ask the user for a fresh link if they want to continue.
 
-## Operator rhythm (mandatory, learned in calls 06.–08.10.2026)
+## Keep the user informed while you work
 
-- **React at once:** answer every turn within a few seconds (`next` warns: `latency_warning`). Need longer? `say` a short holding line now, hand anything over ~3 s (shell, web, edits, builds, lookups) to a background agent/subtask; never block the loop.
-- **Keep the channel open:** after every `say` call `next` again immediately. No work, no sleep, no tool call in between.
-- **Make every action visible within seconds:** update the board (`status`) and the activity feed (`activity`) the moment you start, delegate or finish something, and speak a short confirmation.
-- **Keep the call session small:** read big tool output only filtered (`grep`, `tail`, counts), delegate log digging, compact regularly or hand over to a fresh session with a short summary; a full context makes the operator slow.
+- **Status board** (`status`, never spoken): `doing` = current step + ETA (max 400 chars),
+  `open`/`done` = short items, `faq` = the 3 questions the user most likely asks next with
+  short answers (max 6 pairs). Always send the WHOLE board; it replaces the last one. Update
+  it on every request, delegation, result and deploy step. Finished: move it to `done`.
+- **Activity feed** (`activity`): one line of 3-8 words on every step. Never commands,
+  paths, file contents or secrets.
+- The voicebot answers "what is <name> doing" from board and feed while you are busy.
 
-## Stay in the call (mandatory)
+## Operator rhythm (mandatory)
 
-- You are the brain. If your process ends, the call is orphaned: the voicebot sits in the room with nobody behind it. Do not end your turn or exit
-  while the call runs. In one-shot harnesses (`claude -p`, CI) run the `next`/`say` loop inside the same turn.
-- Leave only when the user says goodbye ("tschüss", "danke, das war's", "bye") or `next` reports `ended`. Then: `leave` with `{"say":"Danke, bis bald!"}`
-  (speaks it, leaves; `rm -f $D/h` deletes the session key). Never `pkill -f "voicehook-agent join"`: the pattern matches your own shell and other operators' joins.
+- React within a few seconds. Need longer? `say` a short holding line now, hand anything
+  slower (shell, web, edits, builds) to a background agent or subtask; never block the loop.
+- After every `say` call `next` immediately: no work, no sleep, no tool call in between.
+- Keep your own context small: read big tool output filtered, summarize, hand over early.
+
+## Stay in the call
+
+- You are the brain. If you stop calling `next`, the voicebot sits in the call with nobody
+  behind it. In one-shot harnesses run the loop inside the same turn.
+- Leave only when the user says goodbye ("tschüss", "danke, das war's", "bye") or `next`
+  reports `ended`: `leave` with `say: "Danke, bis bald!"`. The handle is invalid afterwards.
 
 ## Speak right
 
-- **Language:** speak the call language (room lang): bridge join answer `"lang"`, or `lang=en` in the invite URL = English; otherwise German. Switch only when the user switches.
-- **With context:** status, decision questions and topic changes always name the project or session,
-  what happened, why it matters and what happens on A and on B. One question per topic, never bundle.
-- **Plain and complete:** simple words, short sentences, nothing left out. Phone-ready: no abbreviations, symbols, URLs, codes, markdown, lists or emoji; round numbers. Never talk over the user (no `urgent`).
-- **Long content:** no length cap (only ~15 KB per packet), but a cut-off say is replayed only once: split long content into several `say` (mode append), one complete thought each, instead of cutting it.
-- **Echo = proof:** `{"role": "operator", …}` in `$D/out` = spoken; no echo = not (yet) spoken. Backchannel ("mhm") and speech/speaker filters run on the server; never push them.
-- **No secrets, no PII** in `say`, `--greet` or a persona: everything travels in clear text over the LiveKit data channel.
+- The user's language (German by default); switch only when the user switches.
+- Plain, complete, phone-ready sentences: no abbreviations, symbols, URLs, codes, markdown,
+  lists or emoji; round numbers. One complete thought per `say`; split long content into
+  several `say` (`mode: "append"`, the default).
+- Status, decisions and topic changes always with context: which project, what happened,
+  why it matters, what happens on A and on B. One question per topic.
+- `mode: "overwrite"` replaces your not yet spoken says; `"revise"` does the same and sends
+  you a `revise` event.
+- No secrets and no personal data in `say`, board or feed: they travel to the call in clear
+  text.
 
-## Do not overwrite someone else's persona
+## Notices from the call
 
-- Another operator may already be in the call (`room-state` / `peer-joined` lines with a second `<name>-<host>-…` identity, or `"operator": true` in `status`).
-  Then do NOT push `operator.persona` and do not pass `--persona`/`--persona-file`: it replaces the voicebot's knowledge block for everyone.
-  CLI 0.5.0 skips that push on its own and logs `persona/mode NOT pushed`; `--force-persona` overrides, do not use it in someone's call.
-- Never write into shared paths (`personas/*.txt`, `/tmp/vh-call.*`). Use your own `$D`.
-- Alone in the call and you want the voicebot to know context: `--persona "<3-5 lines>"` at join. The first persona push also triggers one server-side greeting, so then drop `--greet`.
-- A persona is knowledge, not rules: it is appended after Delta's fixed core (no inventing, never answers capability questions, short waits with your `--name`, never "Operator"), which it cannot
-  change. Override lines ("ignoriere", "neue Regeln", "Operator") are dropped, max 1500 chars; then `operator.notice` `persona_sanitized`.
-
-## Check the connection
-
-`status` (GET) lists `peers` (one with `"kind_label": "agent"` = voicebot);
-`curl -sSN -H @$D/h "$B/api/bridge/events"` streams every packet (SSE).
-No agent peer: the user should reload the call tab; your `say` would go nowhere. CLI output: REFERENCE.md.
-
-## Data-channel topics (stdin JSON lines with `--json`)
-
-| topic | payload | effect |
-|---|---|---|
-| `operator.say` | `{text, mode?, priority?}` | speak `text` verbatim. Modes below |
-| `operator.revise` | ← `{unspoken[], new, text, owner, reason?}` | only to you: what of YOURS was NOT spoken yet |
-| `operator.say_status` | ← `{seq, state, spoken_chars, owner, reason?}` | only to the owner, per say: `queued`/`spoken`/`interrupted`/`requeued`/`replaced`/`covered`/`no_audio`/`dropped` (live mode: no `requeued`, `interrupted` is final; `covered` = Delta already said it in his answer, final; `no_audio` = no audio within 4 s, retried once); `dropped` + `reason`: `user_stop` (user said stop, never resend), `stale` (rest cut twice) or `no_audio` (retry silent too, with `text` + `hint`: resend if still needed); `interrupted` + `reason`: `no_user_speech` (cut without confirmed user speech, e.g. noise or echo: does not count, the rest follows as `requeued`) or `max_duration` (emergency brake) |
-| `operator.persona` | `{text}` | knowledge block after Delta's fixed core, for everyone (see above) |
-| `operator.interrupt` | `{}` | stop YOUR speaking; unspoken rest comes back as `operator.revise` |
-| `operator.inject` | `{text, role?}` | context entry, not spoken |
-| `transcript` | ← `{role, text, speaker, op?, id, t, final}` | `user` = the human; `operator` = spoken operator text (`op` = whose identity); `agent` = Delta; `speaker` = display name; `id` = one segment/turn (a later line with the same `id` replaces it), `t` = when it was spoken (server time, s); you only get `final:true` lines |
-| `transcript.live` | ← `{phase, role, id, text?, interrupted?}` | your `say` started (`start`, full text) / finished (`end`) playing; for the browser only, NOT proof it was spoken (use `transcript`) |
-| `operator.notice` | ← `{kind, minutes_left, text, topup_url, ...}` | server notice, see below |
-| `quit` | `{}` | leave the call (what `leave` does) |
-
-`operator.say` waits until the user is silent (0.6 s) and Delta has finished; a user cut-in replays the rest
-ONCE (cut again: `dropped`, `stale`); Delta stays quiet while one is pending. ONE queue for all operators.
-`append` (default) queues at the end, no gap. `overwrite` replaces only YOUR not-started says (else = append);
-`revise` = same, plus `operator.revise` to you. Only your `operator.interrupt` or `"priority":"urgent"` (alias
-`interrupt`) cuts a running say (another operator's rest is requeued). User says "erledigt"/"reicht"/"stopp":
-running and ALL queued says are dropped (`user_stop`), Delta says "Alles klar."; do not resend them.
-
-## Low balance (`operator.notice`)
-
-`kind:"low_balance"`: free allowance plus credit last about `minutes_left` more minutes; the
-call ends when both are empty. It arrives once per call as a `$D/out` line with
-`"topic": "operator.notice"`, and the voicebot already said "Hey, Achtung, das Guthaben ist in wenigen Minuten leer." (English call: "Heads up, your credit will run out in a few minutes.") Do not repeat that. Add one short sentence to your next
-`say` that the user can top up at voicehook.ai/aufladen, then go on. Once, never nag.
-
-## Live mode (Gemini Live)
-
-Rooms created via `POST /api/live-room` run on a realtime model. Join the same way. There `say` is NOT verbatim: the model says it in its own words; the `operator` echo shows what was really said. Budget used up mid-call: the voicebot announces it and ends the call.
-The user always goes first: a `say` that arrives while the user has the floor goes to the model at once as context, so Delta can weave it into his answer. It is spoken afterwards only if his answer did not already contain it, otherwise `say_status` reports `covered` (the info is already in Delta's answer, do not send it again).
+- Low balance: the voicebot already said it. Add one short sentence to your next `say` that
+  the user can top up at voicehook.ai/aufladen. Once, never nag.
+- Live mode (realtime voice): `say` is not verbatim, the model says it in its own words.
 
 ## Errors
 
-| symptom | fix |
+| tool error | do |
 |---|---|
-| join answer without `session` | read `detail`: `operator invite required` = ask the user for the full invite link incl. `?invite=` |
-| `next`/`say` 401 / 410 | the session ended: stop, never rejoin with the old key |
-| `livekit connect failed` (502) | invite URL wrong or expired, ask the user for a fresh link |
-| join / token 403 / 409 / 410 / 429 | invite invalid / no human in the room / call over, never rejoin / too many sessions: fresh link or wait |
-| `0 peers` / no `agent` peer | user should reload the call tab |
-| CLI errors (exit codes) | REFERENCE.md |
-| silence after the greeting | no `agent` peer in `room-state`/`status` = voicebot down, tell the user |
-| voicebot makes things up | `operator.interrupt`, then a correcting `say` |
-
-Sources: https://voicehook.ai/agent/ · https://github.com/voicehook-ai/voicehook-agent
+| `403: operator invite required` / `invalid invite` | ask the user for the full, fresh invite link incl. `?invite=` |
+| `409` (no human in the call) / `410` (call over) | tell the user; never rejoin with the old handle |
+| `429` (too many sessions or joins) | wait a minute or ask for a fresh link |
+| `502: livekit connect failed` | invite wrong or expired: ask for a fresh link |
+| `404: unknown or expired bridge session` | the session ended or you left: stop |

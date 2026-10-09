@@ -49,27 +49,26 @@ def test_baseline_file_matches_documented_legacy():
 
 
 # ----- check_skill_drift -----------------------------------------------------------------
-def _repo(tmp_path, skill=b"S", ref=b"R"):
+def _repo(tmp_path, skill=b"S"):
     d = tmp_path / drift.SKILL_DIR
     d.mkdir(parents=True)
     (d / "SKILL.md").write_bytes(skill)
-    (d / "REFERENCE.md").write_bytes(ref)
     return tmp_path
 
 
 def test_drift_identical(tmp_path):
-    remote = {"https://x/SKILL.md": b"S", "https://x/REFERENCE.md": b"R"}
+    remote = {"https://x/SKILL.md": b"S"}
     assert drift.check(_repo(tmp_path), "https://x/", remote.__getitem__) == []
 
 
 def test_drift_detected_with_diff(tmp_path):
-    remote = {"https://x/SKILL.md": b"S\nneu\n", "https://x/REFERENCE.md": b"R"}
+    remote = {"https://x/SKILL.md": b"S\nneu\n"}
     problems = drift.check(_repo(tmp_path), "https://x/", remote.__getitem__)
     assert len(problems) == 1 and "SKILL.md: DRIFT" in problems[0] and "+neu" in problems[0]
 
 
 def test_drift_byte_exact_trailing_newline(tmp_path):
-    remote = {"https://x/SKILL.md": b"S\n", "https://x/REFERENCE.md": b"R"}
+    remote = {"https://x/SKILL.md": b"S\n"}
     assert drift.check(_repo(tmp_path), "https://x/", remote.__getitem__)
 
 
@@ -77,7 +76,13 @@ def test_fetch_error_is_reported(tmp_path):
     def boom(url):
         raise drift.FetchError("SPA-Fallback")
     problems = drift.check(_repo(tmp_path), "https://x/", boom)
-    assert len(problems) == 2 and all("Abruf fehlgeschlagen" in p for p in problems)
+    assert len(problems) == 1 and all("Abruf fehlgeschlagen" in p for p in problems)
+
+
+def test_drift_source_is_mcp_skill():
+    """Plugin 1.2.0: nur SKILL.md, Quelle ist die MCP-Fassung unter /agent/mcp/."""
+    assert drift.FILES == ("SKILL.md",)
+    assert drift.DEFAULT_BASE == "https://voicehook.ai/agent/mcp/"
 
 
 @pytest.mark.parametrize("ctype,ok", [("text/markdown; charset=utf-8", True), ("text/plain", True),

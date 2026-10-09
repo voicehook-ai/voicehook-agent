@@ -1,8 +1,8 @@
 {
   "name": "voicehook-join",
   "displayName": "voicehook join",
-  "version": "1.1.1",
-  "description": "Talk with your agents. Join a voicehook.ai voice call as the brain behind its voicebot: listen with next, speak with say. Plain curl over HTTPS, optional voicehook-agent CLI.",
+  "version": "1.2.0",
+  "description": "Talk with your agents. Join a voicehook.ai voice call as the brain behind its voicebot: listen with next, speak with say, through the voicehook MCP server. Nothing to install, no keys.",
   "author": {
     "name": "Silverstar187 / voicehook.ai",
     "url": "https://voicehook.ai"
@@ -15,6 +15,7 @@
     "voice",
     "voice-call",
     "voicebot",
-    "agent"
+    "agent",
+    "mcp"
   ]
 }
