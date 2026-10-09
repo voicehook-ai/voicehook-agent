@@ -1,8 +1,9 @@
 # voicehook-join reference: CLI details
 
 Companion to [SKILL.md](SKILL.md) (https://voicehook.ai/agent/SKILL.md). Read it when you
-need one of the details below; the skill itself is enough to join and talk. `$D/vh` is the
-wrapper from Quickstart A (SKILL.md) or from the optional CLI below. Protocol:
+need one of the details below; the skill itself is enough to join and talk. `next`, `say`,
+`status`, `activity`, `leave` are the curl calls of Quickstart A (SKILL.md) or the CLI commands
+below. Protocol:
 https://voicehook.ai/agent/OPERATOR-PROTOCOL.md.
 
 ## Optional: the voicehook-agent CLI (local machine)
@@ -15,25 +16,28 @@ reviewed commit (CLI 0.14.0).
 
 ```bash
 R=git+https://github.com/voicehook-ai/voicehook-agent@20f7d851003add33cff4fd798aeb3d89857becc9; export PATH="$HOME/.local/bin:$PATH"
-command -v voicehook-agent || uv tool install -q $R || pip install -q --user $R
-D=$(mktemp -d /tmp/vh-XXXXXX); mkfifo $D/in; (setsid sleep 86400 >$D/in & echo $! >$D/holder)
-printf '#!/bin/sh\nexport VOICEHOOK_AGENT_HOME=%s\n[ "$1" = leave ] || exec "%s" "$@"\n"%s" "$@"; rc=$?; kill $(cat %s/holder) 2>/dev/null; exit $rc\n' \
-  $D "$(command -v voicehook-agent)" "$(command -v voicehook-agent)" $D >$D/vh; chmod +x $D/vh
-(setsid nohup $D/vh join "{{INVITE_URL}}" --name "<dein-eigener-Name>" --model <dein-Modellname> --json --greet "Hallo, hier ist <dein-eigener-Name>. Worum geht's?" <$D/in >$D/out 2>&1 &)
-$D/vh next --help >/dev/null 2>&1 && echo "D=$D ready" || echo "D=$D CLI too old: uv tool install --force $R"
+command -v voicehook-agent >/dev/null || uv tool install -q $R || pip install -q --user $R
+A=$(command -v voicehook-agent); D=$(mktemp -d /tmp/vh-XXXXXX); mkfifo $D/in; (setsid sleep 86400 >$D/in & echo $! >$D/holder)
+(VOICEHOOK_AGENT_HOME=$D setsid nohup $A join "{{INVITE_URL}}" --name "<dein-eigener-Name>" --model <dein-Modellname> --json --greet "Hallo, hier ist <dein-eigener-Name>. Worum geht's?" <$D/in >$D/out 2>&1 &)
+echo "D=$D A=$A"
 ```
 
-- Same `next`/`say`/`leave`/`status` JSON as Quickstart A; `$D/vh` gives the join its own
-  control socket (`VOICEHOOK_AGENT_HOME=$D`), so other agents on the machine never collide.
+- Shell variables do not survive between tool calls: write down `D=` and `A=` and run every
+  later command as `VOICEHOOK_AGENT_HOME=<D> <A> next|say|status|activity|says|leave`, e.g.
+  `VOICEHOOK_AGENT_HOME=/tmp/vh-ab12cd ~/.local/bin/voicehook-agent next`. Below, `cli <cmd>` means
+  exactly that. `VOICEHOOK_AGENT_HOME` gives the join its own control socket, so other agents on
+  the machine never collide. Leave: `cli leave --say "Danke, bis bald!"`, then `kill` the PID in `$D/holder`.
+- Same `next`/`say`/`leave`/`status` JSON as Quickstart A; `next` exits 3 once the call is over.
+  Too old (no `next`): `uv tool install --force $R`.
   The CLI switches to the HTTPS bridge on its own behind `HTTPS_PROXY` (`--transport auto|webrtc|bridge`).
 - `--name` / `--model` are mandatory (exit 2 without them); `--voice`, `--username` as the
   bridge fields `"voice"`, `"username"`. `setsid` matters: without it the join dies with your tool call.
-- Status board with flags: `$D/vh status --doing "deployt den Worker, ETA 2 min" --open "Tests"
+- Status board with flags: `cli status --doing "deployt den Worker, ETA 2 min" --open "Tests"
   --done "Analyse" --faq "Wann live?::in 2 min"` (`--faq` repeatable, split on the first `::`). `next`
   adds `status_due: true` + `status_reason` (`empty`, `status_request`, `stale` = older than 45 s while
   `doing`/`open` is set; `--status-due SEC`, env `VOICEHOOK_STATUS_DUE`) + `hint` with the exact
   command: run it before your `say`. A progress `say` ("fertig", "live", "deploye") without a fresh
-  board returns `status_reason: "say_progress"`. Finished: `--done "..."`, not `vh status ""` (empty = due).
+  board returns `status_reason: "say_progress"`. Finished: `--done "..."`, not `cli status ""` (empty = due).
 - No `uv`: the `pip` fallback above (PEP 668: add `--break-system-packages`), or Quickstart A.
   The CLI updates itself on join (self-update); `--no-self-update` keeps the pinned commit.
 - `$D/out` (JSON lines) shows within ~5 s `connected — N peers` and a `room-state` line with
@@ -58,9 +62,9 @@ Delta sees what you do, one line per tool call, and answers "what is <Name> doin
 - The join publishes the newest 15 lines as `operator.activity` `{lines[], ts}`, on change,
   at most every 5 s.
 - Without hooks: on every step send your own status line 1:1, 3-8 words, never rephrased:
-  `$D/vh activity "Running database migrations"` (appends `HH:MM:SS note: <text>`, scrubbed,
-  max 120 chars, no paths, secrets or personal data). Works in Quickstart A and B.
-- The hook finds a Quickstart B join through `~/.voicehook/joins/<pid>.json`, under any
+  `activity` with `{"text":"Running database migrations"}` (CLI: `cli activity "…"`; appends
+  `HH:MM:SS note: <text>`, scrubbed, max 120 chars, no paths, secrets or personal data).
+- The hook finds a CLI join through `~/.voicehook/joins/<pid>.json`, under any
   `VOICEHOOK_AGENT_HOME`. With zero or several live joins it writes nothing, so one session
   never leaks into another call (several joins: set `VOICEHOOK_SESSION=<slug>/<identity>`).
 
@@ -70,7 +74,7 @@ With the CLI installed next to a curl bridge join, the hook can feed that join t
 with the user's explicit OK**. Right after the Quickstart A block:
 
 ```bash
-voicehook-agent bridge-session --save $D/join --base "$(cat $D/base)"
+voicehook-agent bridge-session --save $D/join --base "$B"
 ```
 
 It stores only base + session in `~/.voicehook/bridge-session.json` (mode 600, never
@@ -107,17 +111,27 @@ In speech pauses Delta reads only fresh lines (under 60 s) aloud: what happens r
 - Call end (CLI 0.10.1): server `call_end`, room deleted or HTTP 410 = the join exits and
   never reconnects.
 
+## CLI errors
+
+| symptom | fix |
+|---|---|
+| exit 2, `Selbstauskunft fehlt` | add `--name` and `--model` |
+| exit 2, `already running` | your `$D` already has a join: keep using it, or `cli leave` first |
+| `say`/`next` exit 3, `no-session` | the join is not up (yet) or has ended; check `$D/out` |
+| `several joins running` | set `VOICEHOOK_AGENT_HOME=<D>`, or pass `--session <slug>/<identity>` |
+| `voicehook-agent: command not found` | use the absolute path `A` from the install, never the bare command |
+
 ## Say receipts (CLI 0.9.0)
 
-- `$D/vh say` returns `{"ok":true,"seq":N}`.
+- `cli say` returns `{"ok":true,"seq":N}`.
 - `next` adds `say_status` `[{seq, state}, ...]` (changes since the last `next`) and
   `say_hint` when one of your says sits in `queued`/`requeued` for more than 20 s.
-- `$D/vh says` prints the last state of every own say.
+- `cli says` prints the last state of every own say.
 
 ## Topics the CLI sends for you
 
 | topic | payload | sent when |
 |---|---|---|
-| `operator.status` | `{doing, open[], done[], faq?[{q, a}]}` | `vh status`; replaces the last board, never spoken |
-| `operator.activity` | `{lines[], ts}` | hook lines and `vh activity` notes, newest 15, at most every 5 s |
+| `operator.status` | `{doing, open[], done[], faq?[{q, a}]}` | `cli status`; replaces the last board, never spoken |
+| `operator.activity` | `{lines[], ts}` | hook lines and `cli activity` notes, newest 15, at most every 5 s |
 | `operator.alive` | `{alive, ts, idle_s}` | every 10 s while you serve `next`/`say`; `alive:false` on leave |
