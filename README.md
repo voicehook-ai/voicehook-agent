@@ -1,673 +1,79 @@
 # voicehook-agent
 
-**Talk with your agents.** [voicehook.ai](https://voicehook.ai/?utm_source=github&utm_campaign=d2-readme) is a voice call in the browser.
+[![CI](https://github.com/voicehook-ai/voicehook-agent/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/voicehook-ai/voicehook-agent/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/voicehook-ai/voicehook-agent/actions/workflows/codeql.yml/badge.svg?branch=master)](https://github.com/voicehook-ai/voicehook-agent/actions/workflows/codeql.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Plugin version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fvoicehook-ai%2Fvoicehook-agent%2Fmaster%2Fplugins%2Fvoicehook-join%2F.claude-plugin%2Fplugin.json&query=%24.version&label=plugin&prefix=v&color=7c5cff)](plugins/voicehook-join/.claude-plugin/plugin.json)
+[![CLI version](https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2Fvoicehook-ai%2Fvoicehook-agent%2Fmaster%2Fpyproject.toml&query=%24.project.version&label=cli&prefix=v&color=7c5cff)](pyproject.toml)
+
+**Talk to your coding agents instead of reading their output.**
+
+![Installing the voicehook-join plugin in Claude Code: two commands, then the plugin is enabled](https://raw.githubusercontent.com/voicehook-ai/voicehook-agent/master/assets/readme/plugin-install.gif)
+
+[voicehook.ai](https://voicehook.ai/?utm_source=github&utm_campaign=d2-readme) is a voice call in the browser.
 Hit "invite agent", hand the link to Claude Code, Codex or opencode, and talk to it
 while it keeps working. Delta, the voice in the call, answers from the status board
-and FAQ your agent maintains.
+and FAQ your agent keeps up to date, so you hear what is going on without opening a terminal.
 
-About 10 free minutes every day, no login needed. No subscription.
-This repo is the CLI side: `voicehook-agent` lets an agent join a call.
+This repo holds the agent side: the `voicehook-join` Claude Code plugin and the
+`voicehook-agent` CLI that lets any agent with a shell join a call.
 
-Zero-install CLI that lets any LLM agent (Claude Code, Cursor, ZeroClaw, Hermes,
-Codex, …) join a [voicehook.ai](https://voicehook.ai) voice-call as a 2nd
-participant. No SDK, no MCP server, no learning curve — stdin/stdout protocol.
+## Three ways to connect
 
-## TL;DR
-
-```bash
-uvx --from "git+https://github.com/voicehook-ai/voicehook-agent@20f7d851003add33cff4fd798aeb3d89857becc9" voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name <dein-eigener-Name> --model <dein-Modellname>
-```
-
-- **`--name` + `--model` are mandatory** (since 0.4.0): your self-chosen display
-  name and the exact model you run on. Nenn deinen echten Modell-/Herstellernamen,
-  nie 'Claude', wenn du nicht Claude bist. Without both, `join` exits with code 2
-  and explains what to pass. The web call UI shows them in the Agent chip as
-  `Name · model` (a loading ring is shown there until you have joined).
-- **Use the full invite link**, including its `?invite=<code>` part. The CLI
-  sends that code as `op_invite` on `GET /api/token` and never prints it. A bare
-  slug or a link without `?invite=` is rejected once the server enforces operator
-  invites (`403 operator invite required`); an invalid code gives `403 invalid invite`.
-- **stdout** prints incoming user + voice-ai turns as `[role] text`
-- **stdin** lines are spoken by voice-ai (TTS via Google Chirp3-HD)
-- **`/q`, `{"topic":"quit"}`, or SIGTERM/Ctrl-C** ends the session
-
-## Agent loop without polling (0.5.0)
-
-Start `join` once in the background, then drive the call with one-shot
-commands. No FIFO, no tmux, no `sleep; tail`:
-
-```bash
-voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name <dein-eigener-Name> --model <dein-Modellname> --json \
-  > ~/.voicehook-agent/call.log 2>&1 &
-
-voicehook-agent say "Hallo, ich bin jetzt im Call."     # speak one line
-voicehook-agent next --timeout 60                       # blocks until the user said something
-# {"ok": true, "type": "user", "role": "user", "text": "Wie geht's?", "ts": 1.0, "pending": 0}
-voicehook-agent say "Gut, danke. Woran arbeiten wir?"
-voicehook-agent next --timeout 60
-voicehook-agent leave --say "Bis bald."                 # clean exit
-```
-
-| Command | Output (one JSON line) | Exit |
-|---|---|---|
-| `say <text> [--mode append\|overwrite\|revise] [--urgent]` | `{"ok":true,"seq":3}` | 0 ok, 1 failed |
-| `next [--timeout SEC]` | `{"type":"user","text":...}`, `{"type":"revise","text":...,"unspoken":[...],"new":...}` (your `--mode revise` replaced own not-started says; if any still matters, send one merged `say --mode overwrite`), `{"type":"timeout"}`, `{"type":"ended"}` | 0, 3 on `ended` |
-| `says` (0.9.0) | `{"type":"says","says":[{"seq":3,"state":"spoken","spoken_chars":12,"age_s":4.1,"text":"..."}]}`: last state of each own say (`sent` until the voicebot's first receipt) | 0 |
-| `leave [--say TEXT]` | `{"type":"leaving"}` | 0 |
-| `status` | room, identity, connected, pending events, idle seconds, peers | 0 |
-| `status [TEXT] [--doing T] [--open T]... [--done T]... [-f board.json]` (0.7.0) | `{"type":"board","board":{...}}`: sends your status board | 0 ok, 1 failed |
-
-- `next` returns ONE event, oldest first; `pending` says how many more are queued.
-- **Several operators (0.11.0):** a running say is never cut, except by your own
-  `operator.interrupt` or `--urgent`. `say` defaults to `--mode append`: queued at the
-  end, it starts right after the running one without a gap (the server prefetches the
-  TTS). `--mode overwrite` replaces only YOUR says that have not started yet (state
-  `queued`), at their place in the queue; if there are none it is simply appended (a
-  `requeued` rest counts as started). Never another operator's says. `--mode revise` =
-  overwrite plus `operator.revise` to you only, listing the replaced texts (`unspoken`)
-  and `new`; nothing is held, nothing cut, and no revise event when nothing was replaced.
-  `--urgent` (`priority:"urgent"`) interrupts whoever is speaking and goes first; use
-  sparingly.
-  `join --voice Puck` (Google Chirp3-HD name, sent as `vh.voice`) picks your own voice;
-  without it the server assigns a fixed voice per identity, never Delta's (pipeline mode).
-  `operator.revise` / `operator.say_status` reach only the say's owner (`owner` field);
-  transcript lines carry `speaker` (display name) and `op` (operator identity), printed
-  in `--json` output and on `next` user events when the server sends them.
-- **Say receipts (0.9.0):** the voicebot reports each say as `operator.say_status
-  {seq, state, spoken_chars}` (`seq` = the `seq` that `say` returned; states `queued`,
-  `spoken`, `interrupted`, `requeued`, `replaced`, live `covered`). `next` carries the changes since the
-  last `next` as `"say_status": [{"seq":3,"state":"spoken"}]` (`spoken_chars` only for
-  `interrupted`/`requeued`); a say stuck in `queued`/`requeued` for more than 20 s adds
-  `"say_hint"` (do not push more; if outdated, `say --mode overwrite` a short version).
-  `says` shows the last state of every say. Live mode (0.12.0): `covered` (final) =
-  your say arrived while the user had the floor, went to the model as context, and
-  Delta already said it in his answer; it carries `"note": "Info steckt schon in
-  Deltas Antwort, nicht nochmal senden"`. Do not send it again. `no_audio` = no audio
-  within 4 s (voice engine silent), the voicebot retries once; `dropped` (final) = the
-  retry was silent too, the say was never spoken: resend it if it still matters. Both
-  carry a `note`; `reason` is passed through (`interrupted` + `max_duration` = the
-  voicebot's emergency brake cut a say that never reported finished).
-  Turns spoken while you were thinking are kept, never lost. `--timeout 0` only
-  returns what is already queued. Each event carries `ts` (unix time it was
-  spoken).
-- Queueing starts with your first `say` or `next`. Turns spoken before that are
-  not queued (a stdout/FIFO-only agent never piles up a backlog), and the queue
-  keeps at most the 200 newest events.
-- The commands find the running join on their own (they wait up to `--wait 30`
-  seconds for it to come up, so `say` right after starting `join` works). With
-  several joins on one machine they list them and ask for
-  `--session <slug>/<identity>` (a slug alone is enough when only one join runs
-  in that room). No running join = exit 3.
-- Transport: one Unix socket per join at
-  `~/.voicehook-agent/sessions/<slug>/<identity>/ctl.sock` (mode 0600; override
-  the root with `VOICEHOOK_AGENT_HOME`). Several agents can join the same room
-  from one machine. If that path is too long for a Unix socket it moves to
-  `/tmp/voicehook-agent-<uid>/<hash>.sock`; that directory must be a real
-  directory (no symlink) owned by you with mode 0700, otherwise `join` and the
-  commands refuse it. A second `join` with the SAME identity into the same room
-  exits 2 with a hint (`leave --session <slug>/<identity>` first, a different
-  `--name`/`--identity`, or `--no-control`). `--no-control` turns the socket off;
-  stdin/FIFO keeps working as before.
-- **Orphan guard:** `join` leaves by itself when the agent sent no `say`/`next`
-  (or stdin line) for `--idle-timeout` minutes (default 10, `0` = off). A blocked
-  `next` counts as alive, but at most `--idle-timeout` long (0.8.0). The timer spans
-  reconnects: a reconnect is no sign of life. `--owner-pid PID` (0.8.0, e.g.
-  `$PPID`) leaves as soon as that process ends; `$VOICEHOOK_AGENT_HOME/holder` (the
-  FIFO holder of the skill quickstart) is watched the same way. An ended join exits
-  at once even while the FIFO holder keeps stdin open (before 0.8.0 it hung up to
-  24 h). Before leaving voice-ai says `--idle-say` (German default,
-  `''` = silent). SIGTERM/SIGHUP also leave cleanly; under `nohup` (SIGHUP
-  ignored) closing the terminal does not end the call.
-- **Persona guard:** if another operator agent is already in the room (LiveKit
-  attribute `vh.role=agent`, set by the server for every operator token), `join`
-  does NOT push `--persona`/`--persona-file`/`--strict-relay`/`--graph`; it says so
-  on stdout (`_meta`) and stderr. `--force-persona` overrides. An explicit
-  `{"topic":"operator.persona"}` on stdin is still sent as you wrote it.
-- Speak the language of the call: answer in the language the user speaks
-  (the auto-greet is German).
-- **Read `agent_said` (0.7.0):** `next` carries `agent_said: [..]`, the voicebot's own
-  lines since the last `next` (transcript role `agent`, never echoes of your `say`; oldest
-  first, max 3 lines / 400 chars). Never repeat what it already said; correct it in one
-  sentence if it was wrong; if it already answered fully, `say` nothing or only the missing fact.
-- **Keep the main loop free (0.7.0):** between `next` and `say` do nothing slow.
-  Anything over ~3 s (shell, web, file edits, builds, lookups) goes to a background
-  agent/subtask; meanwhile `say` a short holding line and `status` the board. The CLI
-  measures the time from a `user` turn leaving `next` to your next `say`; over 8 s the
-  following `next` carries `"latency_warning": {"seconds": X, "hint": "delegate slow
-  work, keep main loop free"}`. Nothing is spoken automatically.
-- **Status board (0.7.0):** on every task change (started, finished, new) send the whole
-  board: `voicehook-agent status --doing "baut gerade den Fix" --open "Tests" --done
-  "Analyse"` (or `-f board.json` with `{doing, open[], done[]}`); `status ""` when
-  finished. It replaces the last board at a fixed place in the voicebot's instructions
-  (never spoken, server budget 600 chars, at most one update per 5 s applied). The
-  voicebot answers "was macht Claude gerade?" from it and calls you by your `--name`.
-  When the user asks, `next` yields `{"type":"status_request"}`: send `status` at once.
-  `next` adds `"status_stale": true` when your board is older than 5 min and the user
-  spoke since.
-- **Keep the board fresh (0.9.0):** the voicebot (Delta) answers the user from your
-  board while you work in the background; a stale board makes it answer wrong. `next`
-  therefore adds `"status_due": true`, `"status_reason"`, `"board_age_s"` and a `"hint"`
-  with the exact command when
-  - the board is empty or was never set (`empty`),
-  - the user asked for the status (`status_request`; that event is also put first in
-    line, carries `"hint": "Nutzer fragt nach Stand: Board jetzt aktualisieren: ..."`
-    and stays due until your next board),
-  - the board is older than `--status-due SEC` (default 45, env
-    `VOICEHOOK_STATUS_DUE`, 0 = off) while `doing`/`open` is set, or the user spoke
-    after it (`stale`). A finished board (only `done`) does not nag by age.
-
-  A `say` that reports progress ("fertig", "live", "deploye", "merged" ...) without a
-  board push since your previous `say` returns `"status_reason": "say_progress"` and
-  the same `hint`. Set the board on every request, delegation, result and deploy step;
-  `doing` may hold the interim state and an ETA ("deployt Worker, ETA 2 min"), but the
-  worker keeps at most 120 chars per entry. When finished, send `--done` items instead
-  of clearing (an empty board counts as due). Example:
-
-  ```json
-  {"ok": true, "type": "timeout", "pending": 0, "status_due": true,
-   "status_reason": "stale", "board_age_s": 61.2,
-   "hint": "Board veraltet, Delta antwortet sonst falsch: jetzt aktualisieren: voicehook-agent status --doing \"<Zwischenstand, ETA>\" --open \"<offen>\" --done \"<erledigt>\". Welche 3 Fragen stellt der Nutzer wahrscheinlich als Nächstes? Beantworte sie vorab per --faq \"Frage::Antwort\""}
-  ```
-- **FAQ on the board (0.10.0):** on EVERY board update also predict the user's next
-  likely questions and answer them in advance, so Delta can answer without asking you:
-  `voicehook-agent status --doing "deployt den Worker, ETA 2 min" --faq "Wann ist es
-  live?::in etwa 2 Minuten" --faq "Laufen die Tests?::ja, alle gruen"`. `--faq` is
-  repeatable and split on the first `::` (both halves stripped; an item with an empty
-  half is skipped with a warning on stderr); at most 6 pairs, question and answer capped
-  to 200 chars each. Payload: `{"doing": "...", "open": [], "done": [], "faq": [{"q":
-  "Wann ist es live?", "a": "in etwa 2 Minuten"}]}`. Without `--faq` the field is
-  omitted. Every `status_due` hint now also asks: "Welche 3 Fragen stellt der Nutzer
-  wahrscheinlich als Nächstes? Beantworte sie vorab per --faq".
-- **Board items stand alone:** every `--open`/`--done` item says WHAT concretely (thing
-  and place), readable without context. Decisions waiting for the user come FIRST in
-  `--open`, as a question with options and your recommendation. One item per thing, never
-  bundles; at most 10 items per list (200 chars each): if more, keep the most important,
-  the rest goes to `--faq`. `--doing` names the concrete current step.
-  Good: `--open "iOS-Hinweis kurz oder lang? (Empf.: kurz)"`, `--open "PR #250: Überlappung
-  mit Gate prüfen"`, `--doing "Prüfe PR #250 auf Überlappung"`.
-  Bad: `--open "6 Entscheidungen von Oliver"`, `--open "diverse Fixes"`,
-  `--doing "arbeite an PRs"`.
-
-> Since 0.2.0, `--keep-alive` is the default: **stdin-EOF no longer quits** and
-> transient room-disconnects auto-reconnect. Run with a closed stdin in the
-> background without the FIFO sleep-holder hack. See [Relay flags](#relay-flags).
-
-## Wie du im Call sprichst
-
-Everything you send with `say` or `--greet` is read aloud to a person on the phone. **Local style
-modes (terse, caveman, Telegrammstil, Stichpunkte) do NOT apply to `say` text:** speak whole,
-natural sentences with articles and verbs, like a good radio host or hotline agent.
-
-- **Language:** the user's (German by default); switch only when the user switches.
-- **Short:** 1-2 sentences per `say`, each one breath (about 8-12 words, <60 chars). One statement per sentence.
-- **Most important first:** result first, then the reason. Active verbs: "Ich habe den Fix deployt", not "Fix wurde deployt".
-- **Speakable:** round numbers ("fast die Hälfte", "rund achthundert"); codes and phone numbers in digit groups. No
-  abbreviations, symbols, paths, URLs, code, markdown, lists or emoji: say what it means ("der Login-Endpunkt").
-- **Signal and repeat:** announce longer answers ("Zwei Punkte. Erstens …"), repeat the core once at the end.
-- **Confirm, then ask:** read a task back in one sentence ("Okay, ich deploye den Worker."); end with one clear question
-  when you need a decision. Pauses come from full stops, not from comma chains.
-
-| Chat style (wrong) | Phone style (right) |
+| Your agent | How to connect |
 |---|---|
-| Deploy grün. Tests 812/812. CI ok. | Der Deploy ist durch, und alle Tests sind grün. |
-| PR #161 offen → wartet auf Review. | Ich habe den Pull Request geöffnet. Er wartet auf dein Review. |
-| 403 bei /api/join, Token stale. | Der Beitritt klappt nicht, weil der Schlüssel abgelaufen ist. Soll ich ihn erneuern? |
+| **Claude Code** | Plugin, two commands (see below). [Details](docs/CLI.md#claude-code-plugin) |
+| **claude.ai / Claude Desktop** | MCP connector. *Coming soon.* |
+| **Any agent with a shell** | [Quickstart A](https://voicehook.ai/agent/SKILL.md) (HTTPS bridge, nothing to install) or the [CLI](#cli-quickstart) |
 
-Newer voicehook servers (v4, Oct 2026) also strip leftover markdown, backticks, emoji and link prefixes and read arrows as "dann", but never reword you.
-
-## Activity feed (operator.activity, 0.10.0)
-
-Delta knows what the coding agent is doing in the background, without asking. Claude
-Code hooks write ONE short line per tool call into `activity.log` of the running join's
-session dir (0.13.0: `PreToolUse` writes it when the tool starts, `PostToolUse` only for
-a call Pre did not log); the join publishes the newest 15 lines (oldest first) as
-`operator.activity` `{"lines": ["17:12:03 Bash: Tests laufen lassen", "17:12:09 Edit: relay.py"],
-"ts": 1759418000.0}`, only on change and at most once per 5 s (a change inside the
-window goes out when it ends, last one wins).
-
-Install once (merges idempotently into `~/.claude/settings.json`, keeps all other
-keys and hooks, refuses to touch invalid JSON):
-
-```bash
-voicehook-agent hook install              # or: --settings PATH
-voicehook-agent hook print                # the snippet, to paste by hand
-```
-
-```json
-{"hooks": {
-  "PreToolUse": [{"matcher": "*", "hooks": [
-    {"type": "command", "command": "voicehook-agent-hook pre-tool-use || true", "timeout": 5}]}],
-  "PostToolUse": [{"matcher": "*", "hooks": [
-    {"type": "command", "command": "voicehook-agent-hook post-tool-use", "timeout": 5}]}]}}
-```
-
-`voicehook-agent-hook` is a light console script (no livekit import, starts fast);
-`voicehook-agent hook pre-tool-use|post-tool-use` does the same. The hook always exits 0
-and prints nothing (`|| true`: a PreToolUse hook exiting 2 would block the tool, and an
-older `voicehook-agent-hook` < 0.13 exits 2 on the unknown `pre-tool-use`). 0.13.0:
-`hook install` on an older Post-only install adds the Pre hook, idempotently. Pre and
-Post log the same call once (dedupe by `tool_use_id`, kept in `activity.ids` next to the
-log, never published).
-
-- **A line contains:** local time, the tool name (`[A-Za-z0-9_.:-]`, max 40) and the
-  tool's own `description` if it has one (Bash, Agent/Task), max 120 chars, taken 1:1
-  (Claude Code writes 3-8 words anyway); file tools without one (Read, Edit, Write,
-  MultiEdit, NotebookEdit) log the file's basename (0.13.0); Grep/Glob and others only
-  the tool name: `HH:MM:SS Tool: description`, `HH:MM:SS Read: relay.py` or `HH:MM:SS Tool`.
-- **A line never contains:** command text, arguments, full paths, search patterns, file
-  contents or tool output. The description runs through a secret scrubber (API keys like `sk_`,
-  `rk_`, `re_`, `whsec_`, `vhw_`, `ghp_`, `github_pat_`, `xox?-`, `AKIA`, `AIza`,
-  `Bearer ...`, JWTs, `key=`/`token=`/`password=`/`secret=` values, long base64/hex
-  strings become `[redacted]`); the join scrubs again before publishing.
-- **Which call:** `VOICEHOOK_SESSION=<slug>/<identity>` wins; otherwise the one live
-  join on this machine. With zero or several live joins nothing is written, so one
-  Claude session never leaks into another call. The file is cleared when a join starts
-  and ends, mode 0600, trimmed to the last 50 lines above 200.
-
-### Aktivitätslog: keep it filled (activity_due, 0.13.0)
-
-Why: in speech pauses Delta reads only fresh entries (younger than 60 s) aloud, "what is
-happening right now". An empty or old log means Delta has nothing to say.
-
-- **Claude Code (recommended):** `voicehook-agent hook install` once. Every tool call logs
-  its own short description 1:1 when it starts; nothing else to do.
-- **Agents without hooks** (any other LLM agent): send your own short status line 1:1,
-  3-8 words, do not rephrase it:
-
-  ```bash
-  voicehook-agent activity "Running database migrations"
-  # {"ok": true, "type": "activity", "line": "17:14:02 note: Running database migrations"}
-  ```
-
-  The running join appends `HH:MM:SS note: <text>` to its `activity.log` (same scrubber,
-  max 120 chars; no paths, secrets or personal data). `--session` / `--wait` as for `say`;
-  exit 3 = no running join, 1 = empty text.
-- **`next` reminds you:** while work is in progress (`doing`/`open` set on the board, or you
-  spoke / sent a board in the last 5 min) and no new line came for `--activity-due SEC`
-  (default 60, env `VOICEHOOK_ACTIVITY_DUE`, 0 = off), `next` adds:
-
-  ```json
-  {"ok": true, "type": "timeout", "pending": 0, "activity_due": true, "activity_age_s": 61.0,
-   "activity_hint": "Aktivitätslog still, während du arbeitest: ... voicehook-agent activity \"<3-8 Wörter>\" ..."}
-  ```
-
-  Silent while hook lines arrive (any hook line in the last 10 min); at most one hint per
-  SEC. Its own key `activity_hint`, so a `status_due` `hint` in the same reply stays intact.
-- **Automatic flow:** `join` writes a pointer `~/.voicehook/joins/<pid>.json` (0600), so the hook
-  finds the join even when it runs with its own `VOICEHOOK_AGENT_HOME` (Quickstart B wrapper);
-  several live joins still mean nothing is written. For a curl bridge join (Quickstart A)
-  `voicehook-agent bridge-session --save join.json --base https://voicehook.ai` (or the
-  Quickstart's own line) stores only `{base, session}` in `~/.voicehook/bridge-session.json`
-  (0600; `--clear`, leave/ended and an HTTP 401/404/410 remove it). The hook then POSTs the tool's
-  description to `<base>/api/bridge/activity` `{"text"}` with the bridge Bearer token: 2 s
-  timeout, never blocking (exit 0), at most one POST per 5 s, the latest line wins (a detached
-  flusher sends it when the window ends). `VOICEHOOK_STATE_DIR` moves `~/.voicehook`.
-- **`activity_now` / `board_now`:** every `next` shows what Delta currently knows about you:
-  `"activity_now": {"text": "Bash: Sending deploy to JEV", "age_s": 12.0}` (newest line last
-  published as `operator.activity`, without its time) and `"board_now": {"doing": "...", "age_s": 12.0}`;
-  `null` before the first.
-- **`stale_error` (no rate limit):** while you are active (`doing`/`open` set, a `say` in the
-  last 5 min, or no board yet and the join older than SEC) and your board or your log is
-  older than `--stale-error SEC` (default 60, env `VOICEHOOK_STALE_ERROR_S`, 0 = off), EVERY
-  `next` carries:
-
-  ```json
-  "stale_error": {"status_age_s": 187, "activity_age_s": 95, "message": "FEHLER: Statusboard seit 3 Min nicht aktualisiert, Aktivitätslog seit 1 Min 35 s. Jetzt: voicehook-agent status --doing \"…\" und voicehook-agent activity \"…\""}
-  ```
-
-  An age is `null` when that part is fresh and the message names only what is overdue (same
-  shape as the server's bridge `next`); never set = age since the join; while hook lines arrive only
-  the board counts. A finished/empty board without a `say` for 5 min stays silent. Plain
-  (non `--json`) join output prints `!! stale: <message>` after every user turn.
-  `status_due`/`activity_due` stay unchanged.
-
-## Shapes in the ring (`show`)
-
-An agent can draw into the ring (Kringel) of the call UI while it explains something
-by voice. Same session resolution as `say`; WebRTC join -> data-channel topic
-`operator.visual`, bridge join -> `POST /api/bridge/visual`. Body:
-`{"shape": <shape>, "emotion"?: {"label", "valence", "arousal"}}`.
-
-```bash
-voicehook-agent show --preset check --emotion joy                     # preset
-voicehook-agent show --polygon "0.2,0.9 0.2,0.45 0.5,0.15 0.8,0.45 0.8,0.9" --label Haus
-voicehook-agent show --label "Vorher, nachher" --json '{"type":"multi","items":[
-  {"type":"polygon","points":[[0.1,0.4],[0.3,0.4],[0.3,0.6],[0.1,0.6]]},
-  {"type":"path","d":"M0.38,0.5 L0.62,0.5"},
-  {"type":"polygon","points":[[0.7,0.25],[0.9,0.25],[0.9,0.75],[0.7,0.75]]}]}'
-voicehook-agent say "Erst testen, dann ausrollen." --shape-preset arrow_right
-```
-
-| Flag | Meaning |
-|------|---------|
-| `--preset NAME` | `arrow_up arrow_right check cross question loop split3 scale heart bolt one two three` |
-| `--polygon "x,y x,y ..."` | own polygon, closed (`--open` = line) |
-| `--path D` | SVG path, only `M L Q C Z`, numbers 0..1 |
-| `--json SHAPE` | full shape (`preset`, `polygon`, `path`, `multi` with `items`) |
-| `--label TEXT` / `--hold-ms N` / `--emotion LABEL` | caption <= 24 chars / 800..8000 ms / ring tint |
-
-Several `--preset/--polygon/--path` become one `multi` (max 4 items). Coordinates 0..1,
-(0,0) top left, max 200 points, a path `d` max 2 KB, the whole shape max 8 KB; label max
-24 chars without control characters, emoji or `<>`. The CLI validates like the server:
-invalid input prints `{"ok":false,"type":"invalid","error":...}` and exits 2, nothing is
-sent. At most one shape per 2 s per operator: faster returns `{"type":"rate_limited"}`
-(bridge HTTP 429), exit 1. `say --shape-preset NAME | --shape-json J` and `--emotion L` add the fields `shape`
-and `emotion` to that `operator.say`; the shape is drawn when the say is spoken.
-
-When to draw: a sequence or loop, a comparison, a structure, yes or no, a count of one
-to three. Not with every sentence, at most every few turns, never instead of speaking;
-say texts stay whole, natural, phone-ready sentences.
-
-## Install
-
-### One-shot (per-call, recommended)
-
-```bash
-uvx --from "git+https://github.com/voicehook-ai/voicehook-agent@20f7d851003add33cff4fd798aeb3d89857becc9" voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name <dein-eigener-Name> --model <dein-Modellname>
-```
-
-[uv](https://github.com/astral-sh/uv) downloads the package on demand. Zero state.
-Until the package is on PyPI use
-`uvx --from git+https://github.com/voicehook-ai/voicehook-agent voicehook-agent ...`.
-Runtime dependencies are only `livekit` and `httpx`; Python >= 3.10, Linux/macOS
-(the control socket is a Unix socket).
-
-### Persistent (one-time install)
-
-```bash
-uv tool install voicehook-agent
-# or:
-pipx install voicehook-agent
-```
-
-Then:
-
-```bash
-voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name <dein-eigener-Name> --model <dein-Modellname>
-```
-
-Install and update in one line (what the skill does; always upgrades):
-
-```bash
-R=git+https://github.com/voicehook-ai/voicehook-agent
-uv tool install -q --upgrade $R || pip install -q --upgrade --user $R
-```
-
-### Self-update (0.12.0)
-
-The server names `cli_min` and `cli_latest` in every join answer (token mint and bridge
-join; the CLI sends its version as `X-VH-CLI`).
-
-- `cli_latest` newer than this CLI: `join` updates in place and restarts itself with the
-  same arguments and the same identity (`os.execv`). uv tool installs run
-  `uv tool upgrade voicehook-agent`, everything else
-  `python -m pip install --upgrade [--user] git+https://github.com/voicehook-ai/voicehook-agent`
-  (plus `--break-system-packages` on a PEP 668 system python). Only on the first connect,
-  never during a running call, and at most once per join (env marker `VOICEHOOK_SELF_UPDATED`).
-  A `next` waiting during the restart gets `{"type":"restarting"}`: call `next` again.
-- Update fails: a clear warning, the join goes on with the old version (it is still >= `cli_min`).
-- HTTP 426 (this CLI is below `cli_min`): prints the upgrade command, tries one self-update,
-  else exits with code 7.
-- Off: `join --no-self-update` or `VOICEHOOK_NO_SELF_UPDATE=1` (only an info line then).
-- By hand: `voicehook-agent self-update` (`--dry-run` prints the command).
-  `voicehook-agent --version` adds `neue Version verfügbar: x.y.z` when the last server answer
-  named a newer one.
-
-## Install as Claude Code plugin
-
-This repository is also a Claude Code plugin marketplace (`voicehook`) with one plugin,
-`voicehook-join` in `plugins/voicehook-join/`. Since 1.2.0 it connects Claude to the
-voicehook MCP server (`https://voicehook.ai/mcp`, `.mcp.json`, no headers, no keys) and ships
-the MCP variant of the voicehook-join skill (`plugins/voicehook-join/skills/voicehook-join/SKILL.md`,
-byte-identical copy of https://voicehook.ai/agent/mcp/SKILL.md): Claude joins a call as soon
-as you paste an invite link (`https://voicehook.ai/r/<slug>?invite=...`).
-
-In a Claude Code session:
+In Claude Code:
 
 ```
 /plugin marketplace add voicehook-ai/voicehook-agent
 /plugin install voicehook-join@voicehook
 ```
 
-Or from your shell:
+Once connected, paste an invite link (`https://voicehook.ai/r/<slug>?invite=<code>`)
+into your agent and it joins the call.
+
+## CLI quickstart
 
 ```bash
-claude plugin marketplace add voicehook-ai/voicehook-agent
-claude plugin install voicehook-join@voicehook
+uvx voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name <your-own-name> --model <your-model-name>
 ```
 
-On Claude Code 2.1.275 or later, one step does both:
-`/plugin install voicehook-join --marketplace voicehook-ai/voicehook-agent`.
+- `--name` and `--model` are mandatory: a display name the agent picks for itself and the
+  exact model it runs on. Name your real model and vendor, never "Claude" unless you are Claude.
+- Use the full invite link, including `?invite=<code>`.
+- stdout prints what the user and the voicebot say; every line on stdin is spoken.
 
-The skill runs by itself when you share an invite link, or by hand as
-`/voicehook-join:voicehook-join`. `claude plugin update voicehook-join@voicehook` fetches a
-new version, or turn on auto-update for the `voicehook` marketplace under **Marketplaces**
-in `/plugin`.
+For a loop without polling (`say`, `next`, `status`, `leave`), the status board, the activity
+hook and all flags see [docs/CLI.md](docs/CLI.md).
 
-Releasing (maintainers): the plugin is pinned by `version` in
-`plugins/voicehook-join/.claude-plugin/plugin.json`; users get a change ONLY when that
-string changes. On every change under `plugins/voicehook-join/`: copy `SKILL.md`
-byte-identical from voicehook-v4 `skills/voicehook-join-mcp/` (= live
-https://voicehook.ai/agent/mcp/SKILL.md), bump `version` (skill text or protocol change = minor
-`1.x.0`, typo/wording = patch `1.0.x`, breaking = major), run
-`claude plugin validate plugins/voicehook-join` and `claude plugin validate .`.
-The plugin is the MCP server entry plus the skill; the CLI and its activity hook
-(`voicehook-agent hook install`) are separate and not part of the plugin.
+## Pricing
 
-## Agent-skill registration
+About 10 minutes free every day. Prepaid from 10 EUR, no subscription.
 
-Append this skill description to your agent's instructions (e.g. `~/.claude/CLAUDE.md` for
-Claude Code, `$CODEX_HOME/skills/voicehook-agent/SKILL.md` for Codex):
+## Documentation
 
-```bash
-curl -fsSL https://voicehook.ai/agent/SKILL.md
-```
+| Document | Contents |
+|---|---|
+| [docs/CLI.md](docs/CLI.md) | Install, agent loop commands, status board and FAQ, speaking style, activity feed and hooks, shapes, self-update, Claude Code plugin, skill registration |
+| [docs/PROTOCOL.md](docs/PROTOCOL.md) | stdin/stdout protocol, data-channel topics, relay flags, HTTPS bridge, wake marker, server behaviour, environment variables |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | CI jobs, plugin releases, CLI releases, PyPI setup |
+| [OPERATOR-PROTOCOL.md](https://voicehook.ai/agent/OPERATOR-PROTOCOL.md) | Server-side operator protocol (voicehook.ai) |
 
-The agent then knows to invoke `voicehook-agent join <url> --name <Name> --model <model>` whenever a user
-shares a voicehook invite.
+## Development, CI and releases
 
-## Protocol
-
-### Interactive mode (default)
-
-```
-$ voicehook-agent join https://voicehook.ai/r/abc-def-ghi-XYZ4?go=1 --name <dein-eigener-Name> --model <dein-Modellname>
-[system] connecting room=abc-def-ghi-XYZ4 as identity=claude-mbp-7f3a via https://voicehook.ai
-[system] connected — 1 peers: ['agent-AJ_qwerty1234']
-joined via voicehook.ai · Talk with your agents · https://voicehook.ai/?utm_source=agent-join&utm_campaign=viral   ← stderr, once
-[hint] type a line to operator.say (voice-ai speaks it). /q to quit (Ctrl-D no longer quits under --keep-alive).
-[user] Hallo, wer bist du?
-Ich bin dein Pair-Programming-Brain.    ← typed by agent (voice-ai TTS speaks it)
-[agent] Ich bin dein Pair-Programming-Brain.
-[user] super, lass uns starten
-…
-```
-
-### JSON mode
-
-```bash
-voicehook-agent join <url> --name <dein-eigener-Name> --model <dein-Modellname> --json
-```
-
-stdout (JSONL):
-```json
-{"role": "user", "text": "Hallo", "topic": "transcript"}
-```
-
-Join hint (0.14.0): once per join, right after the `connected` event, one `_meta` event for
-YOUR user (pass it on once, never `say` it; plain mode prints it as one stderr line instead):
-```json
-{"role": "system", "topic": "_meta", "_meta": "hint", "text": "joined via voicehook.ai · Talk with your agents", "url": "https://voicehook.ai/?utm_source=agent-join&utm_campaign=viral"}
-```
-Off: `--quiet` or `VOICEHOOK_QUIET=1`. A reconnect does not repeat it.
-
-stdin (JSONL):
-```json
-{"text": "Hi there"}                                          → operator.say (default)
-{"topic": "operator.persona", "text": "Du bist X..."}           → live system-prompt update
-{"topic": "operator.interrupt"}                                 → stop your own running say
-{"topic": "operator.inject", "role": "user", "text": "..."}     → force voice-ai reply
-```
-
-## Topics
-
-| Topic              | Direction | Purpose                                |
-|--------------------|-----------|----------------------------------------|
-| `transcript`        | in        | Live turns, `role` = `user` / `operator` (an `operator.say`, after it was spoken; `op` = whose) / `agent` (voice-ai's own answer); `speaker` = display name (v4, 0.11.0) |
-| `transcript.live`   | in        | `{phase, role, id, text?, interrupted?}`: your `say` started (`start`, full text) / finished (`end`) playing; for the browser only, NOT proof it was spoken (use `transcript`) |
-| `_wake`             | out*      | Wake marker on each finalized user-turn (#12) |
-| `_meta`             | out*      | Connection / room-state events         |
-| `operator.say`        | out       | TTS push; tagged `_seq`/`_ts` (#9). `mode`: `append` (default since 0.11.0: queue at the end), `overwrite` (replaces only your own unspoken says), `revise` (your own unspoken says are stopped, `operator.revise` comes back to you only); `priority:"urgent"` interrupts whoever speaks |
-| `operator.persona`    | out       | live update voice-ai system prompt     |
-| `operator.interrupt`  | out       | stop your own output (the only way, besides `urgent`, to cut a running say); your unspoken rest comes back as `operator.revise` |
-| `operator.revise`     | in        | agent → you only: `{unspoken[], new, text, owner}`: your `mode:"revise"` replaced these not-started says; if any still matters, send ONE merged say with `mode:"overwrite"` |
-| `operator.inject`     | out       | force voice-ai to react (user-role)    |
-| `operator.backchannel`| out       | silent operator↔agent side-channel, relayed as-is (#10) |
-| `operator.status`     | out       | your status board `{doing, open[], done[], faq?[{q, a}]}` (0.7.0, `status` command; `faq` 0.10.0); replaces the last one, never spoken |
-| `operator.activity`   | room      | 0.10.0: `{lines[], ts}`, newest 15 tool-call lines of the coding agent (Pre/PostToolUse hook, 0.13.0 also `voicehook-agent activity` notes), on change, at most every 5 s |
-| `operator.alive`     | room      | 0.8.0: `{alive, ts, idle_s}` every 10 s while the agent serves `next`/`say` (within 15 s); nothing while orphaned; `alive:false` on leave. The web UI dims the operator after ~20 s without it |
-| `operator.say_status` | in    | 0.9.0: `{seq, state, spoken_chars}` per state change of your say; `next` carries `say_status`, `says` the table |
-| `operator.status_request` | in    | the user asked what you are doing; `next` yields `{"type":"status_request"}` |
-| `operator.visual`    | room      | `{shape, emotion?}`: draw a shape in the ring (`show`; bridge: `POST /api/bridge/visual`) |
-
-*`out` here = emitted on the CLI's **stdout** (not published to the room).
-
-## Relay flags
-
-Hardening flags (0.2.0) for unattended / background relay operation:
-
-| Flag | Issue | Effect |
-|------|-------|--------|
-| `--keep-alive` / `--no-keep-alive` | #6 | stdin-EOF does **not** quit; auto-reconnect (exp. backoff, cap 30s) on transient disconnect until the host leaves / room closes / `/q` / SIGTERM. Default: on. |
-| `--notify-url <url>` | #12 | POST `{role,text,room,timestamp}` to `<url>` on each finalized user-turn. |
-| `--wake-only-user` / `--wake-all` | #12 | Only role=user wakes (default); `--wake-all` also wakes on agent turns (debug). |
-| `--suppress-echo` | #10 | Drop the agent's own relayed TTS (role=agent transcript matching a recent `operator.say`) from the stdout stream. voicehook v4 marks that echo as `role=operator`, so the flag currently has no effect there. |
-| `--say-ttl <sec>` | #9 | Drop a `operator.say` older than `<sec>` seconds, or superseded by a newer user-turn, instead of speaking it stale. |
-| `--strict-relay` | #8 | Inject a bundled strict-relay persona at connect: the voicebot speaks **only** pushed text and never self-generates. Reuses `--persona-file` semantics; overridden by `--persona`/`--persona-file`. |
-| `--idle-timeout <min>` | 0.5.0 | Leave when the agent sent no `say`/`next`/stdin line for `<min>` minutes (default 10, `0` off). |
-| `--no-human-timeout <min>` | 0.10.1 | Leave when no human has been in the room for `<min>` minutes (default 2.5, just above the server grace of 120 s; `0` off); a reconnect does not reset it. Server call end (`call_end`, `ROOM_DELETED`, HTTP 410) always ends the join, no reconnect even with `--keep-alive`. 0.10.2: HTTP 409 at join (no human in the room yet) prints a clear message and retries every 5 s for up to 2 min (then exit code 6); 410 exits at once. |
-| `--owner-pid <pid>` | 0.8.0 | Leave (with an announcement) as soon as `<pid>` ends, e.g. `--owner-pid $PPID`; repeatable; env `VOICEHOOK_OWNER_PID`. `$VOICEHOOK_AGENT_HOME/holder` is watched too. |
-| `--idle-say <text>` | 0.5.0 | Announcement before an idle leave (`''` = silent). |
-| `--force-persona` | 0.5.0 | Push persona/mode/graph even if another operator agent is in the room. |
-| `--username <name>` | 0.9.0 | The user's first name: in the greeting and, since 0.9.0, sent to the server (token `username=`, bridge join `username`) as participant attribute `vh.user`, so the voicebot knows whom it talks to. |
-| `--status-due <sec>` | 0.9.0 | `next` adds `status_due` + `hint` once the board is older than `<sec>` while work is in progress (default 45, env `VOICEHOOK_STATUS_DUE`, 0 = age rule off). |
-| `--activity-due <sec>` | 0.13.0 | `next` adds `activity_due` + `activity_age_s` + `activity_hint` once no new `activity.log` line came for `<sec>` while work is in progress (default 60, env `VOICEHOOK_ACTIVITY_DUE`, 0 = off); silent while hook lines arrive. |
-| `--stale-error <sec>` | 0.13.0 | `next` adds `stale_error` `{status_age_s?, activity_age_s?, message}` on every output while you are active and board or activity log are older than `<sec>` (default 60, env `VOICEHOOK_STALE_ERROR_S`, 0 = off). |
-| `--no-control` | 0.5.0 | No local control socket (`say`/`next`/`leave`/`status` off). |
-| `--quiet` | 0.14.0 | No join hint (the one line `joined via voicehook.ai ...` for you, never spoken); env `VOICEHOOK_QUIET=1`. |
-| `--no-self-update` | 0.12.0 | Do not update when the server names a newer `cli_latest` (see Self-update). HTTP 426 then exits 7 with the upgrade command. |
-| `--transport auto\|webrtc\|bridge` | 0.6.0 | How to reach the room. `auto` (default): WebRTC; the HTTPS bridge when `HTTPS_PROXY`/`ALL_PROXY` is set or the WebRTC connect fails/times out (one retry, logged). See below. |
-
-### HTTPS bridge (0.6.0): cloud sandboxes and proxy networks
-
-Some environments (claude.ai/code cloud sessions, corporate networks) only allow HTTPS
-through an HTTP CONNECT proxy. libwebrtc does not use that proxy, so the WebRTC join
-fails with `wait_pc_connection timed out`. The voicehook server then joins the room for
-you (same token and `vh.*` attributes as a WebRTC join) and relays the data channel over
-plain HTTPS: `POST /api/bridge/join|send|leave` up, Server-Sent Events
-(`GET /api/bridge/events`) down, the session key only in an `Authorization: Bearer`
-header. The HTTP client honours `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`/`NO_PROXY`.
-
-- `--transport auto` (default): proxy in the env -> bridge right away
-  (`{"text": "transport=bridge (auto: HTTPS_PROXY is set ...)", "topic": "_meta"}`);
-  otherwise WebRTC, and on a failed connect one retry via the bridge
-  (`webrtc connect failed or timed out; retrying once via the HTTPS bridge`).
-- `--transport webrtc` / `--transport bridge` force one.
-- Server restart / deploy (0.11.0): the server keeps the bridge session (same token).
-  A dropped stream, a 502/503/504 or `"reconnect": true` is retried with the SAME token
-  for ~30 s (`reconnecting` / `reconnected` in the output); a `say` sent meanwhile is
-  delivered once the server is back. Only after that the join loop rejoins.
-- Everything else is identical: `--json` stream, FIFO/stdin input, `say`/`next`/`leave`/
-  `status`, idle and persona guard (both still run in the CLI).
-- No install possible at all (installs blocked)? The bridge also works with plain curl,
-  see Quickstart A in [SKILL.md](plugins/voicehook-join/skills/voicehook-join/SKILL.md) and the endpoint table in
-  [OPERATOR-PROTOCOL.md](https://voicehook.ai/agent/OPERATOR-PROTOCOL.md) (section "HTTPS bridge").
-
-### Wake marker (JSON mode)
-
-```json
-{"role":"system","text":"user-turn","topic":"_wake","role":"user","text":"...","room":"<slug>","timestamp":1.0}
-```
-
-A monitor can `grep '"topic": "_wake"'` to re-invoke a coding agent per turn
-(push, not poll). Wake events are **deduped** (identical consecutive turns fire
-once) and **role-filtered** (the agent's own echoed TTS never wakes → no loop).
-
-### FIFO newline tolerance (#11)
-
-A control line written **without** a trailing newline is no longer silently
-swallowed. On stdin-EOF the held tail is processed and a visible warning is
-emitted on stderr (`[warn] stdin closed with un-terminated line …`). Prefer
-`printf '%s\n'` over bare `jq -nc` when writing to the FIFO.
-
-### Server-side dependencies (honest notes)
-
-- **#9 say-TTL** is best-effort client-side: the server does not currently
-  *ack* that a `operator.say` was spoken, so "spoken within TTL" is approximated
-  by age + supersede-by-newer-user-turn. The wire payload carries `_seq`/`_ts`
-  so a future server ack can correlate. Delivery-ack (#10 F8) and a true
-  interrupt-confirmation (#10 F7) need server support and are not implemented.
-- **#8 strict-relay** is enforced via persona injection only. Hard server-side
-  enforcement (LLM self-generation truly disabled) is tracked server-side
-  (voicehook-v3#28/#48); the CLI ships the strongest available client lever.
-
-### voicehook v4 server behaviour (Stand 2026-10-01)
-
-Reference: [OPERATOR-PROTOCOL.md](https://voicehook.ai/agent/OPERATOR-PROTOCOL.md).
-
-- **Transcript roles.** `user` = final STT of the human; `operator` = your
-  `operator.say`, published only after voice-ai spoke it (on an interruption only
-  the spoken part); `agent` = voice-ai's own answer. No `operator` line after a
-  push means it was not spoken (yet).
-- **Live mode (Gemini Live).** `GET /api/live/status` returns `{"available":bool}`;
-  `POST /api/live-room {identity, ttl_seconds?}` returns the host-call format plus
-  `invite_url`, `expires_in`, `agent`. `402` = monthly live budget used up (default
-  10 USD per UTC month), `404` off, `503` not configured, `429` rate limit. Join the
-  `invite_url` as usual. In live rooms `operator.say` is not verbatim: the model says
-  it in its own words.
-- **Speech and speaker filter (pipeline mode).** Only detected speech reaches the
-  STT, and background voices are dropped before the LLM. Learning phase at the
-  start: until one speaker has about 3 s of speech, everything passes.
-
-## Environment
-
-| Variable               | Default                 | Purpose                          |
-|------------------------|-------------------------|----------------------------------|
-| `VOICEHOOK_API_BASE`   | `https://voicehook.ai`  | Token-mint endpoint base URL     |
-| `VOICEHOOK_AGENT_HOME` | `~/.voicehook-agent`    | Root of the session dirs (control sockets) |
-| `HTTPS_PROXY` / `ALL_PROXY` | unset              | Set -> `--transport auto` uses the HTTPS bridge; also used by the HTTP client |
-| `VOICEHOOK_NO_SELF_UPDATE` | unset             | `1` = never self-update on `join` (same as `--no-self-update`) |
-| `VOICEHOOK_QUIET`      | unset                   | `1` = no join hint (same as `join --quiet`) |
-
-## CI and releases
-
-CI (`.github/workflows/ci.yml`) runs on every PR and on pushes to `master`:
-
-| Job | What it checks |
-|-----|----------------|
-| `tests (py3.10)`, `tests (py3.13)` | full pytest suite + `scripts/tests` |
-| `ruff (neue Befunde brechen)` | ruff 0.16.10 against `scripts/ruff-baseline.json` (legacy findings counted per file and rule; any new one fails). After cleaning up: `python scripts/ruff_baseline.py --update` |
-| `plugin validate` | `claude plugin validate --strict` for the plugin and the marketplace (no login needed) |
-| `secret-scan (gitleaks)` | gitleaks over the full history; known fake test secrets are allowlisted by exact value and file in `.gitleaks.toml` |
-| `skill-drift (voicehook.ai/agent/mcp)` | plugin `SKILL.md` byte-identical to https://voicehook.ai/agent/mcp/SKILL.md. Drift right after a website deploy is expected; resync with the command the job prints |
-
-Releases (`.github/workflows/release.yml`) use two independent tag families:
-
-- `cli-vX.Y.Z`: must equal `pyproject.toml` `version` and `voicehook_agent.__version__`. Creates a GitHub release with sdist + wheel and generated notes since the previous `cli-v*` tag.
-- `plugin-vX.Y.Z`: must equal `version` in `plugins/voicehook-join/.claude-plugin/plugin.json`. Creates a GitHub release without Python artifacts.
-
-```bash
-git tag cli-v0.14.0 && git push origin cli-v0.14.0
-```
-
-PRs touching versions or the release workflow, and manual runs (`workflow_dispatch`), execute the same checks and build as a dry run and only print the `gh release create` command.
-
-**PyPI (prepared, not active).** The `pypi-publish` job uses Trusted Publishing (OIDC, no API token) and is disabled with `if: false`. To enable it:
-
-1. On pypi.org: *Your projects / Publishing* -> *Add a new pending publisher* (or the project's *Publishing* settings once it exists): owner `voicehook-ai`, repository `voicehook-agent`, workflow `release.yml`, environment `pypi`.
-2. On GitHub: create the environment `pypi` (Settings -> Environments), optionally with required reviewers and a tag rule `cli-v*`.
-3. In `release.yml` replace `if: false` with the condition noted next to it.
+CI runs tests, ruff, plugin validation, a secret scan and a skill drift check on every PR.
+Release tags, the plugin release checklist and the PyPI setup are in
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## License
 
 MIT, see [LICENSE](LICENSE).
+
+---
+
+Made in Germany, hosted in Nuremberg (Hetzner). No cookies, no tracking, no call recordings.
+Nothing you or your agent say is stored. [Privacy policy](https://voicehook.ai/privacy)
