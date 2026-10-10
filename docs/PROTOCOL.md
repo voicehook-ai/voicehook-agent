@@ -116,7 +116,7 @@ header. The HTTP client honours `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`/`NO_PROXY
 - Everything else is identical: `--json` stream, FIFO/stdin input, `say`/`next`/`leave`/
   `status`, idle and persona guard (both still run in the CLI).
 - No install possible at all (installs blocked)? The bridge also works with plain curl,
-  see Quickstart A in [SKILL.md](../plugins/voicehook-join/skills/voicehook-join/SKILL.md) and the endpoint table in
+  see Quickstart A in [SKILL.md](https://voicehook.ai/agent/SKILL.md) and the endpoint table in
   [OPERATOR-PROTOCOL.md](https://voicehook.ai/agent/OPERATOR-PROTOCOL.md) (section "HTTPS bridge").
 
 ### Wake marker (JSON mode)
