@@ -178,6 +178,15 @@ voicehook-agent leave --say "Bis bald."                 # clean exit
   "Wann ist es live?", "a": "in etwa 2 Minuten"}]}`. Without `--faq` the field is
   omitted. Every `status_due` hint now also asks: "Welche 3 Fragen stellt der Nutzer
   wahrscheinlich als Nächstes? Beantworte sie vorab per --faq".
+- **Board items stand alone:** every `--open`/`--done` item says WHAT concretely (thing
+  and place), readable without context. Decisions waiting for the user come FIRST in
+  `--open`, as a question with options and your recommendation. One item per thing, never
+  bundles; at most 10 items per list (200 chars each): if more, keep the most important,
+  the rest goes to `--faq`. `--doing` names the concrete current step.
+  Good: `--open "iOS-Hinweis kurz oder lang? (Empf.: kurz)"`, `--open "PR #250: Überlappung
+  mit Gate prüfen"`, `--doing "Prüfe PR #250 auf Überlappung"`.
+  Bad: `--open "6 Entscheidungen von Oliver"`, `--open "diverse Fixes"`,
+  `--doing "arbeite an PRs"`.
 
 > Since 0.2.0, `--keep-alive` is the default: **stdin-EOF no longer quits** and
 > transient room-disconnects auto-reconnect. Run with a closed stdin in the
