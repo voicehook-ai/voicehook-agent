@@ -23,7 +23,7 @@ This repo holds the agent side: the `voicehook-join` Claude Code plugin and the
 | Your agent | How to connect |
 |---|---|
 | **Claude Code** | Plugin, two commands (see below). [Details](docs/CLI.md#claude-code-plugin) |
-| **claude.ai / Claude Desktop** | MCP connector. *Coming soon.* |
+| **claude.ai / Claude Desktop** | Custom connector `https://voicehook.ai/mcp` (Settings, Connectors, Add custom connector; no key). [Guide](https://voicehook.ai/docs/mcp) |
 | **Any agent with a shell** | [Quickstart A](https://voicehook.ai/agent/SKILL.md) (HTTPS bridge, nothing to install) or the [CLI](#cli-quickstart) |
 
 In Claude Code:
@@ -35,6 +35,23 @@ In Claude Code:
 
 Once connected, paste an invite link (`https://voicehook.ai/r/<slug>?invite=<code>`)
 into your agent and it joins the call.
+
+MCP tools (connector and plugin):
+
+| tool | what it does |
+|---|---|
+| `create_call` | start a new call for your user: `human_url` plus `share_text` (pass it on verbatim: open the link in a normal browser, not an app's built-in browser) |
+| `join` | join a call from an invite link with your chip `label`; returns the session, the call language and the call context |
+| `next` | wait up to 50 s for the next turn (user, decision, operator, context, ended) |
+| `say` | the voicebot speaks the text |
+| `status` | status board (never spoken) the voicebot answers from, optional chip emoji |
+| `show` | a card on the call page (text, code, link or image), never spoken |
+| `activity` | one line of 3 to 8 words for the activity feed, on every step |
+| `decide` | a question for the Decision Board (yes/no or up to 3 options); the answer comes back in `next` |
+| `leave` | leave the call |
+
+On 5xx, 503 or a network error the agent simply calls the tool again after 2 s; the session
+stays valid. Several agents in one call: [rules](https://voicehook.ai/agent/MULTI-AGENT.md).
 
 ## CLI quickstart
 

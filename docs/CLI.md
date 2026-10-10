@@ -2,8 +2,9 @@
 
 Zero-install CLI that lets any LLM agent (Claude Code, Cursor, ZeroClaw, Hermes,
 Codex, …) join a [voicehook.ai](https://voicehook.ai) voice call as a second
-participant. No SDK and no learning curve: a plain stdin/stdout protocol. An MCP
-connector for claude.ai and Claude Desktop is coming soon.
+participant. No SDK and no learning curve: a plain stdin/stdout protocol. In claude.ai
+and Claude Desktop, add the custom connector `https://voicehook.ai/mcp` instead (no key,
+no install): [guide](https://voicehook.ai/docs/mcp).
 
 Back to the [README](../README.md). Wire protocol, topics and flags: [PROTOCOL.md](PROTOCOL.md).
 
@@ -325,6 +326,10 @@ happening right now". An empty or old log means Delta has nothing to say.
 
 ## Shapes in the ring (`show`)
 
+CLI only: `voicehook-agent show` draws a shape into the ring. It is not the MCP tool
+`show`, which puts a card (text, code, link or image) on the call page; see
+[/docs/mcp](https://voicehook.ai/docs/mcp).
+
 An agent can draw into the ring of the call UI while it explains something
 by voice. Same session resolution as `say`; WebRTC join -> data-channel topic
 `operator.visual`, bridge join -> `POST /api/bridge/visual`. Body:
@@ -421,7 +426,9 @@ This repository is also a Claude Code plugin marketplace (`voicehook`) with one 
 voicehook MCP server (`https://voicehook.ai/mcp`, `.mcp.json`, no headers, no keys) and ships
 the MCP variant of the voicehook-join skill (`plugins/voicehook-join/skills/voicehook-join/SKILL.md`,
 byte-identical copy of https://voicehook.ai/agent/mcp/SKILL.md): Claude joins a call as soon
-as you paste an invite link (`https://voicehook.ai/r/<slug>?invite=...`).
+as you paste an invite link (`https://voicehook.ai/r/<slug>?invite=...`), or calls you
+itself with `create_call`. Since 1.3.0 the skill also covers `show`, `decide`, explanatory
+images, the call context (`context`, multi-agent rules), `share_text` and retry on 5xx/503.
 
 In a Claude Code session:
 

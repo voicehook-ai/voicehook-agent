@@ -64,7 +64,7 @@ stdin (JSONL):
 | `operator.alive`     | room      | 0.8.0: `{alive, ts, idle_s}` every 10 s while the agent serves `next`/`say` (within 15 s); nothing while orphaned; `alive:false` on leave. The web UI dims the operator after ~20 s without it |
 | `operator.say_status` | in    | 0.9.0: `{seq, state, spoken_chars}` per state change of your say; `next` carries `say_status`, `says` the table |
 | `operator.status_request` | in    | the user asked what you are doing; `next` yields `{"type":"status_request"}` |
-| `operator.visual`    | room      | `{shape, emotion?}`: draw a shape in the ring (`show`; bridge: `POST /api/bridge/visual`) |
+| `operator.visual`    | room      | `{shape, emotion?}`: draw a shape in the ring (CLI `show`; bridge: `POST /api/bridge/visual`). Not the MCP tool `show` (cards on the call page) |
 
 *`out` here = emitted on the CLI's **stdout** (not published to the room).
 
