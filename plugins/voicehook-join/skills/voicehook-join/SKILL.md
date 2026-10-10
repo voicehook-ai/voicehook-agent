@@ -8,37 +8,52 @@ description: Join or start a voicehook.ai voice call as the brain behind its voi
 Canonical: https://voicehook.ai/agent/mcp/SKILL.md. You only use the tools of the
 `voicehook` MCP server. Nothing to install, no keys: the invite link is the permission.
 
+## Hard rules (read first, always)
+
+- **`create_call`: the link first.** FIRST give your user share_text, verbatim.
+  - Claude Code / clients that can keep a background process running: start join + next in the background, then END your turn with share_text as your final message; intermediate text may never reach a remote user.
+  - claude.ai chat, remote apps / clients that only show your final message: END YOUR TURN with share_text as your final message and call join when the user replies that they opened it.
+  - join waits up to 50 s and returns status waiting_for_human until they open it; then call join again at once.
+  - Until they have joined, end EVERY message to your user with share_text as the last block. A link further up scrolls away.
+  - Never wait or block in the foreground before the link is out as your final message, never "I am waiting for you" in the foreground. If your channel can, also send the link as a file or push. On 5xx, 503 or a network error call the tool again after 2 s.
+- **Right after `join`, at once** (also with `quiet: true`: quiet only suppresses `share` and `notice`, nothing audible). You lead: never wait silently until the human says something.
+  1. Greet: `greet` (true by default in `join`) speaks the default greeting in the call language. With greet, the `say` in `context.first_actions` drops out. Without greet: right after join, `say` one short greeting in the call language: who you are and that you are listening ("Hi, this is <your label>, I'm in and listening. What's up?" / "Hallo, <your label> hier, ich bin drin und höre zu. Worum geht's?"). If you stay silent, the voicebot announces you after 3 seconds.
+  2. `status` with `doing`, `open`, `done`.
+  3. One `activity` line.
+  4. Open questions for the human: `decide` (Decision Board), never into `open`.
+  5. `show` with `panel: "board"` (or `log`, `decisions`) so the human sees it at once.
+- **Acknowledge within 3 s:** on every request of the human first one short `say` ("On it, one moment." / "Mach ich, Moment."), THEN work. Progress goes to `status` and `activity`, never silence.
+
 ## Join
 
 1. Call `join` with `invite_url` = the FULL invite link the user gave you (including
    `?invite=`), `label` = the text on your chip in the call (max 22 characters: your session
    or chat name, else your model name; too long is rejected), `model` = the exact model id
    you run on (not shown). Never call yourself "Claude" if you are not Claude. Unknown model:
-   `"unbekannt"`. The old `name` still works as `label`.
+   `"unbekannt"`. The old `name` still works as `label`. `greet` is true by default (`false` = you greet with `say`).
 2. Keep the returned `session` and pass it as `session` to EVERY other tool. It is a short-lived handle
    for this one call; it ends with the call, after 10 min without `next`/`say`, or with `leave`. Never show it in the call or to anyone else.
 3. `lang` = the call language: speak it. `share` = one line for YOUR user (show it once
-   in your chat, never say it in the call); `quiet: true` drops it.
-4. `say` one short greeting in `context.lang` (join answer: `context` = lang, mode, instructions,
-   functions, rules, skill_url; the source of truth for this call), then `next` at once.
+   in your chat, never say it in the call); `quiet: true` drops it (and `notice`; nothing audible). `context` = lang, mode,
+   instructions, functions, rules, skill_url: the source of truth for this call.
+4. Then the Hard rules checklist (greeting, board, feed, decide, panel) and `next` at once.
 
 ## Or call your user yourself (`create_call`)
 
 1. `create_call`: set `lang` to the language of the person you are calling (`de` or `en`, default `de`).
    You get `human_url`, `share_text`, `operator_invite_url`, `room` and `expires_in` (seconds; an unopened link expires, 30 min).
-2. Always give your user the link together with `share_text`, verbatim (it holds `human_url` and the
-   hint to use a normal browser; an app's built-in browser blocks the mic). The opener pays from
-   THEIR free allowance or credit, you pay nothing. Never send `operator_invite_url` to anyone.
-3. Right after sending the link, call `join` with `invite_url` = `operator_invite_url`. It
-   waits up to 50 s until your user opened the link and is in the call. Error `409`: call
-   `join` again IMMEDIATELY, do not wait for your user to tell you; repeat until it succeeds or
-   answers `410` (link expired: ask your user whether to start a new call).
-4. Then greet with one `say` and continue with `next` as below.
+2. Give your user `share_text` verbatim (it holds `human_url` and the hint to use a normal
+   browser; an app's built-in browser blocks the mic) as your FINAL message (Hard rules). The opener
+   pays from THEIR free allowance or credit, you pay nothing. Never send `operator_invite_url` to anyone.
+3. `join` with `invite_url` = `operator_invite_url` (in the background, or when your user says
+   the link is open). It waits up to 50 s and returns status `waiting_for_human` (not an error,
+   with `share_text` again) until the person opens the link: call `join` again at once, until it
+   succeeds or answers `410` (link expired: ask your user whether to start a new call).
+4. Then the Hard rules checklist and `next` as below.
 
 ## The work cycle: say -> next -> say
 
-`next` (waits up to 50 s for the user) -> one `say` -> `next` again at once. Never sleep,
-never poll, never end your turn while the call runs.
+`next` (waits up to 50 s for the user) -> one `say` -> `next` again at once. Never sleep, never poll, never end your turn while the call runs. Working? Still call `next` at least every 10-15 s (split long work into steps, `next` in between). Exactly ONE `next` loop per agent: a second one makes the older answer `superseded`. After a pause `next` brings `missed` (all user turns you missed, oldest first) and `away_s`: answer them together in one `say`.
 
 | `type` | meaning | do |
 |---|---|---|
@@ -73,20 +88,11 @@ or ambiguous) and `addressed_to_you`; `operators_said` lines also `to_human` (no
 
 ## Keep the user informed while you work
 
-- **Status board** (`status`, never spoken): `doing` = current step + ETA (max 400 chars),
-  `open`/`done` = short items, `faq` = the 3 questions the user most likely asks next with
-  short answers (max 6 pairs). Always send the WHOLE board; it replaces the last one. Update
-  it on every request, delegation, result and deploy step. Finished: move it to `done`.
-- **Board items stand alone:** every `open`/`done` item says WHAT concretely (thing and
-  place), readable without context. Questions waiting for the user never go into `open`
-  (use `decide`). One item per thing, never bundles. Max 10 items per list (200 chars each):
-  if more, keep the most important, the rest goes to `faq`. `doing` = the concrete current step.
-  Good: `Login-Redirect nach Token-Refresh testen` · `PR #250: Überlappung mit Gate prüfen`
-  · `doing: Prüfe PR #250 auf Überlappung`.
-  Bad: `6 Entscheidungen von Oliver` · `diverse Fixes` · `doing: arbeite an PRs`.
+- **Status board** (`status`, never spoken): `doing` = current step + ETA (max 400 chars), `open`/`done` = short items, `faq` = the 3 questions the user most likely asks next with short answers (max 6 pairs). Always send the WHOLE board; it replaces the last one. Update it on every request, delegation, result and deploy step. Finished: move it to `done`.
+- **Board items stand alone:** every `open`/`done` item says WHAT concretely (thing and place), readable without context. Questions waiting for the user never go into `open` (use `decide`). One item per thing, never bundles. Max 10 items per list (200 chars each): if more, keep the most important, the rest goes to `faq`. `doing` = the concrete current step.
+  Good: `Login-Redirect nach Token-Refresh testen` · `PR #250: Überlappung mit Gate prüfen` · `doing: Prüfe PR #250 auf Überlappung`. Bad: `6 Entscheidungen von Oliver` · `diverse Fixes` · `doing: arbeite an PRs`.
   Optional `emoji` on `status`: pick the emoji that best shows your current state, thought or mood; your own choice, change it whenever it changes.
-- **Activity feed** (`activity`): one line of 3-8 words on every step. Never commands,
-  paths, file contents or secrets. The voicebot answers "what is <name> doing" from both.
+- **Activity feed** (`activity`): one line of 3-8 words on every step. Never commands, paths, file contents or secrets. The voicebot answers "what is <name> doing" from both.
 
 ## Show instead of reading out (`show`)
 
@@ -128,35 +134,27 @@ Compare A and B:
 
 ## Operator rhythm (mandatory)
 
-- React within a few seconds. Need longer? `say` a short holding line now, hand anything
-  slower (shell, web, edits, builds) to a background agent or subtask; never block the loop.
+- React within 3 s: a short holding line first, hand anything slower (shell, web, edits,
+  builds) to a background agent or subtask; never block the loop.
 - After every `say` call `next` immediately: no work, no sleep, no tool call in between.
 - Keep your own context small: read big tool output filtered, summarize, hand over early.
 
 ## Stay in the call
 
-- You are the brain. If you stop calling `next`, the voicebot sits in the call with nobody
-  behind it. In one-shot harnesses run the loop inside the same turn.
-- Leave only when the user says goodbye ("tschüss", "danke, das war's", "bye") or `next`
-  reports `ended`: `leave` with `say: "Danke, bis bald!"`. The handle is invalid afterwards.
+- You are the brain. If you stop calling `next`, the voicebot sits in the call with nobody behind it. In one-shot harnesses run the loop inside the same turn.
+- Leave only when the user says goodbye ("tschüss", "danke, das war's", "bye") or `next` reports `ended`: `leave` with `say: "Danke, bis bald!"`. The handle is invalid afterwards.
 
 ## Speak right
 
-- The call language from `join` (`context.lang` / `context.instructions`); switch only when a
-  `next` event of type `context` brings a new one.
-- Plain, complete, phone-ready sentences: no abbreviations, symbols, URLs, codes, markdown,
-  lists or emoji; round numbers. One complete thought per `say`; split long content into
-  several `say` (`mode: "append"`, the default).
-- Status, decisions and topic changes always with context: which project, what happened,
-  why it matters, what happens on A and on B. One question per topic.
-- `mode: "overwrite"` replaces your not yet spoken says; `"revise"` does the same and sends
-  you a `revise` event.
+- The call language from `join` (`context.lang` / `context.instructions`); switch only when a `next` event of type `context` brings a new one.
+- Plain, complete, phone-ready sentences: no abbreviations, symbols, URLs, codes, markdown, lists or emoji; round numbers. One complete thought per `say`; split long content into several `say` (`mode: "append"`, the default).
+- Status, decisions and topic changes always with context: which project, what happened, why it matters, what happens on A and on B. One question per topic.
+- `mode: "overwrite"` replaces your not yet spoken says; `"revise"` does the same and sends you a `revise` event.
 - No secrets and no personal data in `say`, board or feed: they travel in clear text.
 
 ## Notices from the call
 
-- Low balance: the voicebot already said it. Add one short sentence to your next `say` that
-  the user can top up at voicehook.ai/aufladen. Once, never nag.
+- Low balance: the voicebot already said it. Add one short sentence to your next `say` that the user can top up at voicehook.ai/aufladen. Once, never nag.
 - Live mode (realtime voice): `say` is not verbatim, the model says it in its own words.
 
 ## Errors
@@ -164,7 +162,7 @@ Compare A and B:
 | tool error | do |
 |---|---|
 | `403: operator invite required` / `invalid invite` | ask the user for the full, fresh invite link incl. `?invite=` |
-| `409: no human in the room yet` (after `create_call`) | your user has not opened `human_url` yet: `join` again |
+| status `waiting_for_human` (after `create_call`, not an error) | your user has not opened `human_url` yet: end your message with `share_text`, `join` again at once |
 | `410: call link expired` | nobody opened `human_url` in time: `create_call` again if the user still wants to talk |
 | `409` (no human in the call) / `410` (call over) | tell the user; never rejoin with the old handle |
 | `429` (too many sessions or joins) | wait a minute or ask for a fresh link |
