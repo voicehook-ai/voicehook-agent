@@ -34,6 +34,11 @@ Transport (0.6.0):
                                      when HTTPS_PROXY/ALL_PROXY is set or WebRTC
                                      fails to connect (cloud sandboxes). Output,
                                      say/next/leave and the FIFO stay identical.
+    WebRTC blocked (0.14.3)          wait_pc_connection / ICE timeout and no transport
+                                     left: stderr hint to the remote MCP server
+                                     https://voicehook.ai/mcp (+ curl example), exit 4.
+                                     CLAUDE_CODE_REMOTE=true or a proxy: one [info] line
+                                     before connecting.
 
 Status board (0.7.0):
     status [TEXT] [--doing T] [--open T]... [--done T]... [--faq 'F::A']... [-f board.json]
@@ -1523,6 +1528,8 @@ async def _connect_and_listen(
             await room.disconnect()
         except Exception:  # noqa: BLE001
             pass
+        if transport != "bridge" and vtransport.is_webrtc_blocked(e):
+            return 4, "WEBRTC_BLOCKED"  # no peer connection: UDP/ICE blocked (sandbox?)
         return 4, "CONNECT_FAILED"
 
     if tok is None and updater is not None and await updater.on_versions(
@@ -1791,6 +1798,9 @@ async def _join(
                  f"connecting room={slug} as identity={ident} via {api_base}", topic="_meta")
     cur_transport, why = vtransport.initial_transport(transport)
     _print_event(json_mode, "system", f"transport={cur_transport} ({why})", topic="_meta")
+    sandbox = vtransport.sandbox_env()
+    if sandbox:  # heads-up before connecting: the remote MCP server always works here
+        print(vtransport.mcp_hint(early=sandbox), file=sys.stderr, flush=True)
     invite = _operator_invite(invite_url)
 
     # Shared state across reconnect cycles (#6): the notifier dedup, echo ring,
@@ -1873,6 +1883,7 @@ async def _join(
     try:
         backoff = relay.backoff_delays(base=1.0, factor=2.0, cap=30.0)
         first = True
+        webrtc_blocked = False  # a WebRTC connect died without a peer connection
         no_human_waited: float | None = None  # seconds spent waiting on 409 (None = not waiting)
         while True:
             rc, reason = await _connect_and_listen(
@@ -1893,6 +1904,8 @@ async def _join(
                 break
             if reason == "CLI_OUTDATED":  # 0.12.0: 426 and no self-update -> exit 7
                 break
+            if reason == "WEBRTC_BLOCKED":
+                webrtc_blocked = True
             if first and vtransport.should_fallback(transport, cur_transport, reason):
                 cur_transport = "bridge"
                 msg = ("webrtc connect failed or timed out; retrying once via the HTTPS "
@@ -1900,6 +1913,15 @@ async def _join(
                 _print_event(json_mode, "system", msg, topic="_meta")
                 print(f"[warn] {msg}", file=sys.stderr, flush=True)
                 continue
+            if first and webrtc_blocked and reason in ("WEBRTC_BLOCKED", "CONNECT_FAILED"):
+                # WebRTC cannot get through and no other transport is left (forced
+                # webrtc, or the bridge failed too): retrying will not heal, point to MCP.
+                _print_event(json_mode, "system",
+                             f"webrtc blocked, use the remote MCP server {vtransport.MCP_URL}",
+                             topic="_meta")
+                print(vtransport.mcp_hint(), file=sys.stderr, flush=True)
+                rc = 4
+                break
             if reason == "NO_HUMAN_YET":
                 if no_human_waited is None:
                     no_human_waited = 0.0

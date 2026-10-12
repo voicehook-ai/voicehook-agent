@@ -83,7 +83,65 @@ def initial_transport(mode: str, env: dict | None = None) -> tuple[str, str]:
 
 def should_fallback(mode: str, transport: str, reason: str | None) -> bool:
     """auto + WebRTC connect failed/timed out -> retry once via the bridge."""
-    return mode == "auto" and transport == "webrtc" and reason == "CONNECT_FAILED"
+    return (mode == "auto" and transport == "webrtc"
+            and reason in ("CONNECT_FAILED", "WEBRTC_BLOCKED"))
+
+
+# --------------------------------------------------------------------------- #
+# Cloud / sandbox sessions: point the agent to the remote MCP server
+# --------------------------------------------------------------------------- #
+MCP_URL = "https://voicehook.ai/mcp"
+
+# Error texts of a WebRTC connect that never got a peer connection (UDP/ICE blocked).
+_WEBRTC_BLOCKED_MARKERS = ("wait_pc_connection", "pc_connection", "peer connection",
+                           "peerconnection", "ice connection", "ice_connection",
+                           "ice candidate", "ice gathering")
+
+
+def is_webrtc_blocked(exc: BaseException) -> bool:
+    """True when a WebRTC connect failed the way a sandbox without UDP fails:
+    the peer connection / ICE timed out (or our own connect timeout hit)."""
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return True
+    text = f"{exc!s} {exc!r}".lower()
+    return any(m in text for m in _WEBRTC_BLOCKED_MARKERS)
+
+
+def sandbox_env(env: dict | None = None) -> str | None:
+    """Why this looks like a cloud/sandbox session (WebRTC usually blocked), else None.
+    Signals: an HTTPS/ALL proxy in the env, or CLAUDE_CODE_REMOTE=true (set by
+    Claude Code in its cloud sessions)."""
+    env = os.environ if env is None else env
+    if (env.get("CLAUDE_CODE_REMOTE") or "").strip().lower() == "true":
+        return "CLAUDE_CODE_REMOTE=true"
+    var = proxy_env(env)
+    return f"{var} is set" if var else None
+
+
+def mcp_curl_example(base: str = MCP_URL) -> str:
+    """Minimal curl join via the remote MCP server (JSON-RPC tools/call, SSE answer)."""
+    body = ('{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"join",'
+            '"arguments":{"invite_url":"<INVITE_URL>","label":"<your chip label>"}}}')
+    return (f"curl -sN {base} -H 'Content-Type: application/json' "
+            f"-H 'Accept: application/json, text/event-stream' -d '{body}'")
+
+
+def mcp_hint(early: str | None = None) -> str:
+    """stderr text that sends the agent to the remote MCP server.
+    early = sandbox_env() reason -> short heads-up before connecting;
+    None -> the WebRTC join has failed."""
+    if early:
+        return (f"[info] cloud/sandbox session ({early}): WebRTC is usually blocked here. "
+                f"If this join fails, use the remote MCP server {MCP_URL} instead "
+                "(the server joins the call for you, HTTPS is all you need).")
+    return "\n".join((
+        ("[error] WebRTC blocked here (cloud/sandbox?). Use the remote MCP server "
+         f"{MCP_URL} instead: the server joins the call for you, HTTPS is all you need."),
+        "  Minimal example without an MCP client (the answer is an SSE 'data:' line):",
+        f"  {mcp_curl_example()}",
+        ("  Then call next, say, status the same way with the returned session; "
+         "\"method\":\"tools/list\" lists all tools."),
+    ))
 
 
 async def parse_sse(lines: AsyncIterator[str]) -> AsyncIterator[dict]:
