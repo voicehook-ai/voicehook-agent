@@ -15,7 +15,7 @@ from voicehook_agent import cli
 from voicehook_agent import transport as vt
 
 PROXY_ENV = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY",
-             "all_proxy", "NO_PROXY", "no_proxy")
+             "all_proxy", "NO_PROXY", "no_proxy", "CLAUDE_CODE_REMOTE")
 
 
 @pytest.fixture(autouse=True)
@@ -48,6 +48,8 @@ def test_forced_transport_ignores_env(mode):
 
 def test_fallback_only_auto_webrtc_connect_failed():
     assert vt.should_fallback("auto", "webrtc", "CONNECT_FAILED")
+    assert vt.should_fallback("auto", "webrtc", "WEBRTC_BLOCKED")
+    assert not vt.should_fallback("webrtc", "webrtc", "WEBRTC_BLOCKED")
     assert not vt.should_fallback("webrtc", "webrtc", "CONNECT_FAILED")
     assert not vt.should_fallback("auto", "bridge", "CONNECT_FAILED")
     assert not vt.should_fallback("auto", "webrtc", "ROOM_DELETED")
@@ -333,7 +335,8 @@ class _FailingRtcRoom:
         return None
 
 
-def _run_join(monkeypatch, capsys, transport: str, env: dict | None = None) -> tuple[str, str, list]:
+def _run_join(monkeypatch, capsys, transport: str, env: dict | None = None,
+              rtc_room: type = _FailingRtcRoom) -> tuple[str, str, list]:
     calls: list = []
 
     class FakeBridgeRoom(vt.BridgeRoom):
@@ -351,7 +354,7 @@ def _run_join(monkeypatch, capsys, transport: str, env: dict | None = None) -> t
 
     for k, v in (env or {}).items():
         monkeypatch.setenv(k, v)
-    monkeypatch.setattr(cli.rtc, "Room", _FailingRtcRoom)
+    monkeypatch.setattr(cli.rtc, "Room", rtc_room)
     monkeypatch.setattr(cli, "_mint_token", fake_mint)
     monkeypatch.setattr(vt, "BridgeRoom", FakeBridgeRoom)
     monkeypatch.setattr(sys, "stdin", io.StringIO(""))
@@ -383,15 +386,101 @@ def test_auto_with_https_proxy_goes_straight_to_bridge(monkeypatch, capsys):
 
 
 def test_forced_webrtc_never_uses_bridge(monkeypatch, capsys):
-    import voicehook_agent.relay as relay
-    monkeypatch.setattr(relay, "backoff_delays", lambda **k: iter([]))  # stop after 1st failure
     bridged = []
     monkeypatch.setattr(vt.BridgeRoom, "connect", lambda *a, **k: bridged.append(1))
-    with pytest.raises(RuntimeError):  # StopIteration from the empty backoff = loop wanted a retry
-        _run_join(monkeypatch, capsys, "webrtc", {"HTTPS_PROXY": "http://proxy:3128"})
-    out, err = capsys.readouterr()
+    out, _err, _calls = _run_join(monkeypatch, capsys, "webrtc", {"HTTPS_PROXY": "http://proxy:3128"})
     assert "transport=webrtc (--transport webrtc)" in out
     assert "retrying once via the HTTPS bridge" not in out and not bridged
+
+
+# --------------------------------------------------------------------------- #
+# WebRTC blocked (cloud/sandbox): point to the remote MCP server, exit != 0
+# --------------------------------------------------------------------------- #
+def test_forced_webrtc_blocked_prints_mcp_hint_and_exits_nonzero(monkeypatch, capsys):
+    """wait_pc_connection timed out with no other transport left: no endless retry,
+    a clear stderr hint with the MCP URL and a curl example, exit code 4."""
+    _out, err, calls = _run_join(monkeypatch, capsys, "webrtc")
+    assert "WebRTC blocked here (cloud/sandbox?). Use the remote MCP server " \
+           "https://voicehook.ai/mcp instead" in err
+    assert "curl -sN https://voicehook.ai/mcp" in err and '"name":"join"' in err
+    assert calls.count(("mint",)) == 1  # one attempt, no reconnect loop
+    assert calls[-1] == ("rc", 4)
+
+
+def test_auto_bridge_fallback_fails_too_prints_mcp_hint(monkeypatch, capsys):
+    class DeadBridge(vt.BridgeRoom):
+        async def connect(self, url=None, token=None, options=None):
+            raise vt.BridgeError("bridge join failed: HTTP 403", status=403)
+
+    async def fake_mint(*a, **k):
+        return {"url": "ws://127.0.0.1:9", "token": "t"}
+
+    monkeypatch.setattr(cli.rtc, "Room", _FailingRtcRoom)
+    monkeypatch.setattr(cli, "_mint_token", fake_mint)
+    monkeypatch.setattr(vt, "BridgeRoom", DeadBridge)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    rc = asyncio.run(cli._join(
+        "https://voicehook.example/r/blau-tiger-wald-AB12?invite=a.b.c", None, "Claude", True,
+        model="opus-5.5", no_greet=True, idle_timeout=0, control=False, transport="auto"))
+    _out, err = capsys.readouterr()
+    assert "retrying once via the HTTPS bridge" in err
+    assert "WebRTC blocked here (cloud/sandbox?)" in err
+    assert rc == 4
+
+
+def test_other_webrtc_error_keeps_retrying_without_hint(monkeypatch, capsys):
+    """A non-ICE failure (e.g. DNS) is not a sandbox signal: old reconnect behaviour."""
+    import voicehook_agent.relay as relay
+
+    class DnsFail(_FailingRtcRoom):
+        async def connect(self, url, token, *a, **k):
+            raise RuntimeError("failed to lookup address information")
+
+    monkeypatch.setattr(relay, "backoff_delays", lambda **k: iter([]))  # stop after 1st failure
+    with pytest.raises(RuntimeError):  # StopIteration from the empty backoff = loop wanted a retry
+        _run_join(monkeypatch, capsys, "webrtc", rtc_room=DnsFail)
+    _, err = capsys.readouterr()
+    assert "WebRTC blocked here" not in err
+
+
+@pytest.mark.parametrize("exc,expect", [
+    (RuntimeError("engine: wait_pc_connection timed out"), True),
+    (RuntimeError("ICE connection failed"), True),
+    (asyncio.TimeoutError(), True),
+    (RuntimeError("failed to lookup address information"), False),
+    (RuntimeError("device busy"), False),
+])
+def test_is_webrtc_blocked(exc, expect):
+    assert vt.is_webrtc_blocked(exc) is expect
+
+
+@pytest.mark.parametrize("env,expect", [
+    ({}, None),
+    ({"CLAUDE_CODE_REMOTE": "true"}, "CLAUDE_CODE_REMOTE=true"),
+    ({"CLAUDE_CODE_REMOTE": "false"}, None),
+    ({"HTTPS_PROXY": "http://proxy:3128"}, "HTTPS_PROXY is set"),
+])
+def test_sandbox_env(env, expect):
+    assert vt.sandbox_env(env) == expect
+
+
+def test_mcp_curl_example_is_valid_jsonrpc():
+    cmd = vt.mcp_curl_example()
+    body = json.loads(cmd.split(" -d '", 1)[1].rstrip("'"))
+    assert body["method"] == "tools/call" and body["params"]["name"] == "join"
+    assert "text/event-stream" in cmd
+
+
+def test_sandbox_env_prints_early_mcp_hint(monkeypatch, capsys):
+    _out, err, calls = _run_join(monkeypatch, capsys, "auto", {"CLAUDE_CODE_REMOTE": "true"})
+    assert "[info] cloud/sandbox session (CLAUDE_CODE_REMOTE=true)" in err
+    assert "https://voicehook.ai/mcp" in err
+    assert calls[-1] == ("rc", 0)  # the bridge fallback still joins
+
+
+def test_no_sandbox_no_early_hint(monkeypatch, capsys):
+    _out, err, _calls = _run_join(monkeypatch, capsys, "auto")
+    assert "cloud/sandbox session" not in err
 
 
 def test_bridge_join_sends_username_only_when_set():

@@ -109,6 +109,27 @@ header. The HTTP client honours `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`/`NO_PROXY
   otherwise WebRTC, and on a failed connect one retry via the bridge
   (`webrtc connect failed or timed out; retrying once via the HTTPS bridge`).
 - `--transport webrtc` / `--transport bridge` force one.
+- WebRTC blocked and nothing left to try (0.14.3): when the WebRTC connect dies without a
+  peer connection (`wait_pc_connection timed out`, ICE timeout) and no other transport is
+  left (`--transport webrtc`, or the bridge retry failed too), the CLI does not loop. It
+  prints `[error] WebRTC blocked here (cloud/sandbox?). Use the remote MCP server
+  https://voicehook.ai/mcp instead` plus a minimal curl example to stderr and exits with
+  code 4. Other connect errors keep the old reconnect behaviour.
+- Cloud/sandbox heads-up (0.14.3): with `CLAUDE_CODE_REMOTE=true` (Claude Code cloud
+  sessions) or `HTTPS_PROXY`/`ALL_PROXY` set, `join` prints one `[info]` line to stderr
+  before connecting that names the remote MCP server as the path that always works there.
+- Remote MCP server (no install, HTTPS only): the server joins the call for you. Without
+  an MCP client, send JSON-RPC `tools/call` to `POST https://voicehook.ai/mcp` with
+  `Accept: application/json, text/event-stream`; the answer comes as an SSE `data:` line:
+
+  ```bash
+  curl -sN https://voicehook.ai/mcp -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"join","arguments":{"invite_url":"<INVITE_URL>","label":"<your chip label>"}}}'
+  ```
+
+  Then `next`, `say`, `status`, `activity` the same way with the returned `session`;
+  `"method":"tools/list"` lists every tool with its schema.
 - Server restart / deploy (0.11.0): the server keeps the bridge session (same token).
   A dropped stream, a 502/503/504 or `"reconnect": true` is retried with the SAME token
   for ~30 s (`reconnecting` / `reconnected` in the output); a `say` sent meanwhile is
@@ -172,5 +193,6 @@ Reference: [OPERATOR-PROTOCOL.md](https://voicehook.ai/agent/OPERATOR-PROTOCOL.m
 | `VOICEHOOK_API_BASE`   | `https://voicehook.ai`  | Token-mint endpoint base URL     |
 | `VOICEHOOK_AGENT_HOME` | `~/.voicehook-agent`    | Root of the session dirs (control sockets) |
 | `HTTPS_PROXY` / `ALL_PROXY` | unset              | Set -> `--transport auto` uses the HTTPS bridge; also used by the HTTP client |
+| `CLAUDE_CODE_REMOTE`   | unset                   | `true` (Claude Code cloud session) -> `join` prints a heads-up naming the remote MCP server |
 | `VOICEHOOK_NO_SELF_UPDATE` | unset             | `1` = never self-update on `join` (same as `--no-self-update`) |
 | `VOICEHOOK_QUIET`      | unset                   | `1` = no join hint (same as `join --quiet`) |

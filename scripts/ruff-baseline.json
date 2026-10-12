@@ -38,6 +38,6 @@
   },
   "tests/test_transport.py": {
     "PLR0402": 1,
-    "RUF059": 2
+    "RUF059": 1
   }
 }
