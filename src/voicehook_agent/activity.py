@@ -27,11 +27,16 @@ patterns, file contents or tool output.
 
 Owner (0.14.4): the hook is usually installed globally and runs in EVERY Claude Code
 session on the machine. `join` and `bridge-session --save` record their owner from the
-environment Claude Code gives its Bash subprocesses (CLAUDE_CODE_SESSION_ID, and
-CLAUDE_PID as a fallback for older versions). The hook writes only into a join (or
-bridge) whose owner matches the hook event's `session_id` (subagents share it); a join
-without an owner, a mismatch, or several matching joins get nothing (fail closed).
-VOICEHOOK_SESSION=<slug>/<identity> in the hook's environment stays an explicit override.
+environment Claude Code gives its Bash subprocesses (CLAUDE_CODE_SESSION_ID plus
+CLAUDE_PID), but only when CLAUDE_PID's process tree provably contains them (an
+ancestor, or re-parented to init after `&`); an environment inherited through a tmux or
+screen server another session started gives no owner and a warning. The hook writes
+only into a join (or bridge) whose owner's session_id matches the hook event's
+`session_id` (subagents share it); a join without an owner, a mismatch, or several
+matching joins get nothing (fail closed). A pending bridge line is only flushed to the
+bridge session it was queued for. VOICEHOOK_SESSION=<slug>/<identity> in the hook's
+environment stays an explicit override for a join that is alive; never export it
+globally.
 
 Automatic flow (0.13.0):
 * Pointer files `~/.voicehook/joins/<pid>.json` (written by `join`) let the hook find
@@ -312,6 +317,11 @@ def pointer_dirs() -> list[Path]:
 # ----- owner (0.14.4): which Claude Code session a join / bridge belongs to ----------
 SESSION_ID_ENV = "CLAUDE_CODE_SESSION_ID"   # set by Claude Code for Bash and hook subprocesses
 CLAUDE_PID_ENV = "CLAUDE_PID"               # the Claude Code process id, same subprocesses
+PROC_ROOT = Path("/proc")                   # process tree source (Linux); missing: no owner
+_MAX_DEPTH = 256
+OWNER_HINT = ("set VOICEHOOK_SESSION=<slug>/<identity> only in the hook environment of "
+              "that one session, or start `join` directly from the Claude Code session "
+              "(Bash tool, optionally with `&`), not through tmux/screen")
 
 
 def _env_pid() -> int | None:
@@ -322,17 +332,116 @@ def _env_pid() -> int | None:
     return pid if pid > 0 else None
 
 
-def owner_from_env() -> dict:
-    """{session_id, claude_pid} of the Claude Code session this process runs in (only
-    the keys that are set); {} outside Claude Code."""
-    out: dict = {}
+def _ppid(pid: int) -> int | None:
+    """Parent pid of `pid` from PROC_ROOT/<pid>/stat; None when unreadable."""
+    try:
+        stat = (PROC_ROOT / str(pid) / "stat").read_text(encoding="utf-8", errors="replace")
+        return int(stat[stat.rindex(")") + 2:].split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _ancestors(pid: int) -> list[int] | None:
+    """Parent chain of `pid` (parent first, up to and including pid 1); None when any
+    step cannot be read (no /proc, foreign namespace, process gone)."""
+    out: list[int] = []
+    cur = pid
+    for _ in range(_MAX_DEPTH):
+        parent = _ppid(cur)
+        if parent is None:
+            return None
+        if parent <= 0:                      # pid 1 (or a namespace root) has ppid 0
+            return out
+        out.append(parent)
+        if parent == 1:
+            return out
+        cur = parent
+    return None
+
+
+def _multiplexer_pid() -> int | None:
+    """Server pid of the tmux ($TMUX = socket,pid,index) or screen ($STY = pid.name)
+    whose environment this process may have inherited; None when neither is set."""
+    tmux = (os.environ.get("TMUX") or "").split(",")
+    sty = (os.environ.get("STY") or "").split(".", 1)[0]
+    for raw in ((tmux[1] if len(tmux) > 1 else ""), sty):
+        try:
+            pid = int(raw)
+        except ValueError:
+            continue
+        if pid > 0:
+            return pid
+    return None
+
+
+def _orphaned() -> bool:
+    """The leader of this process's session has ended: the shell that started us with
+    `&` is gone (Claude Code runs each Bash command in a session of its own)."""
+    try:
+        sid = os.getsid(0)
+    except (AttributeError, OSError):
+        return False
+    return sid > 0 and sid != os.getpid() and not _pid_alive(sid)
+
+
+def _verify_claude_pid(claude_pid: int) -> str | None:
+    """None when this process provably runs in the Claude Code process `claude_pid`'s
+    own process tree; else the reason (fail closed).
+
+    Accepted: `claude_pid` is an ancestor (join started from the Bash tool), or this
+    process was orphaned (its session leader, the Bash tool's shell, has ended) and
+    re-parented to an ancestor of `claude_pid` (pid 1 or a subreaper; the documented
+    `join ... &` pattern). Rejected: a live parent outside
+    Claude Code's tree (a tmux/screen server another session started passes ITS
+    environment on), and a tmux/screen server in $TMUX/$STY that is not an ancestor of
+    `claude_pid`."""
+    if not _pid_alive(claude_pid):
+        return f"{CLAUDE_PID_ENV}={claude_pid} is not running"
+    mine = _ancestors(os.getpid())
+    if mine is None:
+        return "process tree not readable (no /proc)"
+    theirs = _ancestors(claude_pid)
+    if theirs is None:
+        return f"process tree of {CLAUDE_PID_ENV}={claude_pid} not readable"
+    if claude_pid not in mine and not (mine and mine[0] in theirs + [1] and _orphaned()):
+        return (f"{CLAUDE_PID_ENV}={claude_pid} is not an ancestor of this process "
+                "(environment inherited from another session, e.g. a tmux server)")
+    mux = _multiplexer_pid()
+    if mux is not None and mux != claude_pid and mux not in theirs:
+        return (f"tmux/screen server {mux} is not part of Claude Code {claude_pid}'s "
+                "process tree (its environment belongs to another session)")
+    return None
+
+
+def resolve_owner() -> tuple[dict, str | None]:
+    """(owner, warning). owner = {session_id, claude_pid} of the Claude Code session this
+    process provably runs in, else {}. warning names why the environment's Claude Code
+    session was NOT taken as owner (None outside Claude Code or when it was taken).
+
+    Both variables are required: Claude Code sets CLAUDE_CODE_SESSION_ID and CLAUDE_PID
+    together for Bash and hook subprocesses, so there is no pid-only owner (it could
+    not be checked against the hook event's session_id)."""
     sid = (os.environ.get(SESSION_ID_ENV) or "").strip()
-    if sid:
-        out["session_id"] = sid
     pid = _env_pid()
-    if pid is not None:
-        out["claude_pid"] = pid
-    return out
+    if not sid and pid is None:
+        return {}, None
+    if not sid or pid is None:
+        missing = SESSION_ID_ENV if not sid else CLAUDE_PID_ENV
+        return {}, f"{missing} is not set"
+    why = _verify_claude_pid(pid)
+    if why is not None:
+        return {}, why
+    return {"session_id": sid, "claude_pid": pid}, None
+
+
+def owner_from_env() -> dict:
+    """The owner part of resolve_owner(): {} unless provably this Claude Code session."""
+    return resolve_owner()[0]
+
+
+def owner_warning(what: str, why: str) -> str:
+    return (f"[warn] {what}: no owner recorded ({why}); the activity hook writes nothing "
+            f"for it. Fix: {OWNER_HINT}.")
 
 
 def _event_session_id(event: dict) -> str:
@@ -344,37 +453,50 @@ def _event_session_id(event: dict) -> str:
 
 def owned_by(owner: object, event: dict) -> bool:
     """True only when the hook event provably comes from the owner's Claude Code session:
-    same session_id; if the owner has no session_id, the same CLAUDE_PID. Anything
+    the owner's session_id equals the event's (or, without one in the event, the hook
+    environment's). No pid fallback: an owner without session_id, or anything
     missing or malformed: False."""
     if not isinstance(owner, dict):
         return False
     want = owner.get("session_id")
-    if isinstance(want, str) and want.strip():
-        return _event_session_id(event) == want.strip()
-    want_pid = owner.get("claude_pid")
-    if isinstance(want_pid, int) and not isinstance(want_pid, bool) and want_pid > 0:
-        return _env_pid() == want_pid
-    return False
+    if not isinstance(want, str) or not want.strip():
+        return False
+    return _event_session_id(event) == want.strip()
+
+
+def _join_info(d: Path) -> dict:
+    try:
+        info = json.loads((d / vsession.INFO_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return info if isinstance(info, dict) else {}
 
 
 def _join_owner(d: Path) -> object:
+    return _join_info(d).get("owner")
+
+
+def _join_alive(d: Path) -> bool:
+    """session.json names a pid > 0 that is running."""
     try:
-        return json.loads((d / vsession.INFO_NAME).read_text(encoding="utf-8")).get("owner")
-    except (OSError, ValueError, AttributeError):
-        return None
+        pid = int(_join_info(d).get("pid"))
+    except (TypeError, ValueError):
+        return False
+    return pid > 0 and _pid_alive(pid)
 
 
 def target_dir(event: dict | None = None) -> Path | None:
-    """VOICEHOOK_SESSION=<slug>/<identity> wins; else the ONE live join (own home or a
-    pointer file, 0.13.0) owned by the event's Claude Code session (0.14.4); else None
-    (no owner, foreign, zero or several: nothing leaks into another call)."""
+    """VOICEHOOK_SESSION=<slug>/<identity> wins when that join is alive (its session.json
+    pid runs); else the ONE live join (own home or a pointer file, 0.13.0) owned by the
+    event's Claude Code session (0.14.4); else None (no owner, foreign, zero or several:
+    nothing leaks into another call)."""
     env = (os.environ.get("VOICEHOOK_SESSION") or "").strip()
     if env:
         slug, _, ident = env.partition("/")
         if not slug or not ident:
             return None
         d = vsession.session_dir(slug, ident)
-        return d if d.is_dir() else None
+        return d if d.is_dir() and _join_alive(d) else None
     ev = event if isinstance(event, dict) else {}
     live: dict[str, Path] = {}
     for d in live_join_dirs() + pointer_dirs():
@@ -388,10 +510,10 @@ def target_dir(event: dict | None = None) -> Path | None:
 
 
 # ----- bridge session (Quickstart A: curl bridge join) ------------------------------
-def save_bridge_session(answer: dict, base: str) -> Path:
+def save_bridge_session(answer: dict, base: str, owner: dict | None = None) -> Path:
     """Store ONLY {base, session} of a /api/bridge/join answer (0600), plus the owner
-    (0.14.4, see owner_from_env). ValueError when the answer has no session or base is
-    not http(s)."""
+    (0.14.4: `owner`, default owner_from_env()). ValueError when the answer has no
+    session or base is not http(s)."""
     session = answer.get("session") if isinstance(answer, dict) else None
     base = str(base or "").strip().rstrip("/")
     if not isinstance(session, str) or not session.strip():
@@ -401,7 +523,7 @@ def save_bridge_session(answer: dict, base: str) -> Path:
     _private_dir(state_root())
     path = state_root() / BRIDGE_SESSION_NAME
     _write_private(path, json.dumps({"base": base, "session": session.strip(),
-                                     "owner": owner_from_env()}))
+                                     "owner": owner_from_env() if owner is None else owner}))
     return path
 
 
@@ -477,18 +599,37 @@ def _bridge_state(fn) -> object:
         os.close(fd)
 
 
+def _session_tag(sess: dict) -> str:
+    """Short hash of the bridge session token: ties a pending line to the session it
+    was queued for without storing the token twice."""
+    import hashlib
+    return hashlib.sha256(str(sess.get("session") or "").encode("utf-8")).hexdigest()[:32]
+
+
+def _owner_sid(sess: dict) -> str:
+    owner = sess.get("owner")
+    sid = owner.get("session_id") if isinstance(owner, dict) else None
+    return sid.strip() if isinstance(sid, str) else ""
+
+
 def _deliver(sess: dict, text: str) -> None:
     status = _bridge_post(sess["base"], sess["session"], text)
     if status in (401, 404, 410):  # bridge session unknown/expired or call ended
-        clear_bridge_session()
+        cur = load_bridge_session()  # only if it is still THIS session (not a newer save)
+        if cur is not None and cur["session"] == sess["session"]:
+            clear_bridge_session()
 
 
-def bridge_send(text: str, now: float | None = None) -> bool:
+def bridge_send(text: str, now: float | None = None, sess: dict | None = None) -> bool:
     """Hook -> bridge: POST at once when the last POST is >= 5 s ago, else keep it as
-    pending (latest wins) and make sure one flusher is scheduled. True if sent or
-    queued. Never raises."""
+    pending (latest wins) and make sure one flusher is scheduled. `sess` is the bridge
+    session the caller already checked the owner of (0.14.4: never re-read here, a
+    newer save must not receive this line); None loads it. The pending line carries
+    the session's tag and owner so the flusher drops it for any other session. True if
+    sent or queued. Never raises."""
     try:
-        sess = load_bridge_session()
+        if sess is None:
+            sess = load_bridge_session()
         if sess is None or not text:
             return False
         t = time.time() if now is None else now
@@ -498,7 +639,7 @@ def bridge_send(text: str, now: float | None = None) -> bool:
             if t - last >= BRIDGE_WINDOW_S:
                 st.update(last_post=t, pending=None)
                 return ("post", 0.0)
-            st["pending"] = text
+            st["pending"] = {"text": text, "tag": _session_tag(sess), "owner": _owner_sid(sess)}
             due = last + BRIDGE_WINDOW_S
             if float(st.get("flush_at") or 0.0) < t:   # no flusher scheduled yet
                 st["flush_at"] = due
@@ -514,8 +655,22 @@ def bridge_send(text: str, now: float | None = None) -> bool:
         return False
 
 
+def _pending_for(pending: object, sess: dict | None) -> str | None:
+    """The pending text when it was queued for exactly this bridge session (same token
+    tag and owner, 0.14.4); None otherwise (also for the pre-0.14.4 plain string)."""
+    if sess is None or not isinstance(pending, dict):
+        return None
+    text, tag, owner = pending.get("text"), pending.get("tag"), pending.get("owner")
+    if not isinstance(text, str) or not text or tag != _session_tag(sess):
+        return None
+    if not isinstance(owner, str) or owner != _owner_sid(sess):
+        return None
+    return text
+
+
 def bridge_flush(now: float | None = None, sleep=time.sleep, delay: float = 0.0) -> None:
-    """The flusher: after `delay` s send the pending line (if any). Never raises."""
+    """The flusher: after `delay` s send the pending line (if any) to the bridge session
+    it was queued for; a line queued for another session is dropped. Never raises."""
     try:
         if delay > 0:
             sleep(delay)
@@ -523,14 +678,14 @@ def bridge_flush(now: float | None = None, sleep=time.sleep, delay: float = 0.0)
         t = time.time() if now is None else now
 
         def step(st: dict):
-            pending = st.get("pending")
+            text = _pending_for(st.get("pending"), sess)
             st.update(pending=None, flush_at=0.0)
-            if pending:
+            if text:
                 st["last_post"] = t
-            return pending
-        pending = _bridge_state(step)
-        if pending and sess is not None:
-            _deliver(sess, str(pending))
+            return text
+        text = _bridge_state(step)
+        if text and sess is not None:
+            _deliver(sess, text)
     except Exception:  # noqa: BLE001
         return
 
@@ -636,7 +791,7 @@ def _handle(raw: str, phase: str, now: float | None) -> bool:
         if bridge is not None and owned_by(bridge.get("owner"), event):   # 0.14.4
             ids = state_root() / BRIDGE_IDS_NAME
             if not (phase == "post" and tid and _take_id(ids, tid)):
-                done = bridge_send(bridge_text(event), now) or done
+                done = bridge_send(bridge_text(event), now, sess=bridge) or done
                 if phase == "pre" and tid:
                     _remember_id(ids, tid)
         return done

@@ -1855,12 +1855,15 @@ async def _join(
                   f"will not work, stdin still does", file=sys.stderr, flush=True)
             server = None
         if server is not None:
+            # 0.14.4: the activity hook writes only for this Claude Code session, and only
+            # when this process provably runs in its process tree (not via a tmux server
+            # another session started)
+            owner, why = vactivity.resolve_owner()
+            if why:
+                print(vactivity.owner_warning("join", why), file=sys.stderr, flush=True)
             vsession.write_info(sess_dir, {"pid": os.getpid(), "room": slug,
                                            "identity": ident, "api_base": api_base,
-                                           "started": time.time(),
-                                           # 0.14.4: the activity hook writes only for this
-                                           # Claude Code session
-                                           "owner": vactivity.owner_from_env()})
+                                           "started": time.time(), "owner": owner})
             vactivity.write_pointer(sess_dir)  # 0.13.0: hook finds us under any home
             _print_event(json_mode, "system",
                          f"control socket ready: {server.sock_path}", topic="_meta")
@@ -2152,7 +2155,10 @@ def _run_bridge_session(args) -> int:
     try:
         raw = sys.stdin.read() if args.save == "-" else Path(args.save).read_text(encoding="utf-8")
         base = args.base or os.environ.get("VOICEHOOK_API_BASE") or "https://voicehook.ai"
-        path = vactivity.save_bridge_session(json.loads(raw), base)
+        owner, why = vactivity.resolve_owner()   # 0.14.4, see _join
+        path = vactivity.save_bridge_session(json.loads(raw), base, owner=owner)
+        if why:
+            print(vactivity.owner_warning("bridge-session", why), file=sys.stderr, flush=True)
     except (OSError, ValueError) as e:
         print(json.dumps({"ok": False, "type": "error", "error": str(e)}), flush=True)
         return 1

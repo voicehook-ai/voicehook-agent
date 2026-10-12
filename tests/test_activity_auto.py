@@ -33,6 +33,7 @@ def state(tmp_path, monkeypatch):
     monkeypatch.setenv("VOICEHOOK_AGENT_HOME", str(tmp_path / "vh"))
     monkeypatch.delenv("VOICEHOOK_SESSION", raising=False)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "s1")  # 0.14.4: owner = the events' session
+    monkeypatch.setenv("CLAUDE_PID", str(os.getppid()))  # ... in whose process tree we run
     return tmp_path / "state"
 
 
@@ -65,7 +66,7 @@ def test_save_bridge_session_only_base_and_session_0600(state):
                                  "https://voicehook.ai/")
     p = state / activity.BRIDGE_SESSION_NAME
     assert json.loads(p.read_text()) == {"base": "https://voicehook.ai", "session": "sess-abc",
-                                         "owner": {"session_id": "s1"}}
+                                         "owner": {"session_id": "s1", "claude_pid": os.getppid()}}
     assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
     assert stat.S_IMODE(os.stat(state).st_mode) == 0o700
     activity.clear_bridge_session()
@@ -87,7 +88,8 @@ def test_cli_bridge_session_save_and_clear(state, tmp_path, capsys):
     assert e.value.code == 0
     assert "sess-xyz" not in capsys.readouterr().out      # never echo the token
     assert activity.load_bridge_session() == {"base": "https://voicehook.ai", "session": "sess-xyz",
-                                              "owner": {"session_id": "s1"}}
+                                              "owner": {"session_id": "s1",
+                                                        "claude_pid": os.getppid()}}
     with pytest.raises(SystemExit) as e:
         cli.main(["bridge-session", "--clear"])
     assert e.value.code == 0 and activity.load_bridge_session() is None

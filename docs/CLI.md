@@ -259,19 +259,37 @@ log, never published).
   `rk_`, `re_`, `whsec_`, `vhw_`, `ghp_`, `github_pat_`, `xox?-`, `AKIA`, `AIza`,
   `Bearer ...`, JWTs, `key=`/`token=`/`password=`/`secret=` values, long base64/hex
   strings become `[redacted]`); the join scrubs again before publishing.
-- **Which call:** `VOICEHOOK_SESSION=<slug>/<identity>` in the hook's environment wins;
-  otherwise the one live join on this machine that belongs to the hook's own Claude Code
-  session. The file is cleared when a join starts and ends, mode 0600, trimmed to the
+- **Which call:** `VOICEHOOK_SESSION=<slug>/<identity>` in the hook's environment wins
+  while that join is alive (the pid in its `session.json` runs); otherwise the one live
+  join on this machine that belongs to the hook's own Claude Code session. Set
+  `VOICEHOOK_SESSION` only for the one session that owns the join (for example in that
+  session's own environment), never export it globally (shell profile, tmux global
+  environment, `settings.json` `env`): every session that sees it writes into that call. The file is cleared when a join starts and ends, mode 0600, trimmed to the
   last 50 lines above 200.
 - **Only the owning session (0.14.4):** the hook usually runs in every Claude Code
   session on the machine, so it sends only the activity of the session that started the
   join. `join` and `bridge-session --save` record the owner from the environment Claude
-  Code gives its Bash commands (`CLAUDE_CODE_SESSION_ID`; `CLAUDE_PID` as a fallback when
-  no session id is set); the hook writes only when its event's `session_id` matches.
-  Subagents share the session id and keep writing. A join without an owner (started
-  before 0.14.4 or outside Claude Code), another session, or several joins of the same
-  session: nothing is written (fail closed). After `/clear` the session id changes:
-  restart the join from the new session, or set `VOICEHOOK_SESSION`.
+  Code gives its Bash commands (`CLAUDE_CODE_SESSION_ID` and `CLAUDE_PID`, both
+  required), but only when the `CLAUDE_PID` process provably contains them in its
+  process tree (Linux `/proc`): started from the Bash tool, in the foreground or in the
+  background with `&`. The hook writes only when its event's `session_id` matches the
+  owner's. Subagents share the session id and keep writing. A join without an owner
+  (started before 0.14.4, outside Claude Code, or without `/proc`), another session, or
+  several joins of the same session: nothing is written (fail closed). A bridge line
+  that waits for the 5 s window is sent only to the bridge session it was queued for.
+- **tmux / screen:** a tmux (or screen) server passes ITS environment to new sessions
+  and windows, including the `CLAUDE_*` variables of whichever Claude Code session
+  started that server. A join started through `tmux new-session` / `new-window` (or
+  `screen`) therefore records no owner and prints a warning on stderr, instead of
+  sending another session's activity into your call. Start `join` directly from the
+  Claude Code session (Bash tool, `&` is fine), or set `VOICEHOOK_SESSION` for that one
+  session.
+- **`/clear` and `--resume`:** `/clear` gives the session a new session id, so the hook
+  of the cleared session no longer matches the join's owner and writes nothing: start
+  the join again from the session after `/clear`. `claude --resume` / `--continue`
+  continue under the resumed session id (hooks and Bash get that id), so a join that is
+  still running keeps receiving the resumed session's activity; the hook compares only
+  the session id, not the new process id.
 
 ### Activity log: keep it filled (activity_due, 0.13.0)
 
