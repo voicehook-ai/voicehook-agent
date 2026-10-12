@@ -65,9 +65,9 @@ Canonical: https://voicehook.ai/agent/mcp/SKILL.md. You only use the tools of th
 | `user` | `text` = what the user just said | answer with ONE `say` |
 | `revise` | your queued says were replaced; `reason: "user_stop"` = the user said "stopp"/"reicht" | still needed: one merged `say` with `mode: "overwrite"`; `user_stop`: never resend, wait |
 | `status_request` | the user asked what you are doing | send a `status` board at once |
-| `timeout` | silence (also `reconnect: true` = server restart) | call `next` again |
-| `human_left` | the person dropped out; the call stays open `grace_s` s for them to come back | keep calling `next`, do not leave |
-| `human_rejoined` | the person is back | go on as before |
+| `timeout` | silence (also `reconnect: true` = server restart); `humans_present` (in `join` and every `next`) `0` or `human_away: true` after `join` = the person is out right now | call `next` again; never create a new room or call |
+| `human_left` | the person dropped out; the call stays open `grace_s` s for them to come back | keep calling `next`, do not leave, never create a new room |
+| `human_rejoined` | the person is back (also when you joined while they were out) | greet them briefly in one `say` (not with `greeted: true`: your join `greet` was just spoken), go on |
 | `operator` | another agent addressed YOU (`addressed_to_you: true`, max 1 per 5 s) | answer that agent |
 | `context` | the call language changed: new `context` block | speak `context.lang` from now on |
 | `ended` | the call is over (`message` says why) | tell your user `message`, stop |
@@ -78,8 +78,7 @@ or ambiguous) and `addressed_to_you`; `operators_said` lines also `to_human` (no
 - Read `agent_said` (what the voicebot said on its own) before answering: never repeat it;
   correct it in one sentence if it was wrong; say nothing if it already answered fully.
 - `operators_said` = `[{speaker, op, model?, text, ...}]`: what OTHER agents said since the last `next` (never your own echo); never repeat it.
-- `stale_error` in `next`: your board or feed is older than 60 s while you work. Do what its
-  `message` says NOW (call `status` / `activity`), then `say`. `board_now` / `activity_now`: what the voicebot knows about you.
+- `stale_error` in `next`: your board or feed is older than 60 s while you work. Do what its `message` says NOW (call `status` / `activity`), then `say`. `board_now` / `activity_now`: what the voicebot knows about you.
 - A tool error that starts with `404` or `410`: the session is over. Do not rejoin with the
   old handle; ask the user for a fresh link if they want to continue.
 
@@ -160,7 +159,8 @@ Compare A and B:
 ## Notices from the call
 
 - Low balance: the voicebot already said it. Add one short sentence to your next `say` that the user can top up at voicehook.ai/aufladen. Once, never nag.
-- Live mode (realtime voice): `say` is not verbatim, the model says it in its own words.
+- Budget used up (quota): the voicebot announces it and ends the call; your not yet spoken says are dropped. `next` brings `ended` with `detail` `live_budget`, `wallet_empty`, `free_limit` or `review_budget`: never resend, give your user the most important point in the chat.
+- Live mode (realtime voice): the voice phrases `say` itself (`say`/`next` carry `verbatim:false`, `mode:"live_paraphrase"`): say it short, details via `show`.
 
 ## Errors
 
@@ -169,7 +169,7 @@ Compare A and B:
 | `403: operator invite required` / `invalid invite` | ask the user for the full, fresh invite link incl. `?invite=` |
 | status `waiting_for_human` (after `create_call`, not an error) | your user has not opened `human_url` yet: end your message with `share_text`, `join` again at once |
 | `410: call link expired` | nobody opened `human_url` in time: `create_call` again if the user still wants to talk |
-| `409` (no human in the call) / `410` (call over) | tell the user; never rejoin with the old handle |
+| `409` (`no human in room`: room empty) / `410` (call over) | 409: tell the user in the chat, call `join` again every 15 s for at most 2 min, then tell the user nobody is in the call and stop; never create a new room, do not ask; 410: tell the user, never rejoin with the old handle |
 | `429` (too many sessions or joins) | wait a minute or ask for a fresh link |
 | `5xx`, `503: server restarting` or a network error | call the same tool again after 2 s; the session and the call stay valid |
 | `502: livekit connect failed` | invite wrong or expired: ask for a fresh link |
