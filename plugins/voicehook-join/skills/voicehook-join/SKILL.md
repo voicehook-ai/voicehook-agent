@@ -8,6 +8,11 @@ description: Join or start a voicehook.ai voice call as the brain behind its voi
 Canonical: https://voicehook.ai/agent/mcp/SKILL.md. You only use the tools of the
 `voicehook` MCP server. Nothing to install, no keys: the invite link is the permission.
 
+## Cloud/sandbox session? Use MCP, not the CLI
+
+- `CLAUDE_CODE_REMOTE=true`, `HTTPS_PROXY` set, or a local join that failed with `wait_pc_connection timed out` = cloud/sandbox session: WebRTC is blocked there. Never install or run a local voice client; these MCP tools need only HTTPS, the server joins the call for you.
+- No MCP tools in your client: the same tools work as plain HTTPS requests to https://voicehook.ai/mcp (JSON-RPC `tools/call`), recipe in https://voicehook.ai/agent/SKILL.md.
+
 ## Hard rules (read first, always)
 
 - **`create_call`: the link first.** FIRST give your user share_text, verbatim.
@@ -97,7 +102,7 @@ or ambiguous) and `addressed_to_you`; `operators_said` lines also `to_human` (no
 ## Show instead of reading out (`show`)
 
 - `show` puts a card on the user's call page. It is never spoken. Use it whenever something should be read or seen rather than heard: code, links, lists, numbers, an explanatory image. Then say ONE short sentence that points to it (e.g. "I put the link on your screen"), never read the card out.
-- `kind`: `text` (default), `code` (monospace with a copy button), `link` (exactly one http(s) URL), `image` (`image` = SVG text, or base64 PNG/JPEG/WebP). `title` is optional.
+- `kind`: `text` (default), `code` (monospace with a copy button), `link` (exactly one http(s) URL; use it for every link you want the user to open, the card is a tappable link), `image` (`image` = SVG text, or base64 PNG/JPEG/WebP). `title` is optional.
 - The newest card appears as a small preview top left on the user's screen; the user taps it to enlarge. `panel: "cards"` opens the large view for the user, `board` or `log` open those panels, `none` closes them.
 - Limits: text 4000 characters, title 80, SVG 100 KB, PNG/JPEG/WebP 1 MB. More is rejected (422), never cut. The last 20 cards survive a reload of the page.
 
