@@ -60,7 +60,7 @@ stdin (JSONL):
 | `operator.inject`     | out       | force voice-ai to react (user-role)    |
 | `operator.backchannel`| out       | silent operator↔agent side-channel, relayed as-is (#10) |
 | `operator.status`     | out       | your status board `{doing, open[], done[], faq?[{q, a}]}` (0.7.0, `status` command; `faq` 0.10.0); replaces the last one, never spoken |
-| `operator.activity`   | room      | 0.10.0: `{lines[], ts}`, newest 15 tool-call lines of the coding agent (Pre/PostToolUse hook, 0.13.0 also `voicehook-agent activity` notes), on change, at most every 5 s |
+| `operator.activity`   | room      | 0.10.0: `{lines[], ts}`, newest 15 tool-call lines of the coding agent (Pre/PostToolUse hook, 0.13.0 also `voicehook-agent activity` notes), on change, at most every 5 s; 0.14.4: the hook sends only the activity of the Claude Code session that started the join |
 | `operator.alive`     | room      | 0.8.0: `{alive, ts, idle_s}` every 10 s while the agent serves `next`/`say` (within 15 s); nothing while orphaned; `alive:false` on leave. The web UI dims the operator after ~20 s without it |
 | `operator.say_status` | in    | 0.9.0: `{seq, state, spoken_chars}` per state change of your say; `next` carries `say_status`, `says` the table |
 | `operator.status_request` | in    | the user asked what you are doing; `next` yields `{"type":"status_request"}` |

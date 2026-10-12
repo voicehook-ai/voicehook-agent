@@ -32,6 +32,7 @@ def state(tmp_path, monkeypatch):
     monkeypatch.setenv(activity.STATE_ENV, str(tmp_path / "state"))
     monkeypatch.setenv("VOICEHOOK_AGENT_HOME", str(tmp_path / "vh"))
     monkeypatch.delenv("VOICEHOOK_SESSION", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "s1")  # 0.14.4: owner = the events' session
     return tmp_path / "state"
 
 
@@ -63,7 +64,8 @@ def test_save_bridge_session_only_base_and_session_0600(state):
     activity.save_bridge_session({"session": "sess-abc", "token": "LK-SECRET", "room": "r"},
                                  "https://voicehook.ai/")
     p = state / activity.BRIDGE_SESSION_NAME
-    assert json.loads(p.read_text()) == {"base": "https://voicehook.ai", "session": "sess-abc"}
+    assert json.loads(p.read_text()) == {"base": "https://voicehook.ai", "session": "sess-abc",
+                                         "owner": {"session_id": "s1"}}
     assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
     assert stat.S_IMODE(os.stat(state).st_mode) == 0o700
     activity.clear_bridge_session()
@@ -84,7 +86,8 @@ def test_cli_bridge_session_save_and_clear(state, tmp_path, capsys):
         cli.main(["bridge-session", "--save", str(ans), "--base", "https://voicehook.ai"])
     assert e.value.code == 0
     assert "sess-xyz" not in capsys.readouterr().out      # never echo the token
-    assert activity.load_bridge_session() == {"base": "https://voicehook.ai", "session": "sess-xyz"}
+    assert activity.load_bridge_session() == {"base": "https://voicehook.ai", "session": "sess-xyz",
+                                              "owner": {"session_id": "s1"}}
     with pytest.raises(SystemExit) as e:
         cli.main(["bridge-session", "--clear"])
     assert e.value.code == 0 and activity.load_bridge_session() is None
@@ -183,7 +186,7 @@ def test_hook_finds_join_under_other_home_via_pointer(state, tmp_path, monkeypat
     monkeypatch.setenv("VOICEHOOK_AGENT_HOME", str(other))
     d = vsession.session_dir("blau-tiger-AB12", "claude-x")
     d.mkdir(parents=True)
-    vsession.write_info(d, {"pid": os.getpid()})
+    vsession.write_info(d, {"pid": os.getpid(), "owner": {"session_id": "s1"}})
     activity.write_pointer(d)
     monkeypatch.setenv("VOICEHOOK_AGENT_HOME", str(tmp_path / "default-home"))  # the hook's view
     assert activity.target_dir() == d
@@ -199,7 +202,7 @@ def test_pointer_of_dead_pid_ignored_and_two_joins_write_nothing(state, tmp_path
     monkeypatch.setenv("VOICEHOOK_AGENT_HOME", str(tmp_path / "a"))
     a = vsession.session_dir("r1", "x")
     a.mkdir(parents=True)
-    vsession.write_info(a, {"pid": os.getpid()})
+    vsession.write_info(a, {"pid": os.getpid(), "owner": {"session_id": "s1"}})
     activity.write_pointer(a)
     # a stale pointer of a dead join
     dead = tmp_path / "dead"
@@ -211,7 +214,7 @@ def test_pointer_of_dead_pid_ignored_and_two_joins_write_nothing(state, tmp_path
     monkeypatch.setenv("VOICEHOOK_AGENT_HOME", str(tmp_path / "hook"))
     b = vsession.session_dir("r2", "y")
     b.mkdir(parents=True)
-    vsession.write_info(b, {"pid": os.getpid()})
+    vsession.write_info(b, {"pid": os.getpid(), "owner": {"session_id": "s1"}})
     assert activity.target_dir() is None
 
 

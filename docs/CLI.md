@@ -259,10 +259,19 @@ log, never published).
   `rk_`, `re_`, `whsec_`, `vhw_`, `ghp_`, `github_pat_`, `xox?-`, `AKIA`, `AIza`,
   `Bearer ...`, JWTs, `key=`/`token=`/`password=`/`secret=` values, long base64/hex
   strings become `[redacted]`); the join scrubs again before publishing.
-- **Which call:** `VOICEHOOK_SESSION=<slug>/<identity>` wins; otherwise the one live
-  join on this machine. With zero or several live joins nothing is written, so one
-  Claude session never leaks into another call. The file is cleared when a join starts
-  and ends, mode 0600, trimmed to the last 50 lines above 200.
+- **Which call:** `VOICEHOOK_SESSION=<slug>/<identity>` in the hook's environment wins;
+  otherwise the one live join on this machine that belongs to the hook's own Claude Code
+  session. The file is cleared when a join starts and ends, mode 0600, trimmed to the
+  last 50 lines above 200.
+- **Only the owning session (0.14.4):** the hook usually runs in every Claude Code
+  session on the machine, so it sends only the activity of the session that started the
+  join. `join` and `bridge-session --save` record the owner from the environment Claude
+  Code gives its Bash commands (`CLAUDE_CODE_SESSION_ID`; `CLAUDE_PID` as a fallback when
+  no session id is set); the hook writes only when its event's `session_id` matches.
+  Subagents share the session id and keep writing. A join without an owner (started
+  before 0.14.4 or outside Claude Code), another session, or several joins of the same
+  session: nothing is written (fail closed). After `/clear` the session id changes:
+  restart the join from the new session, or set `VOICEHOOK_SESSION`.
 
 ### Activity log: keep it filled (activity_due, 0.13.0)
 

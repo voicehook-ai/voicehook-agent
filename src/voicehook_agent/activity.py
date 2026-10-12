@@ -23,8 +23,15 @@ gerade?" without asking the agent.
 Privacy: a line holds only the local time, the sanitized tool name and the
 tool's own `description` (Bash/Agent/Task carry one) or a file's basename, passed
 through a secret scrubber. Never command text, arguments, full paths, search
-patterns, file contents or tool output. With zero or several live joins the hook writes nothing, so one Claude
-session never leaks into another call.
+patterns, file contents or tool output.
+
+Owner (0.14.4): the hook is usually installed globally and runs in EVERY Claude Code
+session on the machine. `join` and `bridge-session --save` record their owner from the
+environment Claude Code gives its Bash subprocesses (CLAUDE_CODE_SESSION_ID, and
+CLAUDE_PID as a fallback for older versions). The hook writes only into a join (or
+bridge) whose owner matches the hook event's `session_id` (subagents share it); a join
+without an owner, a mismatch, or several matching joins get nothing (fail closed).
+VOICEHOOK_SESSION=<slug>/<identity> in the hook's environment stays an explicit override.
 
 Automatic flow (0.13.0):
 * Pointer files `~/.voicehook/joins/<pid>.json` (written by `join`) let the hook find
@@ -302,9 +309,65 @@ def pointer_dirs() -> list[Path]:
     return out
 
 
-def target_dir() -> Path | None:
+# ----- owner (0.14.4): which Claude Code session a join / bridge belongs to ----------
+SESSION_ID_ENV = "CLAUDE_CODE_SESSION_ID"   # set by Claude Code for Bash and hook subprocesses
+CLAUDE_PID_ENV = "CLAUDE_PID"               # the Claude Code process id, same subprocesses
+
+
+def _env_pid() -> int | None:
+    try:
+        pid = int((os.environ.get(CLAUDE_PID_ENV) or "").strip())
+    except ValueError:
+        return None
+    return pid if pid > 0 else None
+
+
+def owner_from_env() -> dict:
+    """{session_id, claude_pid} of the Claude Code session this process runs in (only
+    the keys that are set); {} outside Claude Code."""
+    out: dict = {}
+    sid = (os.environ.get(SESSION_ID_ENV) or "").strip()
+    if sid:
+        out["session_id"] = sid
+    pid = _env_pid()
+    if pid is not None:
+        out["claude_pid"] = pid
+    return out
+
+
+def _event_session_id(event: dict) -> str:
+    sid = event.get("session_id")
+    if isinstance(sid, str) and sid.strip():
+        return sid.strip()
+    return (os.environ.get(SESSION_ID_ENV) or "").strip()
+
+
+def owned_by(owner: object, event: dict) -> bool:
+    """True only when the hook event provably comes from the owner's Claude Code session:
+    same session_id; if the owner has no session_id, the same CLAUDE_PID. Anything
+    missing or malformed: False."""
+    if not isinstance(owner, dict):
+        return False
+    want = owner.get("session_id")
+    if isinstance(want, str) and want.strip():
+        return _event_session_id(event) == want.strip()
+    want_pid = owner.get("claude_pid")
+    if isinstance(want_pid, int) and not isinstance(want_pid, bool) and want_pid > 0:
+        return _env_pid() == want_pid
+    return False
+
+
+def _join_owner(d: Path) -> object:
+    try:
+        return json.loads((d / vsession.INFO_NAME).read_text(encoding="utf-8")).get("owner")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def target_dir(event: dict | None = None) -> Path | None:
     """VOICEHOOK_SESSION=<slug>/<identity> wins; else the ONE live join (own home or a
-    pointer file, 0.13.0); else None (zero or several: nothing leaks into another call)."""
+    pointer file, 0.13.0) owned by the event's Claude Code session (0.14.4); else None
+    (no owner, foreign, zero or several: nothing leaks into another call)."""
     env = (os.environ.get("VOICEHOOK_SESSION") or "").strip()
     if env:
         slug, _, ident = env.partition("/")
@@ -312,19 +375,23 @@ def target_dir() -> Path | None:
             return None
         d = vsession.session_dir(slug, ident)
         return d if d.is_dir() else None
+    ev = event if isinstance(event, dict) else {}
     live: dict[str, Path] = {}
     for d in live_join_dirs() + pointer_dirs():
         try:
-            live.setdefault(str(d.resolve()), d)
+            key = str(d.resolve())
         except OSError:
             continue
+        if key not in live and owned_by(_join_owner(d), ev):
+            live[key] = d
     return next(iter(live.values())) if len(live) == 1 else None
 
 
 # ----- bridge session (Quickstart A: curl bridge join) ------------------------------
 def save_bridge_session(answer: dict, base: str) -> Path:
-    """Store ONLY {base, session} of a /api/bridge/join answer (0600). ValueError when
-    the answer has no session or base is not http(s)."""
+    """Store ONLY {base, session} of a /api/bridge/join answer (0600), plus the owner
+    (0.14.4, see owner_from_env). ValueError when the answer has no session or base is
+    not http(s)."""
     session = answer.get("session") if isinstance(answer, dict) else None
     base = str(base or "").strip().rstrip("/")
     if not isinstance(session, str) or not session.strip():
@@ -333,7 +400,8 @@ def save_bridge_session(answer: dict, base: str) -> Path:
         raise ValueError(f"base must be an http(s) URL, got {base!r}")
     _private_dir(state_root())
     path = state_root() / BRIDGE_SESSION_NAME
-    _write_private(path, json.dumps({"base": base, "session": session.strip()}))
+    _write_private(path, json.dumps({"base": base, "session": session.strip(),
+                                     "owner": owner_from_env()}))
     return path
 
 
@@ -352,7 +420,7 @@ def load_bridge_session() -> dict | None:
         return None
     if not isinstance(d, dict) or not d.get("base") or not d.get("session"):
         return None
-    return {"base": str(d["base"]), "session": str(d["session"])}
+    return {"base": str(d["base"]), "session": str(d["session"]), "owner": d.get("owner")}
 
 
 def _bridge_post(base: str, session: str, text: str,
@@ -558,13 +626,14 @@ def _handle(raw: str, phase: str, now: float | None) -> bool:
             return False
         tid = _tool_use_id(event)
         done = False
-        dir_ = target_dir()
+        dir_ = target_dir(event)
         if dir_ is not None and not (phase == "post" and tid and _take_id(dir_ / IDS_NAME, tid)):
             append_line(dir_, format_line(event, now))
             if phase == "pre" and tid:
                 _remember_id(dir_ / IDS_NAME, tid)
             done = True
-        if load_bridge_session() is not None:   # 0.13.0: curl bridge join (Quickstart A)
+        bridge = load_bridge_session()          # 0.13.0: curl bridge join (Quickstart A)
+        if bridge is not None and owned_by(bridge.get("owner"), event):   # 0.14.4
             ids = state_root() / BRIDGE_IDS_NAME
             if not (phase == "post" and tid and _take_id(ids, tid)):
                 done = bridge_send(bridge_text(event), now) or done

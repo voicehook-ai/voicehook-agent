@@ -40,7 +40,8 @@ def home(tmp_path, monkeypatch):
 def _join_dir(slug="blau-tiger-fluss-AB12", ident="claude-x") -> Path:
     d = vsession.session_dir(slug, ident)
     d.mkdir(parents=True)
-    vsession.write_info(d, {"pid": os.getpid(), "room": slug, "identity": ident})
+    vsession.write_info(d, {"pid": os.getpid(), "room": slug, "identity": ident,
+                            "owner": {"session_id": "s1"}})
     return d
 
 
