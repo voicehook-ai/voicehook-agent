@@ -675,6 +675,7 @@ Examples:
 # operator.interrupt / --urgent). overwrite/revise replace only our OWN not-started says.
 _SAY_MODES = ("append", "overwrite", "revise")
 SAY_DEFAULT_MODE = "append"
+_DECIDE_RPC = "vh.decide"  # decisions.RPC_METHOD on the worker (Decision Board)
 
 
 async def _control_handler(ctl: _Control, req: dict) -> dict:
@@ -742,6 +743,41 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         await room.local_participant.publish_data(data, reliable=True, topic="operator.status")
         ctl.clock.board(board=board)
         return {"ok": True, "type": "board", "board": board}
+    if cmd == "decide":
+        # Decision Board: create/update/delete. Unlike say/status this is a LiveKit RPC
+        # to the voicebot (worker, method vh.decide), mirroring Session.decide in the
+        # bridge; the result arrives later as a `next` event type "decision".
+        ctl.watchdog.touch()
+        body = {k: v for k, v in (
+            ("question", req.get("question")), ("options", req.get("options") or None),
+            ("recommend", req.get("recommend")), ("id", req.get("id")),
+            ("delete", True if req.get("delete") else None)) if v is not None}
+        room = await ctl.wait_room(10.0)
+        if room is None:
+            return {"ok": False, "error": "not connected to the room (yet)"}
+        worker = next((p.identity for p in room.remote_participants.values()
+                       if _kind_label(p) == "agent"), None)
+        if worker is None:
+            return {"ok": False, "status": 503, "error": "voicebot not in the call, try again shortly"}
+        deadline = time.monotonic() + 8.0  # decisions.DECIDE_READY_S: 425 right after join
+        while True:
+            try:
+                raw = await room.local_participant.perform_rpc(
+                    destination_identity=worker, method=_DECIDE_RPC,
+                    payload=json.dumps(body, ensure_ascii=False), response_timeout=8.0)
+            except Exception as e:  # noqa: BLE001  RPC error/timeout: only the class
+                return {"ok": False, "status": 503, "error": f"decide rpc failed: {type(e).__name__}"}
+            try:
+                out = json.loads(raw or "{}")
+            except ValueError:
+                return {"ok": False, "status": 502, "error": "bad answer"}
+            if not isinstance(out, dict):
+                return {"ok": False, "status": 502, "error": "bad answer"}
+            if out.get("status") != 425 or time.monotonic() >= deadline:
+                if out.get("status") == 425:
+                    return {"ok": False, "status": 503, "error": "voicebot not ready, try again shortly"}
+                return {**out, "type": "decide"} if "type" not in out else out
+            await asyncio.sleep(0.25)
     if cmd == "next":
         try:
             timeout = float(req.get("timeout", 60))
@@ -1431,6 +1467,11 @@ async def _connect_and_listen(
                 # 0.9.0: first in line for `next`, status_due until the next board
                 ctl.events.put_front_nowait(relay.status_request_event(payload))
                 ctl.clock.requested()
+            elif (topic == "operator.decision" and ctl is not None
+                    and payload.get("type") == "decision"):
+                # Decision Board: the worker sends the result only to the creator
+                # (destination = our identity), so no owner filter is needed.
+                ctl.events.put_nowait(payload)
             sender = getattr(pkt.participant, "identity", "?") if pkt.participant else "?"
             line = payload.get("text", "")
             if topic == "operator.say_status":
@@ -2124,6 +2165,31 @@ def _client_request(args) -> dict:
         return {"cmd": "activity", "text": text.strip()}
     if args.cmd == "leave":
         return {"cmd": "leave", "say": args.say} if args.say else {"cmd": "leave"}
+    if args.cmd == "decide":
+        if args.delete or args.id:
+            if not args.id:
+                raise ValueError("decide --delete needs --id")
+            req = {"cmd": "decide", "id": args.id}
+            if args.delete:
+                req["delete"] = True
+            else:  # change an open decision
+                if args.question is not None:
+                    req["question"] = args.question
+                if args.option:
+                    req["options"] = args.option
+                if args.recommend is not None:
+                    req["recommend"] = args.recommend
+                if len(req) == 2:
+                    raise ValueError("decide --id: pass --question, --option or --recommend (or --delete)")
+            return req
+        if not args.question:
+            raise ValueError("decide needs --question (plus optional --option/--recommend)")
+        req = {"cmd": "decide", "question": args.question}
+        if args.option:
+            req["options"] = args.option
+        if args.recommend is not None:
+            req["recommend"] = args.recommend
+        return req
     faq_raw = getattr(args, "faq", None) or []
     if (args.text is not None or args.doing is not None or args.open or args.done or args.file
             or faq_raw):
@@ -2457,6 +2523,22 @@ def main(argv: list[str] | None = None) -> None:
     p_act.add_argument("text", nargs="+", help="what is happening now ('-' reads it from stdin); "
                        "scrubbed, capped at 120 chars; no paths, secrets or personal data")
     _add_session(p_act)
+    # Decision Board: a question only the human can decide (yes/no or 2-3 options). The
+    # result comes back as a `next` event type "decision". Create, change or delete.
+    p_dec = sub.add_parser(
+        "decide", help="ask the human a decision (Decision Board, not the status board): "
+        "yes/no or 2-3 options; the answer arrives as a `next` event type decision")
+    p_dec.add_argument("--question", default=None, metavar="TEXT",
+                       help="the question, max 160 chars (yes/no when no --option is given)")
+    p_dec.add_argument("--option", action="append", default=[], metavar="TEXT",
+                       help="an answer option, max 40 chars (give 2 or 3; repeatable)")
+    p_dec.add_argument("--recommend", type=int, default=None, metavar="N",
+                       help="index of the recommended option, 0-based")
+    p_dec.add_argument("--id", default=None, metavar="ID",
+                       help="change or delete this decision (d + 8 hex), only while still open")
+    p_dec.add_argument("--delete", action="store_true", default=False,
+                       help="delete the decision given by --id")
+    _add_session(p_dec)
     # 0.13.0: bridge session for the hook (Quickstart A, curl bridge join)
     p_bs = sub.add_parser(
         "bridge-session", help="store {base, session} of a curl bridge join (Quickstart A) in "
@@ -2510,7 +2592,7 @@ def main(argv: list[str] | None = None) -> None:
             _restart_after_update(argv, updater)
             rc = 1  # only reached when the exec failed
         sys.exit(rc)
-    if args.cmd in ("say", "next", "says", "leave", "status", "activity"):
+    if args.cmd in ("say", "next", "says", "leave", "status", "activity", "decide"):
         sys.exit(_run_client(args))
     if args.cmd == "show":
         sys.exit(_run_client(args))
