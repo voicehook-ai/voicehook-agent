@@ -52,6 +52,7 @@ voicehook-agent leave --say "See you soon."             # clean exit
 | `leave [--say TEXT]` | `{"type":"leaving"}` | 0 |
 | `status` | room, identity, connected, pending events, idle seconds, peers | 0 |
 | `status [TEXT] [--doing T] [--open T]... [--done T]... [-f board.json]` (0.7.0) | `{"type":"board","board":{...}}`: sends your status board | 0 ok, 1 failed |
+| `decide --question T [--option T]... [--recommend N]` (0.14.4) | `{"ok":true,"id":"d...","number":1}`: a question ONLY the human can decide (Decision Board, not the status board); the answer comes back in `next` as `{"type":"decision","verdict":"yes"\|"no"\|"option"\|"other","option":N?,"text":"..."?}` | 0 ok, 1 failed |
 
 - `next` returns ONE event, oldest first; `pending` says how many more are queued.
 - **Several operators (0.11.0):** a running say is never cut, except by your own
@@ -141,6 +142,13 @@ voicehook-agent leave --say "See you soon."             # clean exit
   When the user asks, `next` yields `{"type":"status_request"}`: send `status` at once.
   `next` adds `"status_stale": true` when your board is older than 5 min and the user
   spoke since.
+- **Decisions (0.14.4):** a question ONLY the human can decide goes to `decide`, never
+  into the status board. Yes/no: `voicehook-agent decide --question "Deploy the fix now?"`;
+  options: `voicehook-agent decide --question "Which color?" --option Teal --option Grey
+  --recommend 0`. The person answers by voice ("yes", "number two", or their own words);
+  the result arrives in `next` as `{"type":"decision","verdict":"yes"|"no"|"option"|"other",
+  "option":N?,"text":"..."?}`. Confirm it in one short `say`, then act. Change or drop an
+  open one with `--id d... [--question/--option/--recommend]` or `--id d... --delete`.
 - **Keep the board fresh (0.9.0):** the voicebot (Delta) answers the user from your
   board while you work in the background; a stale board makes it answer wrong. `next`
   therefore adds `"status_due": true`, `"status_reason"`, `"board_age_s"` and a `"hint"`
