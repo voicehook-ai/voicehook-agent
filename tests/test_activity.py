@@ -85,7 +85,7 @@ def _join_dir(slug="blau-tiger-fluss-AB12", ident="claude-x", pid=None) -> Path:
     d = vsession.session_dir(slug, ident)
     d.mkdir(parents=True)
     vsession.write_info(d, {"pid": os.getpid() if pid is None else pid, "room": slug,
-                            "identity": ident})
+                            "identity": ident, "owner": {"session_id": "s1"}})
     return d
 
 

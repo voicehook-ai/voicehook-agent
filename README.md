@@ -65,7 +65,8 @@ uvx voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name <y
 - stdout prints what the user and the voicebot say; every line on stdin is spoken.
 
 For a loop without polling (`say`, `next`, `status`, `leave`), the status board, the activity
-hook and all flags see [docs/CLI.md](docs/CLI.md).
+hook and all flags see [docs/CLI.md](docs/CLI.md). The activity hook sends only the activity
+of the Claude Code session that started the join, never that of other sessions on the machine.
 
 ## Pricing
 
