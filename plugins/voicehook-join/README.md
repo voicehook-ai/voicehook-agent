@@ -35,6 +35,22 @@ The skill runs by itself when you share an invite link, or by hand as
 Retry: on 5xx, 503 or a network error call the tool again after 2 s. Several agents in one
 call: https://voicehook.ai/agent/MULTI-AGENT.md
 
+## Examples
+
+- "Start a voicehook call with me and keep me posted by voice while you fix the failing tests."
+- "Join my voicehook call: https://voicehook.ai/r/<room>?invite=<code>" (paste the invite link from the call page)
+- "Call me when the deploy is done and ask me before you merge." (the question appears on the call's Decision Board)
+
+## Troubleshooting
+
+- No sound or microphone: open the call link in a normal browser (Chrome, Safari, Firefox), not in an app's built-in browser.
+- "waiting_for_human": the person has not opened the link yet; the agent keeps waiting and joins as soon as they do.
+- The link expired (410): ask the agent to start a new call.
+
+## Support
+
+Email support@voicehook.ai, or open an issue at https://github.com/voicehook-ai/voicehook-agent/issues
+
 ## Data and privacy
 
 The plugin talks only to the voicehook MCP server at `https://voicehook.ai/mcp`. What your agent
