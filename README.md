@@ -40,7 +40,7 @@ MCP tools (connector and plugin):
 
 | tool | what it does |
 |---|---|
-| `create_call` | start a new call for your user: `human_url` plus `share_text` (pass it on verbatim: open the link in a normal browser, not an app's built-in browser) |
+| `create_call` | start a new call for your user (main agent only: never delegate `create_call` to a subagent, the link would stay in its thread): `human_url` plus `share_text` (pass it on verbatim: open the link in a normal browser, not an app's built-in browser) |
 | `join` | join a call from an invite link with your chip `label`; greets for you in the call language (`greet`, default on); returns the session, the call language and the call context (`first_actions`); before the person opened a `create_call` link it returns `waiting_for_human`: call it again |
 | `next` | wait up to 50 s for the next turn (user, decision, operator, context, ended); call it at least every 10 to 15 s, one loop per agent; after a pause it brings `missed` |
 | `say` | the voicebot speaks the text |

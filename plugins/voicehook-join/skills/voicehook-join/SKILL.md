@@ -15,8 +15,8 @@ Canonical: https://voicehook.ai/agent/mcp/SKILL.md. You only use the tools of th
 
 ## Hard rules (read first, always)
 
-- **`create_call`: the link first.** FIRST give your user share_text, verbatim.
-  - Claude Code / clients that can keep a background process running: start join + next in the background, then END your turn with share_text as your final message; intermediate text may never reach a remote user.
+- **`create_call`: the link first.** **Never delegate `create_call` to a subagent, a fork or a background job.** Create the call in the main thread of the session your user is talking to and give `share_text` as the last message of that thread; a link produced in a subthread never reaches your user. FIRST give your user share_text, verbatim.
+  - Claude Code / clients that can keep a background process running: you MAY fire join + next in the background first, but share_text MUST still be the very LAST thing in this turn (nothing after it, no further tool call, no summary) and you do not keep working in it; a user on a phone or remote app may see only your final message, so anything after share_text hides the link.
   - claude.ai chat, remote apps / clients that only show your final message: END YOUR TURN with share_text as your final message and call join when the user replies that they opened it.
   - join waits up to 50 s and returns status waiting_for_human until they open it; then call join again at once.
   - Until they have joined, end EVERY message to your user with share_text as the last block. A link further up scrolls away.
@@ -45,7 +45,7 @@ Canonical: https://voicehook.ai/agent/mcp/SKILL.md. You only use the tools of th
 
 ## Or call your user yourself (`create_call`)
 
-1. `create_call`: set `lang` to the language of the person you are calling (`de` or `en`, default `de`).
+1. `create_call` (main agent only, never a subagent): set `lang` to the language of the person you are calling (`de` or `en`, default `de`).
    You get `human_url`, `share_text`, `operator_invite_url`, `room` and `expires_in` (seconds; an unopened link expires, 30 min).
 2. Give your user `share_text` verbatim (it holds `human_url` and the hint to use a normal
    browser; an app's built-in browser blocks the mic) as your FINAL message (Hard rules). The opener
