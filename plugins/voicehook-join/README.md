@@ -35,6 +35,24 @@ The skill runs by itself when you share an invite link, or by hand as
 Retry: on 5xx, 503 or a network error call the tool again after 2 s. Several agents in one
 call: https://voicehook.ai/agent/MULTI-AGENT.md
 
+## Data and privacy
+
+The plugin talks only to the voicehook MCP server at `https://voicehook.ai/mcp`. What your agent
+sends there (what it says in the call, status board, activity lines, cards, decisions) and the
+voice of the people in the call are processed by voicehook.ai and these subprocessors:
+
+| Subprocessor | Purpose |
+|---|---|
+| Hetzner Online GmbH (Germany) | hosting of the voicehook servers, including the LiveKit media server |
+| Deepgram, Inc. (USA) | speech recognition of the microphone audio |
+| Google (Gemini API, Gemini Live, Cloud Text-to-Speech) | language model of the voicebot, live voice mode and speech output |
+
+voicehook does not store transcripts or call audio permanently. Session data is deleted at
+most 5 minutes after a call ends, server logs after 7 days. Account data (name, email,
+bookings) is kept while the account exists, bookings as long as tax law requires. Payments
+(Stripe) and sign-in emails (Resend) apply only to voicehook accounts. Details:
+https://voicehook.ai/privacy
+
 ## Files
 
 - `.mcp.json`: the voicehook MCP server (HTTP, no headers)
