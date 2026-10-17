@@ -11,7 +11,7 @@ Canonical: https://voicehook.ai/agent/mcp/SKILL.md. You only use the tools of th
 ## Cloud/sandbox session? Use MCP, not the CLI
 
 - `CLAUDE_CODE_REMOTE=true`, `HTTPS_PROXY` set, or a local join that failed with `wait_pc_connection timed out` = cloud/sandbox session: WebRTC is blocked there. Never install or run a local voice client; these MCP tools need only HTTPS, the server joins the call for you.
-- No MCP tools in your client: the same tools work as plain HTTPS requests to https://voicehook.ai/mcp (JSON-RPC `tools/call`), recipe in https://voicehook.ai/agent/SKILL.md.
+- No MCP tools in your client: the same tools work as plain HTTPS requests to https://voicehook.ai/mcp (JSON-RPC `tools/call`), recipe in https://voicehook.ai/agent/REFERENCE.md.
 
 ## Hard rules (read first, always)
 
@@ -21,8 +21,8 @@ Canonical: https://voicehook.ai/agent/mcp/SKILL.md. You only use the tools of th
   - join waits up to 50 s and returns status waiting_for_human until they open it; then call join again at once.
   - Until they have joined, end EVERY message to your user with share_text as the last block. A link further up scrolls away.
   - Never wait or block in the foreground before the link is out as your final message, never "I am waiting for you" in the foreground. If your channel can, also send the link as a file or push. On 5xx, 503 or a network error call the tool again after 2 s.
-- **Right after `join`, at once** (also with `quiet: true`: quiet only suppresses `share` and `notice`, nothing audible). You lead: never wait silently until the human says something.
-  1. Greet: `greet` (true by default in `join`) speaks the default greeting in the call language. With greet, the `say` in `context.first_actions` drops out. Without greet: right after join, `say` one short greeting in the call language: who you are and that you are listening ("Hi, this is <your label>, I'm in and listening. What's up?" / "Hallo, <your label> hier, ich bin drin und höre zu. Worum geht's?"). If you stay silent, the voicebot announces you after 3 seconds.
+- **Right after `join`, at once** (also with `quiet: true`: quiet only suppresses `notice`, nothing audible). You lead: never wait silently until the human says something.
+  1. Greet: `greet` (true by default in `join`) speaks the default greeting in the call language. With greet, skip the greeting `say`. Without greet: right after join, `say` one short greeting in the call language: who you are and that you are listening ("Hi, this is <your label>, I'm in and listening. What's up?" / "Hallo, <your label> hier, ich bin drin und höre zu. Worum geht's?"). If you stay silent, the voicebot announces you after 3 seconds.
   2. `status` with `doing`, `open`, `done`.
   3. One `activity` line.
   4. Open questions for the human: `decide` (Decision Board), never into `open`.
@@ -38,9 +38,8 @@ Canonical: https://voicehook.ai/agent/mcp/SKILL.md. You only use the tools of th
    `"unbekannt"`. The old `name` still works as `label`. `greet` is true by default (`false` = you greet with `say`).
 2. Keep the returned `session` and pass it as `session` to EVERY other tool. It is a short-lived handle
    for this one call; it ends with the call, after 10 min without `next`/`say`, or with `leave`. Never show it in the call or to anyone else.
-3. `lang` = the call language: speak it. `share` = one line for YOUR user (show it once
-   in your chat, never say it in the call); `quiet: true` drops it (and `notice`; nothing audible). `context` = lang, mode,
-   instructions, functions, rules, skill_url: the source of truth for this call.
+3. `lang` = the call language: speak it. `context` = lang, mode, functions, skill_url: the facts
+   of this call. The rules for how to behave are in this skill, not in the tool answers.
 4. Then the Hard rules checklist (greeting, board, feed, decide, panel) and `next` at once.
 
 ## Or call your user yourself (`create_call`)
@@ -70,6 +69,7 @@ Canonical: https://voicehook.ai/agent/mcp/SKILL.md. You only use the tools of th
 | `human_rejoined` | the person is back (also when you joined while they were out) | greet them briefly in one `say` (not with `greeted: true`: your join `greet` was just spoken), go on |
 | `operator` | another agent addressed YOU (`addressed_to_you: true`, max 1 per 5 s) | answer that agent |
 | `context` | the call language changed: new `context` block | speak `context.lang` from now on |
+| `data` | another agent sent you data with `send_data`: `from`, `kind` (`json`/`text`/`file`), `payload` (or `url` for a big file), `name`?, `mime`? | use it; never speak it |
 | `ended` | the call is over (`message` says why) | tell your user `message`, stop |
 
 `user` events and `operators_said` lines carry `addressed_to` (labels/names addressed, incl. `"Delta"`; empty = nobody named
@@ -84,11 +84,12 @@ or ambiguous) and `addressed_to_you`; `operators_said` lines also `to_human` (no
 
 ## Several agents in one call (rules: https://voicehook.ai/agent/MULTI-AGENT.md)
 
-`context.rules` from `join` are binding. In short:
+These rules are binding:
 1. Read `operators_said` in EVERY `next` result, `timeout` too. Answer only when `addressed_to_you` (or clearly meant); someone else or Delta addressed: stay silent.
 2. Never answer another agent's question to the human; never ask Delta yourself. Speak only `context.lang`, greeting included.
 3. You are a participant: no code changes, actions or forwarding unless the human asks you. Check `operators_said` and `status` before you claim what you receive.
 4. Short, only when needed; else stay silent and show your work on board and feed.
+5. Data for another agent (JSON, text, a file as base64): `send_data` with `to` (label, identity or `"*"`), `kind`, `payload`, `name`?, `mime`?; never spoken, the human only sees one feed line. Max 15 KB per packet, so a file inline only up to about 11 KB (base64); a received `url` is a path on https://voicehook.ai, downloaded with your `session` (see the protocol link); bigger files: REST bridge upload (https://voicehook.ai/agent/OPERATOR-PROTOCOL.md).
 
 ## Keep the user informed while you work
 
@@ -150,7 +151,7 @@ Compare A and B:
 
 ## Speak right
 
-- The call language from `join` (`context.lang` / `context.instructions`); switch only when a `next` event of type `context` brings a new one.
+- The call language from `join` (`lang` / `context.lang`); switch only when a `next` event of type `context` brings a new one.
 - Plain, complete, phone-ready sentences: no abbreviations, symbols, URLs, codes, markdown, lists or emoji; round numbers. One complete thought per `say`; split long content into several `say` (`mode: "append"`, the default).
 - Status, decisions and topic changes always with context: which project, what happened, why it matters, what happens on A and on B. One question per topic.
 - `mode: "overwrite"` replaces your not yet spoken says; `"revise"` does the same and sends you a `revise` event.
