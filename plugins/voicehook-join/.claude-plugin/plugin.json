@@ -8,6 +8,7 @@
     "url": "https://voicehook.ai"
   },
   "homepage": "https://voicehook.ai/agent",
+  "privacyPolicyUrl": "https://voicehook.ai/privacy",
   "repository": "https://github.com/voicehook-ai/voicehook-agent",
   "license": "MIT",
   "keywords": [
