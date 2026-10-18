@@ -156,8 +156,9 @@ Activity log (0.13.0): keep it filled, Delta reads it in speech pauses.
     POST each line to /api/bridge/activity (2 s timeout, max one per 5 s, latest wins).
 
 Multi-session relay (0.15.0): the joining session writes ~/.voicehook/relay.json (0600,
-one relay token, label = this machine; bridge join and `bridge-session --save`, WebRTC
-only when the join answer carries `relay`) and deletes its own file on leave. The hooks
+one relay token, label = this machine; bridge join and `bridge-session --save`; a WebRTC
+join writes a local relay: the hooks append to its own activity.log) and deletes its own
+file on leave. The hooks
 of every OTHER Claude Code session here report turn goal, PR opened/merged, deploy and
 errors under their session name (docs/CLI.md). Off: VOICEHOOK_NO_RELAY=1.
 """
@@ -533,22 +534,30 @@ NO_HUMAN_GIVE_UP_MSG = ("[error] still no human in the room after {max:.0f}s (HT
 _BG_TASKS: set = set()
 
 
-async def _publish_relay(room, tok: dict | None, slug: str, json_mode: bool) -> None:
+async def _publish_relay(room, tok: dict | None, slug: str, json_mode: bool,
+                         local_dir: Path | None = None) -> None:
     """0.15.0: write ~/.voicehook/relay.json so the hooks of the OTHER Claude Code sessions
     of this machine feed this call (multisession.py). Bridge: mint a relay token with the
-    bridge session; WebRTC: only when the join answer carries `relay`. Never raises,
-    never prints the token."""
+    bridge session; a `relay` in the join answer wins. Otherwise (WebRTC, the default, or
+    a failed mint) a LOCAL relay: the hooks append labeled lines to this join's own
+    activity.log (`local_dir`), which the activity loop publishes. Never raises, never
+    prints the token."""
     try:
         # WebRTC: /api/token itself has token+url (LiveKit), so only a nested `relay` counts
         nested = tok.get("relay") if isinstance(tok, dict) else None
         rel = vmulti.relay_from_answer(nested) if isinstance(nested, dict) else None
         if rel is None and hasattr(room, "mint_relay"):
             rel = await room.mint_relay(vmulti.machine_label())
-        if rel is None:
+        if rel is not None:
+            path = vmulti.write_relay(rel["url"], rel["token"], slug, rel.get("expires_in"))
+            kind = ""
+        elif local_dir is not None:
+            path = vmulti.write_local_relay(local_dir, slug)
+            kind = " (local)"
+        else:
             return
-        path = vmulti.write_relay(rel["url"], rel["token"], slug, rel.get("expires_in"))
         _print_event(json_mode, "system",
-                     f"activity relay ready for the other Claude Code sessions here: {path}",
+                     f"activity relay ready for the other Claude Code sessions here{kind}: {path}",
                      topic="_meta")
     except Exception as e:  # noqa: BLE001
         print(f"[warn] activity relay not written ({type(e).__name__})", file=sys.stderr, flush=True)
@@ -983,8 +992,9 @@ async def _publish_activity(ctl: _Control, lines: list[str]) -> bool:
         await room.local_participant.publish_data(
             json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             reliable=True, topic=vactivity.TOPIC)
-        if lines:
-            ctl.activity_sent = (lines[-1], ctl.activity_clock())  # 0.13.0 activity_now
+        own = [ln for ln in lines if not vactivity.is_relay(ln)]  # 0.15.0: not other sessions
+        if own:
+            ctl.activity_sent = (own[-1], ctl.activity_clock())  # 0.13.0 activity_now
         return True
     except Exception as e:  # noqa: BLE001
         print(f"[warn] operator.activity publish failed: {e!r}", file=sys.stderr, flush=True)
@@ -1621,7 +1631,8 @@ async def _connect_and_listen(
         topic="_meta",
     )
     if not vmulti.relay_disabled():  # 0.15.0: relay.json for the other sessions of this machine
-        relay_task = asyncio.create_task(_publish_relay(room, tok, slug, json_mode))
+        local_dir = ctl.activity_path.parent if ctl is not None and ctl.activity_path else None
+        relay_task = asyncio.create_task(_publish_relay(room, tok, slug, json_mode, local_dir))
         _BG_TASKS.add(relay_task)
         relay_task.add_done_callback(_BG_TASKS.discard)
     if share_hint is not None and not share_hint.get("shown"):

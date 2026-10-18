@@ -497,3 +497,63 @@ def test_bridge_session_feeds_only_the_session_that_saved_it(monkeypatch):
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID")
     assert activity.post_tool_use(_tool("other-1")) is False and sent == []
     assert activity.post_tool_use(_tool("JOINER")) is True and len(sent) == 1
+
+
+# --------------------------------------------------------------------------- #
+# WebRTC join (default transport): local relay into the join's own activity.log
+# --------------------------------------------------------------------------- #
+def test_webrtc_join_writes_local_relay(tmp_path, monkeypatch, capsys):
+    d = _owned_join(tmp_path, monkeypatch, ms.session_hash("JOINER"))
+    monkeypatch.setenv(ms.MACHINE_LABEL_ENV, "crown")
+    # rtc.Room has no mint_relay, /api/token has no `relay`: only LiveKit token + url
+    asyncio.run(cli._publish_relay(object(), {"token": "lk-jwt", "url": "wss://lk"}, "room-a",
+                                   True, d))
+    rel = ms.load_relay()
+    assert rel["kind"] == "local" and rel["dir"] == str(d.resolve()) and rel["room"] == "room-a"
+    assert rel["label"] == "crown" and "token" not in rel
+    assert stat.S_IMODE(os.stat(ms.relay_path()).st_mode) == 0o600
+    assert "(local)" in capsys.readouterr().out
+    assert ms.remove_relay(owner_pid=os.getpid(), room="room-a") and not ms.relay_path().exists()
+
+
+def test_local_relay_line_lands_labeled_in_join_log(tmp_path, monkeypatch):
+    d = _owned_join(tmp_path, monkeypatch, ms.session_hash("JOINER"))
+    ms.write_local_relay(d, "room-a", label="crown", owner_session=ms.session_hash("JOINER"))
+    monkeypatch.setenv(ms.LABEL_ENV, "SE Refill")
+    spawned = []
+    monkeypatch.setattr(ms, "_spawn_post", spawned.append)
+    assert ms.handle_event(_ev("Stop", sid="other-1"), now=5000.0) == "SE Refill: Turn fertig"
+    assert spawned == []  # local: no network child
+    assert ms.handle_event(_ev("Stop", sid="JOINER"), now=5100.0) is None  # the joiner itself
+    lines = activity.read_tail(d / activity.ACTIVITY_NAME)
+    assert len(lines) == 1 and lines[0].endswith(" relay: Helfer crown: SE Refill: Turn fertig")
+    assert activity.is_relay(lines[0])
+
+
+def test_local_relay_refuses_dir_of_other_pid(tmp_path, monkeypatch):
+    d = _owned_join(tmp_path, monkeypatch, "")
+    ms.write_local_relay(d, "room-a", owner_pid=os.getpid(), owner_session="")
+    rel = dict(ms.load_relay(), owner_pid=os.getpid() + 1)
+    assert ms.append_local(rel, "x: y") is False
+    assert not (d / activity.ACTIVITY_NAME).exists()
+
+
+def test_local_relay_through_real_hook_process(tmp_path, monkeypatch):
+    d = _owned_join(tmp_path, monkeypatch, ms.session_hash("JOINER"))
+    ms.write_local_relay(d, "room-a", label="mac", owner_session=ms.session_hash("JOINER"))
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path), ms.LABEL_ENV: "Doku"}
+    r = subprocess.run([sys.executable, "-m", "voicehook_agent.activity", "post-tool-use"],
+                       input=_bash("gh pr create --fill", out="https://github.com/o/r/pull/77",
+                                   sid="other-2"),
+                       capture_output=True, text=True, env=env, timeout=30, check=False)
+    assert r.returncode == 0 and r.stdout == ""
+    lines = activity.read_tail(d / activity.ACTIVITY_NAME)
+    assert len(lines) == 1 and lines[0].endswith(" relay: Helfer mac: Doku: PR #77 geöffnet")
+
+
+def test_relay_lines_do_not_count_as_joining_agent_activity():
+    due = activity.ActivityDue(due_s=60, now=0.0)
+    due.observe(["10:00:00 relay: Helfer mac: X: Turn fertig"], 10.0)
+    assert due.line_at is None and due.hook_at is None
+    due.observe(["10:00:00 relay: Helfer mac: X: Turn fertig", "10:00:05 Bash: Tests"], 20.0)
+    assert due.line_at == 20.0 and due.hook_at == 20.0

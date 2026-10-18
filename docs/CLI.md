@@ -279,7 +279,10 @@ log, never published).
   strings become `[redacted]`); the join scrubs again before publishing.
 - **Which call:** `VOICEHOOK_SESSION=<slug>/<identity>` wins; otherwise the one live
   join on this machine. With zero or several live joins nothing is written, so one
-  Claude session never leaks into another call. The file is cleared when a join starts
+  Claude session never leaks into another call. 0.15.0: only the Claude Code session
+  that started the join (`owner_session` in its `session.json`, in `bridge-session.json`
+  for a curl bridge join) writes tool lines there; every other session reaches the call
+  labeled through the multi-session relay below, never as the joining agent's own lines. The file is cleared when a join starts
   and ends, mode 0600, trimmed to the last 50 lines above 200.
 
 ### Multi-session relay: every Claude Code session of a machine in the call (0.15.0)
@@ -288,7 +291,8 @@ One session joins, all other Claude Code sessions on the same machine (Mac, crow
 show up in the call's activity feed, each under its own name. Delta tells it as
 "mein Helfer ...". Needs `voicehook-agent hook install` once per machine (the hooks
 live in `~/.claude/settings.json`, so every session has them) and a server with the
-activity relay (`POST /api/bridge/activity/relay-token`).
+activity relay (`POST /api/bridge/activity/relay-token`) for bridge joins; a WebRTC join
+needs nothing on the server.
 
 **Token distribution.** The joining session mints ONE relay token and writes
 `~/.voicehook/relay.json` (atomic tmp + rename, file 0600, dir 0700):
@@ -296,8 +300,13 @@ activity relay (`POST /api/bridge/activity/relay-token`).
 
 - `join` over the HTTPS bridge (`--transport bridge`, or `auto` when it falls back):
   right after connect, with its bridge session. `owner_pid` = the join.
-- WebRTC `join`: only when the join answer (`/api/token`) carries `relay`
-  `{token, url, expires_in}`; without it no file is written.
+- WebRTC `join` (the default transport on Mac and crown): a LOCAL relay,
+  `{kind: "local", dir, label, room, expires_at, owner_pid, owner_session, written_at}`
+  without any token. The hooks append `HH:MM:SS relay: Helfer <machine>: <session>: <text>`
+  to the join's own `activity.log` (only when its `session.json` names `owner_pid`), the
+  join publishes it as `operator.activity`, the same line the server builds for a relay
+  POST. No network from the hook. A `relay` `{token, url, expires_in}` in the join answer
+  still wins; a bridge join whose mint fails falls back to the local relay too.
 - curl or MCP bridge join: `voicehook-agent bridge-session --save join.json` mints it too
   (`--no-relay` skips it). `owner_pid` = `$VOICEHOOK_OWNER_PID`, else `$CLAUDE_PID`.
 - Token label = this machine: `$VOICEHOOK_RELAY_LABEL`, else the short host name (max
@@ -336,7 +345,9 @@ the conversation: rename the session or set `VOICEHOOK_SESSION_LABEL` if that is
 at most one per 5 s per session; all sessions together at most 8 lines per 10 s (PR,
 deploy and error lines up to 16; the server allows 20 per token). The hook decides
 locally (`relay-state.json`, 0600) and hands the POST to a detached child
-(2 s timeout, Bearer token, never in the URL or argv). The hook never waits on the
+(2 s timeout, Bearer token, never in the URL or argv; started with `python -I` and cwd
+`~/.voicehook`, so no module of the session's project dir is ever imported; a local
+relay appends directly, no child). The hook never waits on the
 network, prints nothing, always exits 0 and gives up after 3 s.
 
 ### Activity log: keep it filled (activity_due, 0.13.0)

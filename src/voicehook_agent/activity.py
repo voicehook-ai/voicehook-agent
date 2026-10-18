@@ -747,6 +747,15 @@ def _is_note(line: str) -> bool:
     return bool(m) and m.group(2) == NOTE_TOOL
 
 
+RELAY_TOOL = "relay"  # 0.15.0 local relay line of ANOTHER session (multisession.append_local)
+
+
+def is_relay(line: str) -> bool:
+    """A line of another Claude Code session, not the joining agent's own activity."""
+    m = _LINE_RX.match(line)
+    return bool(m) and m.group(2) == RELAY_TOOL
+
+
 class ActivityDue:
     """Is the activity log silent while the agent works?
 
@@ -771,6 +780,7 @@ class ActivityDue:
         old = set(self._last)
         new = [ln for ln in lines if ln not in old] or lines[-1:]
         self._last = list(lines)
+        new = [ln for ln in new if not is_relay(ln)]  # 0.15.0: other sessions do not count
         if not new:
             return
         self.line_at = now

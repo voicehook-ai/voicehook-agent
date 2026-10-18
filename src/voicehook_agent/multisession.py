@@ -9,8 +9,12 @@ Token distribution:
   {url, token, room, expires_at, owner_pid, owner_session, written_at}.
   `owner_session` is a hash of the joining Claude Code session id (never the id itself),
   so that session does not report twice (its own hook already feeds the call).
-  A WebRTC join writes the file when its join answer carries `relay` {token, url,
-  expires_in} (server side, optional).
+  A WebRTC join (the default transport, no bridge session to mint with) writes a LOCAL
+  relay instead: {kind: "local", dir, label, room, expires_at, owner_pid, owner_session,
+  written_at}. The hooks then append `HH:MM:SS relay: Helfer <machine>: <line>` to the
+  join's own activity.log, which the join publishes as operator.activity (the same line
+  the server builds for a relay POST). No token, no network. A join answer that carries
+  `relay` {token, url, expires_in} still wins.
 * On leave / call end / SIGTERM (try/finally) the owner removes the file, but only if it
   still names the owner (owner_pid or owner_session, plus room).
 * Readers ignore a file that is a symlink, not ours (uid), group/world readable,
@@ -141,6 +145,35 @@ def write_relay(url: str, token: str, room: str, expires_in: float | None, *,
     return path
 
 
+LOCAL = "local"
+LOCAL_TTL_S = 12 * 3600.0
+LOCAL_TAG = vact.RELAY_TOOL  # tool field of a local relay line (server: activity.RELAY_TAG)
+
+
+def write_local_relay(dir_: Path, room: str, *, label: str | None = None,
+                      owner_pid: int | None = None, owner_session: str | None = None,
+                      now: float | None = None) -> Path:
+    """WebRTC join: relay.json pointing at the join's own session dir (0600, atomic).
+    ValueError when dir_ is not a directory."""
+    d = Path(dir_).resolve()
+    if not d.is_dir():
+        raise ValueError("join dir missing")
+    t = time.time() if now is None else now
+    data = {"kind": LOCAL, "dir": str(d), "label": label or machine_label(),
+            "room": str(room or ""), "expires_at": int(t + LOCAL_TTL_S),
+            "owner_pid": int(os.getpid() if owner_pid is None else owner_pid),
+            "owner_session": own_session_hash() if owner_session is None else owner_session,
+            "written_at": int(t)}
+    vact._private_dir(vact.state_root())
+    path = relay_path()
+    vact._write_private(path, json.dumps(data))
+    return path
+
+
+def _is_local(d: dict) -> bool:
+    return d.get("kind") == LOCAL
+
+
 def _read_raw() -> dict | None:
     """relay.json as dict, or None when missing, a symlink, not ours, readable by others
     or not valid."""
@@ -157,8 +190,11 @@ def _read_raw() -> dict | None:
         d = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(d, dict) or not isinstance(d.get("token"), str) \
-            or not isinstance(d.get("url"), str):
+    if not isinstance(d, dict):
+        return None
+    if _is_local(d):
+        return d if isinstance(d.get("dir"), str) and os.path.isabs(d["dir"]) else None
+    if not isinstance(d.get("token"), str) or not isinstance(d.get("url"), str):
         return None
     return d
 
@@ -184,7 +220,7 @@ def load_relay(now: float | None = None) -> dict | None:
         return None
     if pid > 0 and not vact._pid_alive(pid):
         return None
-    if _is_dead(d["token"]):
+    if not _is_local(d) and _is_dead(d["token"]):
         return None
     return d
 
@@ -518,7 +554,7 @@ def post_line(text: str, timeout: float = POST_TIMEOUT_S) -> int | None:
     import urllib.error
     import urllib.request
     rel = load_relay()
-    if rel is None:
+    if rel is None or _is_local(rel):
         return None
     req = urllib.request.Request(
         rel["url"], method="POST",
@@ -551,6 +587,25 @@ def _spawn_post(text: str) -> None:
         p.stdin.close()
     except Exception:  # noqa: BLE001
         return
+
+
+def append_local(rel: dict, line: str, now: float | None = None) -> bool:
+    """Local relay: append `HH:MM:SS relay: Helfer <machine>: <line>` to the activity.log of
+    the join named by rel (only when its session.json names the owner pid). Never raises."""
+    try:
+        d = Path(str(rel.get("dir") or ""))
+        st = os.lstat(d)
+        if not stat.S_ISDIR(st.st_mode) or (hasattr(os, "getuid") and st.st_uid != os.getuid()):
+            return False
+        info = json.loads((d / vact.vsession.INFO_NAME).read_text(encoding="utf-8"))
+        if int(info.get("pid") or 0) != int(rel.get("owner_pid") or -1):
+            return False
+        label = re.sub(r"[|:]", " ", vact.scrub(str(rel.get("label") or ""))).strip() or "Rechner"
+        body = vact.scrub(f"Helfer {label}: {line}")[:vact.DESC_MAX].strip()
+        vact.append_line(d, f"{vact._ts(now)} {LOCAL_TAG}: {body}")
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def relay_post_main(raw: str) -> int:
@@ -589,7 +644,12 @@ def handle_event(raw: str, now: float | None = None, post=None) -> str | None:
         line = _admit(skey, kind, text, event, time.time() if now is None else now)
         if not line:
             return None
-        (post or _spawn_post)(line)
+        if post is not None:
+            post(line)
+        elif _is_local(rel):
+            append_local(rel, line)
+        else:
+            _spawn_post(line)
         return line
     except Exception:  # noqa: BLE001 - a hook must never disturb Claude Code
         return None
