@@ -384,3 +384,73 @@ def test_publish_relay_bridge_and_webrtc(monkeypatch, capsys):
     asyncio.run(cli._publish_relay(object(), {"token": "lk", "url": "wss://lk",
                                               "relay": {"token": TOKEN, "url": URL}}, "r", True))
     assert ms.load_relay()["token"] == TOKEN
+
+
+# --------------------------------------------------------------------------- #
+# detached child: never imports modules from the reporting session's cwd
+# --------------------------------------------------------------------------- #
+def _plant(tmp_path):
+    proj = tmp_path / "untrusted-repo"
+    proj.mkdir()
+    marker = tmp_path / "PWNED"
+    for mod in ("json", "hashlib", "urllib"):
+        (proj / f"{mod}.py").write_text(f"open({str(marker)!r}, 'a').write('{mod}')\n")
+    return proj, marker
+
+
+def test_old_dash_m_child_would_import_from_cwd(tmp_path):
+    """Control: the plant works, `python -m` from that cwd runs it."""
+    proj, marker = _plant(tmp_path)
+    subprocess.run([sys.executable, "-m", "voicehook_agent.activity", "relay-post"],
+                   check=False, input=b"{}", cwd=proj, timeout=30, capture_output=True,
+                   env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)})
+    assert marker.exists()
+
+
+def test_spawn_post_child_isolated_from_cwd_and_still_posts(tmp_path, monkeypatch):
+    import http.server
+    import threading
+    got = []
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            got.append(json.loads(self.rfile.read(int(self.headers["content-length"]))))
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        ms.write_relay(f"http://127.0.0.1:{srv.server_port}/api/activity/relay", TOKEN, "room-a",
+                       3600, owner_pid=os.getpid(), owner_session="x")
+        proj, marker = _plant(tmp_path)
+        monkeypatch.chdir(proj)
+        procs = []
+        real = subprocess.Popen
+
+        def spy(argv, **kw):
+            p = real(argv, **kw)
+            procs.append((argv, kw, p))
+            return p
+        monkeypatch.setattr(subprocess, "Popen", spy)
+        ms._spawn_post("Session: Turn fertig")
+        argv, kw, p = procs[0]
+        p.wait(timeout=30)
+    finally:
+        srv.shutdown()
+    assert argv[1] == "-I" and "-m" not in argv
+    assert kw["cwd"] == str(activity.state_root())
+    assert not marker.exists()
+    assert got == [{"text": "Session: Turn fertig"}]  # positive control: the child really ran
+
+
+def test_bridge_flusher_child_isolated(monkeypatch):
+    seen = []
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kw: seen.append((argv, kw)))
+    activity._spawn_flusher(1.5)
+    argv, kw = seen[0]
+    assert argv[:3] == [sys.executable, "-I", "-c"] and argv[-2:] == ["bridge-flush", "1.500"]
+    assert "-m" not in argv and kw["cwd"]

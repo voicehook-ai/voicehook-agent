@@ -47,7 +47,6 @@ import os
 import re
 import socket
 import stat
-import sys
 import time
 from pathlib import Path
 
@@ -539,12 +538,14 @@ def post_line(text: str, timeout: float = POST_TIMEOUT_S) -> int | None:
 
 
 def _spawn_post(text: str) -> None:
-    """Detached `python -m voicehook_agent.activity relay-post` (text on stdin, never argv)."""
+    """Detached `voicehook-agent-hook relay-post` (text on stdin, never argv), isolated
+    from the cwd of the reporting session (vact.child_argv: -I, cwd = state dir)."""
     import subprocess
     try:
-        p = subprocess.Popen([sys.executable, "-m", "voicehook_agent.activity", "relay-post"],
+        p = subprocess.Popen(vact.child_argv("relay-post"),
                              stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL, start_new_session=True)
+                             stderr=subprocess.DEVNULL, start_new_session=True,
+                             cwd=vact.child_cwd())
         assert p.stdin is not None
         p.stdin.write(json.dumps({"text": text}).encode("utf-8"))
         p.stdin.close()

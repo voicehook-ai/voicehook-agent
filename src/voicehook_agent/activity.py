@@ -396,15 +396,38 @@ def _bridge_post(base: str, session: str, text: str,
         return None
 
 
+# A detached child of the hook runs in the project dir of ANY Claude Code session. `python -m`
+# would put that cwd first on sys.path, so a hashlib.py/json.py of an untrusted repo would be
+# imported by a process that reads our 0600 files. Hence: -I (no cwd/script dir, no PYTHON*
+# env, no user site), the package dir inserted explicitly, cwd = our own state dir.
+_CHILD_BOOT = ("import sys; sys.path.insert(0, sys.argv.pop(1)); "
+               "from voicehook_agent.activity import console_main; console_main()")
+
+
+def child_argv(*args: str) -> list[str]:
+    """argv of a detached `voicehook-agent-hook <args>` child, isolated from the cwd."""
+    return [sys.executable, "-I", "-c", _CHILD_BOOT, str(Path(__file__).resolve().parents[1]), *args]
+
+
+def child_cwd() -> str:
+    """Working dir of a detached child: the state dir (ours, 0700), else home, else /."""
+    for d in (state_root(), Path.home()):
+        try:
+            if d.is_dir():
+                return str(d)
+        except OSError:
+            continue
+    return os.sep
+
+
 def _spawn_flusher(delay: float) -> None:
     """Detached `voicehook-agent-hook bridge-flush DELAY`: sends the pending line when
     the rate window ends. Best effort."""
     import subprocess
     try:
-        subprocess.Popen([sys.executable, "-m", "voicehook_agent.activity", "bridge-flush",
-                          f"{max(0.0, delay):.3f}"],
+        subprocess.Popen(child_argv("bridge-flush", f"{max(0.0, delay):.3f}"),
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, start_new_session=True)
+                         stderr=subprocess.DEVNULL, start_new_session=True, cwd=child_cwd())
     except Exception:  # noqa: BLE001
         return
 
