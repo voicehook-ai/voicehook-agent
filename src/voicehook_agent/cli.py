@@ -1933,7 +1933,9 @@ async def _join(
         if server is not None:
             vsession.write_info(sess_dir, {"pid": os.getpid(), "room": slug,
                                            "identity": ident, "api_base": api_base,
-                                           "started": time.time()})
+                                           "started": time.time(),
+                                           # 0.15.0: hash only; hooks of other sessions skip this join
+                                           "owner_session": vmulti.own_session_hash()})
             vactivity.write_pointer(sess_dir)  # 0.13.0: hook finds us under any home
             _print_event(json_mode, "system",
                          f"control socket ready: {server.sock_path}", topic="_meta")

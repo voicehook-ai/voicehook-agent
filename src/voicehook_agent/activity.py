@@ -355,7 +355,11 @@ def save_bridge_session(answer: dict, base: str) -> Path:
         raise ValueError(f"base must be an http(s) URL, got {base!r}")
     _private_dir(state_root())
     path = state_root() / BRIDGE_SESSION_NAME
-    _write_private(path, json.dumps({"base": base, "session": session.strip()}))
+    data = {"base": base, "session": session.strip()}
+    owner = _own_session()
+    if owner:  # 0.15.0: only the joining session feeds this bridge session (no double lines)
+        data["owner_session"] = owner
+    _write_private(path, json.dumps(data))
     return path
 
 
@@ -374,7 +378,38 @@ def load_bridge_session() -> dict | None:
         return None
     if not isinstance(d, dict) or not d.get("base") or not d.get("session"):
         return None
-    return {"base": str(d["base"]), "session": str(d["session"])}
+    out = {"base": str(d["base"]), "session": str(d["session"])}
+    if isinstance(d.get("owner_session"), str) and d["owner_session"]:
+        out["owner_session"] = d["owner_session"]
+    return out
+
+
+# ----- 0.15.0: which Claude Code session owns a join (no double reporting) ---------
+def _own_session() -> str:
+    """Hash of the calling Claude Code session ('' outside Claude Code)."""
+    from . import multisession  # lazy: multisession imports this module
+    return multisession.own_session_hash()
+
+
+def _event_session(event: dict) -> str:
+    from . import multisession
+    return multisession.session_hash(event.get("session_id")) or _own_session()
+
+
+def dir_owner(dir_: Path) -> str:
+    """owner_session of a join dir (session.json), '' when unknown."""
+    try:
+        v = json.loads((dir_ / vsession.INFO_NAME).read_text(encoding="utf-8")).get("owner_session")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    return v if isinstance(v, str) else ""
+
+
+def _foreign(owner: str, session: str) -> bool:
+    """True when the join belongs to ANOTHER Claude Code session: that session's tool lines
+    reach the call only labeled through the relay (multisession.py), never as the joining
+    agent's own lines. Unknown owner or session: old behavior (False)."""
+    return bool(owner) and bool(session) and owner != session
 
 
 def _bridge_post(base: str, session: str, text: str,
@@ -603,13 +638,19 @@ def _handle(raw: str, phase: str, now: float | None) -> bool:
             return False
         tid = _tool_use_id(event)
         done = False
+        sess_key = _event_session(event)
         dir_ = target_dir()
+        if dir_ is not None and not (os.environ.get("VOICEHOOK_SESSION") or "").strip() \
+                and _foreign(dir_owner(dir_), sess_key):
+            dir_ = None  # 0.15.0: another session's join, the relay carries this session
         if dir_ is not None and not (phase == "post" and tid and _take_id(dir_ / IDS_NAME, tid)):
             append_line(dir_, format_line(event, now))
             if phase == "pre" and tid:
                 _remember_id(dir_ / IDS_NAME, tid)
             done = True
-        if load_bridge_session() is not None:   # 0.13.0: curl bridge join (Quickstart A)
+        bsess = load_bridge_session()
+        if bsess is not None and not _foreign(bsess.get("owner_session", ""), sess_key):
+            # 0.13.0: curl bridge join (Quickstart A), only the session that saved it
             ids = state_root() / BRIDGE_IDS_NAME
             if not (phase == "post" and tid and _take_id(ids, tid)):
                 done = bridge_send(bridge_text(event), now) or done

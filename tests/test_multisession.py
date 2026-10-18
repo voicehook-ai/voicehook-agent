@@ -454,3 +454,46 @@ def test_bridge_flusher_child_isolated(monkeypatch):
     argv, kw = seen[0]
     assert argv[:3] == [sys.executable, "-I", "-c"] and argv[-2:] == ["bridge-flush", "1.500"]
     assert "-m" not in argv and kw["cwd"]
+
+
+# --------------------------------------------------------------------------- #
+# old tool-line path: only the joining session (no unlabeled double lines)
+# --------------------------------------------------------------------------- #
+def _owned_join(tmp_path, monkeypatch, owner: str):
+    from voicehook_agent import session as vsession
+    monkeypatch.setenv("VOICEHOOK_AGENT_HOME", str(tmp_path / "home"))
+    d = vsession.session_dir("room-a", "claude-x")
+    d.mkdir(parents=True)
+    vsession.write_info(d, {"pid": os.getpid(), "room": "room-a", "owner_session": owner})
+    return d
+
+
+def _tool(sid):
+    return _ev(sid=sid, tool_name="Bash", tool_input={"description": "Tests laufen lassen"},
+               tool_response={"stdout": ""})
+
+
+def test_other_session_tool_lines_skip_the_join_of_another_session(tmp_path, monkeypatch):
+    d = _owned_join(tmp_path, monkeypatch, ms.session_hash("JOINER"))
+    assert activity.post_tool_use(_tool("other-1")) is False
+    assert activity.pre_tool_use(_tool("other-1")) is False
+    assert not (d / activity.ACTIVITY_NAME).exists()
+    assert activity.post_tool_use(_tool("JOINER")) is True  # the joining session itself
+    assert (d / activity.ACTIVITY_NAME).read_text().endswith(" Bash: Tests laufen lassen\n")
+
+
+def test_join_without_known_owner_keeps_old_behavior(tmp_path, monkeypatch):
+    d = _owned_join(tmp_path, monkeypatch, "")
+    assert activity.post_tool_use(_tool("other-1")) is True
+    assert (d / activity.ACTIVITY_NAME).exists()
+
+
+def test_bridge_session_feeds_only_the_session_that_saved_it(monkeypatch):
+    sent = []
+    monkeypatch.setattr(activity, "bridge_send", lambda text, now=None: sent.append(text) or True)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "JOINER")
+    activity.save_bridge_session({"session": "sess-x"}, "https://voicehook.ai")
+    assert activity.load_bridge_session()["owner_session"] == ms.session_hash("JOINER")
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID")
+    assert activity.post_tool_use(_tool("other-1")) is False and sent == []
+    assert activity.post_tool_use(_tool("JOINER")) is True and len(sent) == 1
