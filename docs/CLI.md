@@ -246,8 +246,18 @@ voicehook-agent hook print                # the snippet, to paste by hand
   "PreToolUse": [{"matcher": "*", "hooks": [
     {"type": "command", "command": "voicehook-agent-hook pre-tool-use || true", "timeout": 5}]}],
   "PostToolUse": [{"matcher": "*", "hooks": [
-    {"type": "command", "command": "voicehook-agent-hook post-tool-use", "timeout": 5}]}]}}
+    {"type": "command", "command": "voicehook-agent-hook post-tool-use", "timeout": 5}]}],
+  "PostToolUseFailure": [{"matcher": "*", "hooks": [
+    {"type": "command", "command": "voicehook-agent-hook post-tool-use-failure || true", "timeout": 3}]}],
+  "UserPromptSubmit": [{"hooks": [
+    {"type": "command", "command": "voicehook-agent-hook user-prompt-submit || true", "timeout": 3}]}],
+  "Stop": [{"hooks": [
+    {"type": "command", "command": "voicehook-agent-hook stop || true", "timeout": 3}]}]}}
 ```
+
+PostToolUseFailure, UserPromptSubmit and Stop (0.15.0) only feed the multi-session relay
+below; without `~/.voicehook/relay.json` they do nothing. `hook install` adds them to an
+older install, idempotently.
 
 `voicehook-agent-hook` is a light console script (no livekit import, starts fast);
 `voicehook-agent hook pre-tool-use|post-tool-use` does the same. The hook always exits 0
@@ -271,6 +281,63 @@ log, never published).
   join on this machine. With zero or several live joins nothing is written, so one
   Claude session never leaks into another call. The file is cleared when a join starts
   and ends, mode 0600, trimmed to the last 50 lines above 200.
+
+### Multi-session relay: every Claude Code session of a machine in the call (0.15.0)
+
+One session joins, all other Claude Code sessions on the same machine (Mac, crown, ...)
+show up in the call's activity feed, each under its own name. Delta tells it as
+"mein Helfer ...". Needs `voicehook-agent hook install` once per machine (the hooks
+live in `~/.claude/settings.json`, so every session has them) and a server with the
+activity relay (`POST /api/bridge/activity/relay-token`).
+
+**Token distribution.** The joining session mints ONE relay token and writes
+`~/.voicehook/relay.json` (atomic tmp + rename, file 0600, dir 0700):
+`{url, token, room, expires_at, owner_pid, owner_session, written_at}`.
+
+- `join` over the HTTPS bridge (`--transport bridge`, or `auto` when it falls back):
+  right after connect, with its bridge session. `owner_pid` = the join.
+- WebRTC `join`: only when the join answer (`/api/token`) carries `relay`
+  `{token, url, expires_in}`; without it no file is written.
+- curl or MCP bridge join: `voicehook-agent bridge-session --save join.json` mints it too
+  (`--no-relay` skips it). `owner_pid` = `$VOICEHOOK_OWNER_PID`, else `$CLAUDE_PID`.
+- Token label = this machine: `$VOICEHOOK_RELAY_LABEL`, else the short host name (max
+  22 chars). Feed line: `relay: Helfer <machine>: <session>: <text>`.
+- `owner_session` is a hash of `$CLAUDE_CODE_SESSION_ID` of the joining session (never
+  the id). Its own hook already feeds the call, so the relay skips that session.
+- Cleanup: on leave, call end, SIGTERM or self-update restart (try/finally) and on
+  `bridge-session --clear` the owner deletes the file, but only if it still names the
+  owner (pid or session hash, and room). Opt-out: `VOICEHOOK_NO_RELAY=1`.
+- Readers ignore a symlink, a file of another user or readable by group/world, an
+  expired file and one whose `owner_pid` is gone. 401/403/410 from the relay marks the
+  token dead (`relay.dead`, a hash of the token); a reader never deletes the file.
+
+**What each session reports** (one line per event, `<session>: <text>`):
+
+| Event | Line | Never sent |
+|---|---|---|
+| UserPromptSubmit | `neuer Auftrag` plus up to 3 category words of a fixed list (PR, Deploy, Tests, Bugfix, Review, Doku, Refactoring, Merge, Release, UI) | any word of the prompt itself |
+| PostToolUse Bash `gh pr create` | `PR #N geöffnet` (number from the PR URL in the output) | command, output |
+| PostToolUse Bash `gh pr merge` | `PR #N gemergt` (number from the command or output) | command, output |
+| PostToolUse Bash deploy | `Deploy gelaufen` (wrangler/vercel/fly/netlify/firebase/supabase ... deploy, `npm run deploy`, `make deploy`, `*deploy*.sh`, kubectl apply, helm upgrade, `gh workflow run *deploy*`; segments starting with grep/cat/git/echo/... do not count) | command, output |
+| GitHub MCP create/merge pull request | `PR #N geöffnet` / `PR #N gemergt` | tool input/output |
+| PostToolUseFailure, `is_error` | `Fehler bei <Tool>` (+ the tool's own description), `Deploy fehlgeschlagen`, `PR #N Merge fehlgeschlagen`; Esc (is_interrupt) is skipped | the error text |
+| Stop | `Turn fertig` | |
+
+Other tool calls are not relayed (the joining session's own feed has them).
+
+**Session name** (label in front of the text): `$VOICEHOOK_SESSION_LABEL`, else the
+Claude Code session name (`session_title` of the hook event, else the last
+`custom-title` of the transcript, the name set with `/rename`), else the label seen
+before for this session, else the basename of `cwd`. Scrubbed, `|` and `:` removed, max
+30 chars. The session title can be Claude Code's generated title, which is derived from
+the conversation: rename the session or set `VOICEHOOK_SESSION_LABEL` if that is too much.
+
+**Throttle:** the same line of one session at most once per 120 s; turn and stop lines
+at most one per 5 s per session; all sessions together at most 8 lines per 10 s (PR,
+deploy and error lines up to 16; the server allows 20 per token). The hook decides
+locally (`relay-state.json`, 0600) and hands the POST to a detached child
+(2 s timeout, Bearer token, never in the URL or argv). The hook never waits on the
+network, prints nothing, always exits 0 and gives up after 3 s.
 
 ### Activity log: keep it filled (activity_due, 0.13.0)
 
@@ -405,6 +472,17 @@ Install and update in one line (what the skill does; always upgrades):
 ```bash
 R=git+https://github.com/voicehook-ai/voicehook-agent
 uv tool install -q --upgrade $R || pip install -q --upgrade --user $R
+```
+
+Pinned (multi-session relay needs 0.15.0 or newer). Releases are tagged `cli-vX.Y.Z`
+(see DEVELOPMENT.md); the tag `cli-v0.15.0` is set on the merge commit after the merge.
+Skills that must stay byte-stable (voicehook-v4 `REFERENCE.md`) pin the 40-hex commit
+sha of that tag instead of the tag name:
+
+```bash
+R=git+https://github.com/voicehook-ai/voicehook-agent@cli-v0.15.0
+uv tool install -q --force $R || pip install -q --user --force-reinstall $R
+voicehook-agent hook install
 ```
 
 ### Self-update (0.12.0)

@@ -67,6 +67,11 @@ uvx voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name <y
 For a loop without polling (`say`, `next`, `status`, `leave`), the status board, the activity
 hook and all flags see [docs/CLI.md](docs/CLI.md).
 
+Several Claude Code sessions on one machine (0.15.0): run `voicehook-agent hook install`
+once; while one session is in a call, every other session reports turn goal, PR, deploy
+and errors under its own name in the call's activity feed
+([multi-session relay](docs/CLI.md#multi-session-relay-every-claude-code-session-of-a-machine-in-the-call-0150)).
+
 ## Pricing
 
 About 10 minutes free every day. Prepaid from 10 EUR, no subscription.

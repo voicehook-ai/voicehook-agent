@@ -218,7 +218,16 @@ def test_snippet_shape():
         "PreToolUse": [{"matcher": "*", "hooks": [
             {"type": "command", "command": "voicehook-agent-hook pre-tool-use || true", "timeout": 5}]}],
         "PostToolUse": [{"matcher": "*", "hooks": [
-            {"type": "command", "command": "voicehook-agent-hook post-tool-use", "timeout": 5}]}]}}
+            {"type": "command", "command": "voicehook-agent-hook post-tool-use", "timeout": 5}]}],
+        # 0.15.0 multi-session relay
+        "PostToolUseFailure": [{"matcher": "*", "hooks": [
+            {"type": "command", "command": "voicehook-agent-hook post-tool-use-failure || true",
+             "timeout": 3}]}],
+        "UserPromptSubmit": [{"hooks": [
+            {"type": "command", "command": "voicehook-agent-hook user-prompt-submit || true",
+             "timeout": 3}]}],
+        "Stop": [{"hooks": [
+            {"type": "command", "command": "voicehook-agent-hook stop || true", "timeout": 3}]}]}}
 
 
 def test_install_idempotent_keeps_other_keys(tmp_path):
@@ -232,7 +241,8 @@ def test_install_idempotent_keeps_other_keys(tmp_path):
     assert p.read_text() == first
     data = json.loads(first)
     assert data["model"] == "opus"
-    assert data["hooks"]["Stop"] == [{"hooks": [{"type": "command", "command": "say done"}]}]
+    assert data["hooks"]["Stop"] == [{"hooks": [{"type": "command", "command": "say done"}]},
+                                     activity.hook_entry("Stop")]   # theirs kept, ours added
     post = data["hooks"]["PostToolUse"]
     assert post[0]["matcher"] == "Edit" and post[1] == activity.hook_entry()
 
