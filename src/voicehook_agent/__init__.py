@@ -1,3 +1,3 @@
 """voicehook-agent — zero-install CLI for LLM agents to join voicehook.ai calls."""
 
-__version__ = "0.14.4"
+__version__ = "0.15.0"

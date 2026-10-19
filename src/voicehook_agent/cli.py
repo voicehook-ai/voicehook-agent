@@ -154,6 +154,13 @@ Activity log (0.13.0): keep it filled, Delta reads it in speech pauses.
     VOICEHOOK_AGENT_HOME. Curl bridge join (Quickstart A): `voicehook-agent bridge-session
     --save join.json --base URL` (only base + session, 0600, --clear on leave) lets the hook
     POST each line to /api/bridge/activity (2 s timeout, max one per 5 s, latest wins).
+
+Multi-session relay (0.15.0): the joining session writes ~/.voicehook/relay.json (0600,
+one relay token, label = this machine; bridge join and `bridge-session --save`; a WebRTC
+join writes a local relay: the hooks append to its own activity.log) and deletes its own
+file on leave. The hooks
+of every OTHER Claude Code session here report turn goal, PR opened/merged, deploy and
+errors under their session name (docs/CLI.md). Off: VOICEHOOK_NO_RELAY=1.
 """
 from __future__ import annotations
 
@@ -175,6 +182,7 @@ from livekit import rtc
 
 from . import __version__, relay
 from . import activity as vactivity
+from . import multisession as vmulti
 from . import selfupdate as vselfupdate
 from . import session as vsession
 from . import transport as vtransport
@@ -521,6 +529,38 @@ NO_HUMAN_WAIT_MSG = ("no human in the room yet (HTTP 409): waiting for the perso
                      "retrying every {every:.0f}s for up to {max:.0f}s")
 NO_HUMAN_GIVE_UP_MSG = ("[error] still no human in the room after {max:.0f}s (HTTP 409), not joining. "
                         "Open the call in the browser first, then run join again.")
+
+
+_BG_TASKS: set = set()
+
+
+async def _publish_relay(room, tok: dict | None, slug: str, json_mode: bool,
+                         local_dir: Path | None = None) -> None:
+    """0.15.0: write ~/.voicehook/relay.json so the hooks of the OTHER Claude Code sessions
+    of this machine feed this call (multisession.py). Bridge: mint a relay token with the
+    bridge session; a `relay` in the join answer wins. Otherwise (WebRTC, the default, or
+    a failed mint) a LOCAL relay: the hooks append labeled lines to this join's own
+    activity.log (`local_dir`), which the activity loop publishes. Never raises, never
+    prints the token."""
+    try:
+        # WebRTC: /api/token itself has token+url (LiveKit), so only a nested `relay` counts
+        nested = tok.get("relay") if isinstance(tok, dict) else None
+        rel = vmulti.relay_from_answer(nested) if isinstance(nested, dict) else None
+        if rel is None and hasattr(room, "mint_relay"):
+            rel = await room.mint_relay(vmulti.machine_label())
+        if rel is not None:
+            path = vmulti.write_relay(rel["url"], rel["token"], slug, rel.get("expires_in"))
+            kind = ""
+        elif local_dir is not None:
+            path = vmulti.write_local_relay(local_dir, slug)
+            kind = " (local)"
+        else:
+            return
+        _print_event(json_mode, "system",
+                     f"activity relay ready for the other Claude Code sessions here{kind}: {path}",
+                     topic="_meta")
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] activity relay not written ({type(e).__name__})", file=sys.stderr, flush=True)
 
 
 def _quit_signals() -> list:
@@ -952,8 +992,9 @@ async def _publish_activity(ctl: _Control, lines: list[str]) -> bool:
         await room.local_participant.publish_data(
             json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             reliable=True, topic=vactivity.TOPIC)
-        if lines:
-            ctl.activity_sent = (lines[-1], ctl.activity_clock())  # 0.13.0 activity_now
+        own = [ln for ln in lines if not vactivity.is_relay(ln)]  # 0.15.0: not other sessions
+        if own:
+            ctl.activity_sent = (own[-1], ctl.activity_clock())  # 0.13.0 activity_now
         return True
     except Exception as e:  # noqa: BLE001
         print(f"[warn] operator.activity publish failed: {e!r}", file=sys.stderr, flush=True)
@@ -1589,6 +1630,11 @@ async def _connect_and_listen(
         f"{[p.identity for p in room.remote_participants.values()]}",
         topic="_meta",
     )
+    if not vmulti.relay_disabled():  # 0.15.0: relay.json for the other sessions of this machine
+        local_dir = ctl.activity_path.parent if ctl is not None and ctl.activity_path else None
+        relay_task = asyncio.create_task(_publish_relay(room, tok, slug, json_mode, local_dir))
+        _BG_TASKS.add(relay_task)
+        relay_task.add_done_callback(_BG_TASKS.discard)
     if share_hint is not None and not share_hint.get("shown"):
         share_hint["shown"] = True  # once per join: never again on a reconnect cycle
         _emit_share_hint(json_mode)
@@ -1898,7 +1944,9 @@ async def _join(
         if server is not None:
             vsession.write_info(sess_dir, {"pid": os.getpid(), "room": slug,
                                            "identity": ident, "api_base": api_base,
-                                           "started": time.time()})
+                                           "started": time.time(),
+                                           # 0.15.0: hash only; hooks of other sessions skip this join
+                                           "owner_session": vmulti.own_session_hash()})
             vactivity.write_pointer(sess_dir)  # 0.13.0: hook finds us under any home
             _print_event(json_mode, "system",
                          f"control socket ready: {server.sock_path}", topic="_meta")
@@ -2012,6 +2060,7 @@ async def _join(
                 break
     finally:
         ctl.quit.set()
+        vmulti.remove_relay(owner_pid=os.getpid(), room=slug)  # 0.15.0: only our own file
         if rc == RC_RESTART:  # a waiting `next` learns why, instead of "ended"
             ctl.events.put_front_nowait({
                 "ok": True, "type": "restarting", "reason": "self_update",
@@ -2207,6 +2256,8 @@ def _run_bridge_session(args) -> int:
     """0.13.0 `bridge-session --save JSON [--base URL] | --clear`. Never prints the token."""
     if args.clear:
         vactivity.clear_bridge_session()
+        vmulti.remove_relay(owner_session=vmulti.own_session_hash() or None,
+                            owner_pid=_relay_owner_pid())
         print(json.dumps({"ok": True, "type": "bridge-session", "cleared": True}), flush=True)
         return 0
     if not args.save:
@@ -2215,12 +2266,38 @@ def _run_bridge_session(args) -> int:
     try:
         raw = sys.stdin.read() if args.save == "-" else Path(args.save).read_text(encoding="utf-8")
         base = args.base or os.environ.get("VOICEHOOK_API_BASE") or "https://voicehook.ai"
-        path = vactivity.save_bridge_session(json.loads(raw), base)
+        answer = json.loads(raw)
+        path = vactivity.save_bridge_session(answer, base)
     except (OSError, ValueError) as e:
         print(json.dumps({"ok": False, "type": "error", "error": str(e)}), flush=True)
         return 1
-    print(json.dumps({"ok": True, "type": "bridge-session", "path": str(path)}), flush=True)
+    out = {"ok": True, "type": "bridge-session", "path": str(path)}
+    # 0.15.0: relay token for the other Claude Code sessions of this machine
+    if not args.no_relay and not vmulti.relay_disabled():
+        sess = vactivity.load_bridge_session() or {}
+        rel = vmulti.mint_relay(sess.get("base", ""), sess.get("session", ""))
+        if rel is not None:
+            try:
+                out["relay"] = str(vmulti.write_relay(
+                    rel["url"], rel["token"], str(answer.get("room") or ""), rel["expires_in"],
+                    owner_pid=_relay_owner_pid() or 0))
+            except (OSError, ValueError):
+                pass
+    print(json.dumps(out), flush=True)
     return 0
+
+
+def _relay_owner_pid() -> int | None:
+    """Owner pid of a relay.json written by the short-lived `bridge-session`: the Claude
+    Code process ($VOICEHOOK_OWNER_PID, else $CLAUDE_PID), so readers drop it with it."""
+    for v in (os.environ.get("VOICEHOOK_OWNER_PID"), os.environ.get("CLAUDE_PID")):
+        try:
+            pid = int(str(v or "").strip())
+        except ValueError:
+            continue
+        if pid > 0:
+            return pid
+    return None
 
 
 def _run_client(args) -> int:
@@ -2511,8 +2588,9 @@ def main(argv: list[str] | None = None) -> None:
     p_su = sub.add_parser("self-update", help="update this CLI now (uv tool upgrade, else pip --upgrade)")
     p_su.add_argument("--dry-run", action="store_true", default=False,
                       help="only print the command that would run")
-    p_hook = sub.add_parser("hook", help="activity feed: Claude Code PreToolUse + PostToolUse hooks (pre-tool-use | post-tool-use | print | install [--settings PATH])")
-    p_hook.add_argument("action", choices=["pre-tool-use", "post-tool-use", "print", "install"])
+    p_hook = sub.add_parser("hook", help="activity feed: Claude Code hooks (pre-tool-use | post-tool-use | post-tool-use-failure | user-prompt-submit | stop | print | install [--settings PATH]); 0.15.0: other sessions report via ~/.voicehook/relay.json")
+    p_hook.add_argument("action", choices=["pre-tool-use", "post-tool-use", "post-tool-use-failure",
+                                           "user-prompt-submit", "stop", "print", "install"])
     p_hook.add_argument("--settings", default=None, metavar="PATH",
                         help="install: settings.json to merge into (default ~/.claude/settings.json)")
     # 0.13.0: manual activity line for agents without the hook
@@ -2549,6 +2627,8 @@ def main(argv: list[str] | None = None) -> None:
     p_bs.add_argument("--base", default=None, metavar="URL",
                       help="server base, e.g. https://voicehook.ai (default $VOICEHOOK_API_BASE or https://voicehook.ai)")
     p_bs.add_argument("--clear", action="store_true", default=False, help="delete the file")
+    p_bs.add_argument("--no-relay", action="store_true", default=False,
+                      help="0.15.0: do not mint ~/.voicehook/relay.json for the other sessions")
     args = ap.parse_args(argv)
     if args.cmd == "bridge-session":
         sys.exit(_run_bridge_session(args))

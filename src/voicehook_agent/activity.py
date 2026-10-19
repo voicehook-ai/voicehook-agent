@@ -34,6 +34,11 @@ Automatic flow (0.13.0):
   (Bearer session; 2 s timeout, at most one POST per 5 s, the latest line wins via a
   detached flusher, never blocking). 401/404/410 = session gone: the file is removed.
 
+0.15.0 multi-session relay: the same hook command also handles PostToolUseFailure,
+UserPromptSubmit and Stop and, when `~/.voicehook/relay.json` (written by the joining
+session) exists, reports turn goal, PR opened/merged, deploy and errors of EVERY Claude
+Code session of this machine to the call's activity relay (see multisession.py).
+
 This module stays stdlib-only (no livekit/httpx) so the hook starts fast.
 """
 from __future__ import annotations
@@ -70,14 +75,31 @@ HOOK_COMMAND = "voicehook-agent-hook post-tool-use"
 # 0.13.0. `|| true`: a PreToolUse hook exiting 2 BLOCKS the tool in Claude Code, and an
 # older voicehook-agent-hook on PATH (<0.13) answers an unknown subcommand with exit 2.
 HOOK_COMMAND_PRE = "voicehook-agent-hook pre-tool-use || true"
-HOOK_COMMANDS = {"PreToolUse": HOOK_COMMAND_PRE, "PostToolUse": HOOK_COMMAND}
+# 0.15.0 multi-session relay (see multisession.py). `|| true`: exit 2 on UserPromptSubmit
+# blocks the prompt and on Stop keeps the turn going; an older binary exits 2 on them.
+HOOK_COMMAND_PROMPT = "voicehook-agent-hook user-prompt-submit || true"
+HOOK_COMMAND_FAIL = "voicehook-agent-hook post-tool-use-failure || true"
+HOOK_COMMAND_STOP = "voicehook-agent-hook stop || true"
+HOOK_COMMANDS = {"PreToolUse": HOOK_COMMAND_PRE, "PostToolUse": HOOK_COMMAND,
+                 "PostToolUseFailure": HOOK_COMMAND_FAIL,
+                 "UserPromptSubmit": HOOK_COMMAND_PROMPT, "Stop": HOOK_COMMAND_STOP}
+NO_MATCHER_EVENTS = ("UserPromptSubmit", "Stop")  # Claude Code ignores matchers there
 # Commands that count as "our hook is already installed" (idempotent install).
 _OUR_COMMANDS = (HOOK_COMMAND, "voicehook-agent hook post-tool-use")
 _OUR_COMMANDS_BY_EVENT = {"PreToolUse": (HOOK_COMMAND_PRE, "voicehook-agent-hook pre-tool-use",
                                          "voicehook-agent hook pre-tool-use",
                                          "voicehook-agent hook pre-tool-use || true"),
-                          "PostToolUse": _OUR_COMMANDS}
+                          "PostToolUse": _OUR_COMMANDS,
+                          "PostToolUseFailure": (HOOK_COMMAND_FAIL,
+                                                 "voicehook-agent-hook post-tool-use-failure",
+                                                 "voicehook-agent hook post-tool-use-failure"),
+                          "UserPromptSubmit": (HOOK_COMMAND_PROMPT,
+                                               "voicehook-agent-hook user-prompt-submit",
+                                               "voicehook-agent hook user-prompt-submit"),
+                          "Stop": (HOOK_COMMAND_STOP, "voicehook-agent-hook stop",
+                                   "voicehook-agent hook stop")}
 HOOK_TIMEOUT = 5
+RELAY_HOOK_TIMEOUT = 3     # 0.15.0 relay events: settings timeout + internal alarm (s)
 
 REDACTED = "[redacted]"
 
@@ -251,9 +273,17 @@ def _private_dir(d: Path) -> Path:
 def _write_private(path: Path, text: str) -> None:
     """Write `text` atomically, mode 0600, never following a symlink."""
     tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
-        os.write(fd, text.encode("utf-8"))
+        tmp.unlink()  # a stale tmp (or a planted symlink) of an earlier run
+    except OSError:
+        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)  # umask or a pre-existing mode never widens it
+        data = text.encode("utf-8")
+        while data:
+            data = data[os.write(fd, data):]
     finally:
         os.close(fd)
     os.replace(tmp, path)
@@ -333,7 +363,11 @@ def save_bridge_session(answer: dict, base: str) -> Path:
         raise ValueError(f"base must be an http(s) URL, got {base!r}")
     _private_dir(state_root())
     path = state_root() / BRIDGE_SESSION_NAME
-    _write_private(path, json.dumps({"base": base, "session": session.strip()}))
+    data = {"base": base, "session": session.strip()}
+    owner = _own_session()
+    if owner:  # 0.15.0: only the joining session feeds this bridge session (no double lines)
+        data["owner_session"] = owner
+    _write_private(path, json.dumps(data))
     return path
 
 
@@ -352,7 +386,38 @@ def load_bridge_session() -> dict | None:
         return None
     if not isinstance(d, dict) or not d.get("base") or not d.get("session"):
         return None
-    return {"base": str(d["base"]), "session": str(d["session"])}
+    out = {"base": str(d["base"]), "session": str(d["session"])}
+    if isinstance(d.get("owner_session"), str) and d["owner_session"]:
+        out["owner_session"] = d["owner_session"]
+    return out
+
+
+# ----- 0.15.0: which Claude Code session owns a join (no double reporting) ---------
+def _own_session() -> str:
+    """Hash of the calling Claude Code session ('' outside Claude Code)."""
+    from . import multisession  # lazy: multisession imports this module
+    return multisession.own_session_hash()
+
+
+def _event_session(event: dict) -> str:
+    from . import multisession
+    return multisession.session_hash(event.get("session_id")) or _own_session()
+
+
+def dir_owner(dir_: Path) -> str:
+    """owner_session of a join dir (session.json), '' when unknown."""
+    try:
+        v = json.loads((dir_ / vsession.INFO_NAME).read_text(encoding="utf-8")).get("owner_session")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    return v if isinstance(v, str) else ""
+
+
+def _foreign(owner: str, session: str) -> bool:
+    """True when the join belongs to ANOTHER Claude Code session: that session's tool lines
+    reach the call only labeled through the relay (multisession.py), never as the joining
+    agent's own lines. Unknown owner or session: old behavior (False)."""
+    return bool(owner) and bool(session) and owner != session
 
 
 def _bridge_post(base: str, session: str, text: str,
@@ -374,15 +439,38 @@ def _bridge_post(base: str, session: str, text: str,
         return None
 
 
+# A detached child of the hook runs in the project dir of ANY Claude Code session. `python -m`
+# would put that cwd first on sys.path, so a hashlib.py/json.py of an untrusted repo would be
+# imported by a process that reads our 0600 files. Hence: -I (no cwd/script dir, no PYTHON*
+# env, no user site), the package dir inserted explicitly, cwd = our own state dir.
+_CHILD_BOOT = ("import sys; sys.path.insert(0, sys.argv.pop(1)); "
+               "from voicehook_agent.activity import console_main; console_main()")
+
+
+def child_argv(*args: str) -> list[str]:
+    """argv of a detached `voicehook-agent-hook <args>` child, isolated from the cwd."""
+    return [sys.executable, "-I", "-c", _CHILD_BOOT, str(Path(__file__).resolve().parents[1]), *args]
+
+
+def child_cwd() -> str:
+    """Working dir of a detached child: the state dir (ours, 0700), else home, else /."""
+    for d in (state_root(), Path.home()):
+        try:
+            if d.is_dir():
+                return str(d)
+        except OSError:
+            continue
+    return os.sep
+
+
 def _spawn_flusher(delay: float) -> None:
     """Detached `voicehook-agent-hook bridge-flush DELAY`: sends the pending line when
     the rate window ends. Best effort."""
     import subprocess
     try:
-        subprocess.Popen([sys.executable, "-m", "voicehook_agent.activity", "bridge-flush",
-                          f"{max(0.0, delay):.3f}"],
+        subprocess.Popen(child_argv("bridge-flush", f"{max(0.0, delay):.3f}"),
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, start_new_session=True)
+                         stderr=subprocess.DEVNULL, start_new_session=True, cwd=child_cwd())
     except Exception:  # noqa: BLE001
         return
 
@@ -558,13 +646,19 @@ def _handle(raw: str, phase: str, now: float | None) -> bool:
             return False
         tid = _tool_use_id(event)
         done = False
+        sess_key = _event_session(event)
         dir_ = target_dir()
+        if dir_ is not None and not (os.environ.get("VOICEHOOK_SESSION") or "").strip() \
+                and _foreign(dir_owner(dir_), sess_key):
+            dir_ = None  # 0.15.0: another session's join, the relay carries this session
         if dir_ is not None and not (phase == "post" and tid and _take_id(dir_ / IDS_NAME, tid)):
             append_line(dir_, format_line(event, now))
             if phase == "pre" and tid:
                 _remember_id(dir_ / IDS_NAME, tid)
             done = True
-        if load_bridge_session() is not None:   # 0.13.0: curl bridge join (Quickstart A)
+        bsess = load_bridge_session()
+        if bsess is not None and not _foreign(bsess.get("owner_session", ""), sess_key):
+            # 0.13.0: curl bridge join (Quickstart A), only the session that saved it
             ids = state_root() / BRIDGE_IDS_NAME
             if not (phase == "post" and tid and _take_id(ids, tid)):
                 done = bridge_send(bridge_text(event), now) or done
@@ -661,6 +755,15 @@ def _is_note(line: str) -> bool:
     return bool(m) and m.group(2) == NOTE_TOOL
 
 
+RELAY_TOOL = "relay"  # 0.15.0 local relay line of ANOTHER session (multisession.append_local)
+
+
+def is_relay(line: str) -> bool:
+    """A line of another Claude Code session, not the joining agent's own activity."""
+    m = _LINE_RX.match(line)
+    return bool(m) and m.group(2) == RELAY_TOOL
+
+
 class ActivityDue:
     """Is the activity log silent while the agent works?
 
@@ -685,6 +788,7 @@ class ActivityDue:
         old = set(self._last)
         new = [ln for ln in lines if ln not in old] or lines[-1:]
         self._last = list(lines)
+        new = [ln for ln in new if not is_relay(ln)]  # 0.15.0: other sessions do not count
         if not new:
             return
         self.line_at = now
@@ -717,8 +821,9 @@ class ActivityDue:
 # settings.json snippet + installer
 # --------------------------------------------------------------------------- #
 def hook_entry(event: str = "PostToolUse") -> dict:
-    return {"matcher": "*",
-            "hooks": [{"type": "command", "command": HOOK_COMMANDS[event], "timeout": HOOK_TIMEOUT}]}
+    timeout = HOOK_TIMEOUT if event in ("PreToolUse", "PostToolUse") else RELAY_HOOK_TIMEOUT
+    hooks = [{"type": "command", "command": HOOK_COMMANDS[event], "timeout": timeout}]
+    return {"hooks": hooks} if event in NO_MATCHER_EVENTS else {"matcher": "*", "hooks": hooks}
 
 
 def snippet() -> dict:
@@ -741,9 +846,9 @@ def _installed(entries: list, event: str = "PostToolUse") -> bool:
 
 
 def install(path: Path) -> tuple[int, str]:
-    """Merge the PreToolUse + PostToolUse hooks into settings.json. Idempotent (an
-    older Post-only install gets the Pre hook added); refuses to touch a file that
-    is not a JSON object."""
+    """Merge our hooks (Pre/PostToolUse; 0.15.0 also PostToolUseFailure, UserPromptSubmit,
+    Stop for the multi-session relay) into settings.json. Idempotent (an older install
+    gets the missing ones added); refuses to touch a file that is not a JSON object."""
     data: dict = {}
     if path.exists():
         try:
@@ -773,16 +878,73 @@ def install(path: Path) -> tuple[int, str]:
     return 0, f"installed {' + '.join(added)} hook{'s' if len(added) > 1 else ''} in {path}"
 
 
+def relay_hook(raw: str) -> None:
+    """0.15.0: the event to the multi-session activity relay (multisession.py). Never raises."""
+    try:
+        from . import multisession
+        multisession.handle_event(raw)
+    except Exception:  # noqa: BLE001
+        return
+
+
+class _Deadline(BaseException):  # not Exception: the handlers' `except Exception` let it pass
+    pass
+
+
+class _deadline:
+    """Hard cap for one hook run (SIGALRM where available): the hook gives up silently."""
+
+    def __init__(self, seconds: float) -> None:
+        self.seconds = seconds
+        self.old = None
+
+    def __enter__(self):
+        try:
+            import signal
+
+            def _on_alarm(signum, frame):
+                raise _Deadline()
+            self.old = signal.signal(signal.SIGALRM, _on_alarm)
+            signal.setitimer(signal.ITIMER_REAL, self.seconds)
+        except (ImportError, AttributeError, ValueError, OSError):
+            self.old = None
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            import signal
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            if self.old is not None:
+                signal.signal(signal.SIGALRM, self.old)
+        except (ImportError, AttributeError, ValueError, OSError):
+            pass
+        return exc_type is _Deadline
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     cmd = args[0] if args else ""
-    if cmd in ("pre-tool-use", "post-tool-use"):
+    if cmd in ("pre-tool-use", "post-tool-use", "post-tool-use-failure", "user-prompt-submit",
+               "stop"):
+        with _deadline(RELAY_HOOK_TIMEOUT):
+            try:
+                raw = sys.stdin.read()
+            except Exception:  # noqa: BLE001
+                raw = ""
+            if cmd == "pre-tool-use":
+                pre_tool_use(raw)
+            elif cmd == "post-tool-use":
+                post_tool_use(raw)
+            if cmd != "pre-tool-use":  # 0.15.0: other sessions -> relay of the running call
+                relay_hook(raw)
+        return 0  # always 0, nothing on stdout (PreToolUse: no output = allow)
+    if cmd == "relay-post":  # 0.15.0: detached child of the hook, text on stdin
+        from . import multisession
         try:
             raw = sys.stdin.read()
         except Exception:  # noqa: BLE001
             raw = ""
-        (pre_tool_use if cmd == "pre-tool-use" else post_tool_use)(raw)
-        return 0  # always 0, nothing on stdout (PreToolUse: no output = allow)
+        return multisession.relay_post_main(raw)
     if cmd == "bridge-flush":
         try:
             delay = float(args[1]) if len(args) > 1 else 0.0
@@ -806,8 +968,8 @@ def main(argv: list[str] | None = None) -> int:
         rc, msg = install(path)
         print(msg, file=sys.stderr if rc else sys.stdout)
         return rc
-    print("usage: voicehook-agent hook {pre-tool-use|post-tool-use|print|install [--settings PATH]}",
-          file=sys.stderr)
+    print("usage: voicehook-agent hook {pre-tool-use|post-tool-use|post-tool-use-failure|"
+          "user-prompt-submit|stop|print|install [--settings PATH]}", file=sys.stderr)
     return 2
 
 

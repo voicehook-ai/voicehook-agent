@@ -307,6 +307,22 @@ class BridgeRoom:
                 pass
         await self._close_http()
 
+    async def mint_relay(self, label: str) -> dict | None:
+        """0.15.0: POST /api/bridge/activity/relay-token {label} with this bridge session:
+        {token, url, expires_in} for the other Claude Code sessions of this machine, or None.
+        Never raises."""
+        if self._http is None or not self._session or self._closed:
+            return None
+        try:
+            r = await self._http.post(f"{self.api_base}/api/bridge/activity/relay-token",
+                                      headers=self._auth(), json={"label": label}, timeout=5.0)
+            j = r.json() if r.status_code == 200 else None
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(j, dict) or not j.get("token") or not j.get("url"):
+            return None
+        return {"token": j["token"], "url": j["url"], "expires_in": j.get("expires_in")}
+
     # ---- internals ---------------------------------------------------------- #
     def _auth(self) -> dict:
         return {"authorization": f"Bearer {self._session}"}
