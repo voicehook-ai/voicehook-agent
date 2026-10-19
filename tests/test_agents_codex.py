@@ -335,7 +335,7 @@ def test_mcp_own_join_goes_to_the_control_socket(monkeypatch):
 
 
 def test_board_answer_passes_through_on_codex_events(monkeypatch):
-    """board.py (0.19.0) answers with additionalContext / a Stop decision: Codex reads the
+    """board.py (0.21.0) answers with additionalContext / a Stop decision: Codex reads the
     same JSON, the adapter prints it unchanged (only on events Codex reads stdout of)."""
     seen = []
 

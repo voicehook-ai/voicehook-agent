@@ -43,6 +43,11 @@ Code session of this machine to the call's activity relay (see multisession.py).
 session that waits for the human into the call: a decision on the Decision Board plus a
 feed line (see notify.py). Never an automatic approval.
 
+0.21.0: a helper session whose own status board is older than 3 min (or missing) while it
+works gets a short reminder as `hookSpecificOutput.additionalContext` on PostToolUse /
+UserPromptSubmit (at most one per 3 min); after 15 min idle following a Stop its board is
+cleared (see board.py). The only stdout of the hook, never a decision.
+
 This module stays stdlib-only (no livekit/httpx) so the hook starts fast.
 """
 from __future__ import annotations
@@ -88,12 +93,15 @@ HOOK_COMMAND_STOP = "voicehook-agent-hook stop || true"
 # events; the hook never prints, so a PermissionRequest stays the human's decision.
 HOOK_COMMAND_NOTIFY = "voicehook-agent-hook notification || true"
 HOOK_COMMAND_PERMISSION = "voicehook-agent-hook permission-request || true"
+# 0.21.0 (board.py): answers to the session's questions right at (re)start
+HOOK_COMMAND_START = "voicehook-agent-hook session-start || true"
 HOOK_COMMANDS = {"PreToolUse": HOOK_COMMAND_PRE, "PostToolUse": HOOK_COMMAND,
                  "PostToolUseFailure": HOOK_COMMAND_FAIL,
                  "UserPromptSubmit": HOOK_COMMAND_PROMPT, "Stop": HOOK_COMMAND_STOP,
                  "Notification": HOOK_COMMAND_NOTIFY,
-                 "PermissionRequest": HOOK_COMMAND_PERMISSION}
-NO_MATCHER_EVENTS = ("UserPromptSubmit", "Stop")  # Claude Code ignores matchers there
+                 "PermissionRequest": HOOK_COMMAND_PERMISSION,
+                 "SessionStart": HOOK_COMMAND_START}
+NO_MATCHER_EVENTS = ("UserPromptSubmit", "Stop", "SessionStart")  # Claude Code ignores matchers there
 # Commands that count as "our hook is already installed" (idempotent install).
 _OUR_COMMANDS = (HOOK_COMMAND, "voicehook-agent hook post-tool-use")
 _OUR_COMMANDS_BY_EVENT = {"PreToolUse": (HOOK_COMMAND_PRE, "voicehook-agent-hook pre-tool-use",
@@ -112,7 +120,9 @@ _OUR_COMMANDS_BY_EVENT = {"PreToolUse": (HOOK_COMMAND_PRE, "voicehook-agent-hook
                                            "voicehook-agent hook notification"),
                           "PermissionRequest": (HOOK_COMMAND_PERMISSION,
                                                 "voicehook-agent-hook permission-request",
-                                                "voicehook-agent hook permission-request")}
+                                                "voicehook-agent hook permission-request"),
+                          "SessionStart": (HOOK_COMMAND_START, "voicehook-agent-hook session-start",
+                                           "voicehook-agent hook session-start")}
 HOOK_TIMEOUT = 5
 RELAY_HOOK_TIMEOUT = 3     # 0.15.0 relay events: settings timeout + internal alarm (s)
 
@@ -911,6 +921,18 @@ def notify_hook(raw: str) -> None:
         return
 
 
+PRINT_COMMANDS = ("post-tool-use", "user-prompt-submit", "session-start", "stop")
+
+
+def board_hook(raw: str) -> dict | None:
+    """0.21.0: session state, board reminder, answers, idle clear (board.py). Never raises."""
+    try:
+        from . import board
+        return board.handle(raw)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def notify_progress(raw: str) -> None:
     try:
         from . import notify
@@ -957,7 +979,8 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     cmd = args[0] if args else ""
     if cmd in ("pre-tool-use", "post-tool-use", "post-tool-use-failure", "user-prompt-submit",
-               "stop", "notification", "permission-request"):
+               "stop", "notification", "permission-request", "session-start"):
+        out = None
         with _deadline(RELAY_HOOK_TIMEOUT):
             try:
                 raw = sys.stdin.read()
@@ -965,23 +988,38 @@ def main(argv: list[str] | None = None) -> int:
                 raw = ""
             if cmd in ("notification", "permission-request"):
                 notify_hook(raw)  # 0.18.0: question/permission -> Decision Board + feed
-                return 0
-            if cmd == "pre-tool-use":
+            elif cmd == "pre-tool-use":
                 pre_tool_use(raw)
                 if '"AskUserQuestion"' in raw:
                     notify_hook(raw)
-            elif cmd == "post-tool-use":
-                post_tool_use(raw)
-            if cmd != "pre-tool-use":  # 0.15.0: other sessions -> relay of the running call
-                relay_hook(raw)
+            elif cmd != "session-start":
+                if cmd == "post-tool-use":
+                    post_tool_use(raw)
+                relay_hook(raw)  # 0.15.0: other sessions -> relay of the running call
                 notify_progress(raw)  # 0.18.0: the session goes on, its question leaves
-        return 0  # always 0, nothing on stdout (PreToolUse: no output = allow)
+            # 0.21.0 (board.py): session state, board reminder, answers to own questions
+            out = board_hook(raw)
+        if out and cmd in PRINT_COMMANDS:
+            print(json.dumps(out, ensure_ascii=False), flush=True)
+        # always 0. stdout: only 0.21.0 additionalContext (Post/Prompt/SessionStart) or, on
+        # Stop with a new answer to one of the session's questions, decision block + reason
+        return 0
     if cmd in ("codex", "codex-notify"):  # 0.20.0: Codex CLI hooks + notify (agents.py)
         from . import agents
         return agents.main(args)
     if cmd == "mcp":  # 0.20.0: local MCP server (status/decide/next/activity), stdio
         from . import mcpserver
         return mcpserver.main(args[1:])
+    if cmd == "board-idle":  # 0.21.0: detached sleeper of the Stop hook
+        from . import board
+        return board.idle_main(args[1] if len(args) > 1 else "")
+    if cmd == "board-post":  # 0.21.0: detached child of the hook (session state), job on stdin
+        from . import board
+        try:
+            raw = sys.stdin.read()
+        except Exception:  # noqa: BLE001
+            raw = ""
+        return board.post_main(raw)
     if cmd == "notify-post":  # 0.18.0: detached child of the hook, job on stdin
         from . import notify
         try:
@@ -1026,7 +1064,7 @@ def main(argv: list[str] | None = None) -> int:
         print(msg, file=sys.stderr if rc else sys.stdout)
         return rc
     print("usage: voicehook-agent hook {pre-tool-use|post-tool-use|post-tool-use-failure|"
-          "user-prompt-submit|stop|notification|permission-request|"
+          "user-prompt-submit|stop|notification|permission-request|session-start|"
           "print [--agent claude|codex]|install [--agent claude|codex] [--settings PATH] "
           "[--codex-home DIR]|codex <event>|codex-notify <json>|mcp [--agent NAME]}",
           file=sys.stderr)
