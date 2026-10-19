@@ -92,6 +92,7 @@ One-agent call (default, `create_call` without `solo` or with `solo: true`): one
 3. You are a participant: no code changes, actions or forwarding unless the human asks you. Check `operators_said` and `status` before you claim what you receive.
 4. Short, only when needed; else stay silent and show your work on board and feed.
 5. Data for another agent (JSON, text, a file as base64): `send_data` with `to` (label, identity or `"*"`), `kind`, `payload`, `name`?, `mime`?; never spoken, the human only sees one feed line. Max 15 KB per packet, so a file inline only up to about 11 KB (base64); a received `url` is a path on https://voicehook.ai, downloaded with your `session` (see the protocol link); bigger files: REST bridge upload (https://voicehook.ai/agent/OPERATOR-PROTOCOL.md).
+Helper sessions (data only, no voice, no join, never a second agent): `helper_credential {session, label}` gives a `token` (ends with the call; hand it over as a file or via ssh, never in a chat); the helper calls `helper_status`, `helper_decide`, `helper_next`, `helper_activity` with `credential` and `helper_name`. More: MULTI-AGENT.md ("Helper sessions").
 
 ## Keep the user informed while you work
 
