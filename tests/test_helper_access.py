@@ -145,6 +145,38 @@ def test_answer_goes_to_helper_inbox():
     assert http.posts == [(PUMP_URL + "/answer", {"sender": "Mac: A", "event": ev}, {"authorization": f"Bearer {PUMP}"})]
 
 
+def test_answer_returns_server_copy_into_own_next():
+    """0.18.1: the server answers /answer with the copy helper_decision; it lands in our next."""
+    copy = {"type": "helper_decision", "from": "SE To-dos", "label": "Mac", "id": "d1", "number": 2,
+            "question": "Deploy?", "verdict": "yes", "by": "Oliver", "ts": 1.0}
+    ctl = cli._Control("room-a", "claude-1", None, None, 0, 0)
+    ctl.helper_pump = vhelp.Pump("https://voicehook.ai", PUMP_URL, PUMP)
+    ctl.helper_http = FakeHttp([], post_body={"ok": True, "helper_decision": copy})
+    ev = {"type": "decision", "id": "d1", "number": 2, "verdict": "yes", "sender": "Mac: SE To-dos", "by": "Oliver"}
+
+    async def go():
+        ctl.events.arm()
+        await cli._answer_helper(ctl, "Mac: SE To-dos", ev)
+        return await ctl.events.get(0)
+    got = asyncio.run(go())
+    assert {k: v for k, v in got.items() if k != "hint"} == copy and "SendMessage" in got["hint"]
+    # older server (no copy): built from the worker event, sender split at ": "
+    ctl.helper_http = FakeHttp([], post_body={"ok": True})
+    got = asyncio.run(go())
+    assert (got["type"], got["from"], got["label"], got["question"], got["verdict"]) == (
+        "helper_decision", "SE To-dos", "Mac", "", "yes")
+    assert asyncio.run(vhelp.Pump("https://voicehook.ai", PUMP_URL, PUMP).answer(
+        FakeHttp([], post_status=503), "Mac: A", ev)) is None
+
+
+def test_helper_decision_event_other_and_changed():
+    from voicehook_agent import relay
+    ev = relay.helper_decision_event({"type": "decision", "id": "d2", "number": 1, "verdict": "other",
+                                      "answer": "lieber Blau", "changed": True, "by": "O", "sender": "solo"})
+    assert (ev["from"], ev["label"], ev["text"], ev["changed"]) == ("solo", "", "lieber Blau", True)
+    assert "option" not in ev
+
+
 def test_rotate_adopts_new_pump_token():
     http = FakeHttp([], post_body={"ok": True, "token": "new.tok", "url": URL, "expires_in": 60,
                                    "pump": {"token": "new.pump", "url": PUMP_URL}})

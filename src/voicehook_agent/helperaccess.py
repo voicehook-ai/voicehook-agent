@@ -121,13 +121,16 @@ class Pump:
             await http.post(self.url + "/result", json={"id": str(item.get("id") or ""), "result": res},
                             headers=self._auth(), timeout=HTTP_TIMEOUT_S)
 
-    async def answer(self, http, sender: str, event: dict) -> None:
-        """The human answered a helper's question: into that helper's inbox on the server."""
+    async def answer(self, http, sender: str, event: dict) -> dict | None:
+        """The human answered a helper's question: into that helper's inbox on the server.
+        0.18.1: the server's answer (with the copy `helper_decision` for our own `next`)."""
         try:
-            await http.post(self.url + "/answer", json={"sender": sender, "event": event},
-                            headers=self._auth(), timeout=HTTP_TIMEOUT_S)
-        except Exception:  # noqa: BLE001, S110  best effort, the helper polls again
-            pass
+            r = await http.post(self.url + "/answer", json={"sender": sender, "event": event},
+                                headers=self._auth(), timeout=HTTP_TIMEOUT_S)
+            out = r.json() if r.status_code == 200 else None
+        except Exception:  # noqa: BLE001  best effort, the helper polls again
+            return None
+        return out if isinstance(out, dict) else None
 
     async def credential(self, http, label: str, rotate: bool = False) -> dict | None:
         out = await mint(http, self.api_base, self.token, label, rotate=rotate)

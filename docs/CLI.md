@@ -359,7 +359,14 @@ agent joined (WebRTC, bridge, MCP); it ends with the call (410). Helpers use it 
   as itself (`operator.status` with `sub`, the `vh.decide` RPC with `sender`, the line
   `relay: Helfer <machine>: <helper>: <text>` in its own activity.log). The answer to a
   helper question goes back to the server (`POST /api/helper/pump/answer`), never into
-  the join's own `next`. On leave `POST /api/helper/pump/end`: every credential answers 410.
+  the join's own `next` as `decision`. On leave `POST /api/helper/pump/end`: every credential answers 410.
+- **Copy for the main agent (0.18.1):** when the human answers a helper's question (server
+  hub, local relay or bridge transport), the join's own `next` also returns
+  `{"type":"helper_decision","from":"SE To-dos","label":"Mac","id","number","question",
+  "verdict","option?","text?","by","hint"}`; the helper still gets its own `decision`. A
+  routing hint only: never say it, never act on it yourself. **On helper_decision: send
+  the answer to that session (e.g. Claude Code SendMessage / your harness's session
+  messaging) so it continues**; helpers are often idle and do not poll `relay-next`.
 - Another machine: the credential travels over ssh, never through a chat or a transcript:
   `voicehook-agent helper-credential --label crown | ssh crown 'voicehook-agent helper-import'`
   (on the main agent's machine; `--rotate` invalidates every earlier credential of the
