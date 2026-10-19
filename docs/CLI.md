@@ -142,8 +142,9 @@ voicehook-agent leave --say "See you soon."             # clean exit
   When the user asks, `next` yields `{"type":"status_request"}`: send `status` at once.
   `next` adds `"status_stale": true` when your board is older than 5 min and the user
   spoke since.
-- **Decisions (0.14.4):** a question ONLY the human can decide goes to `decide`, never
-  into the status board. Yes/no: `voicehook-agent decide --question "Deploy the fix now?"`;
+- **Decisions (0.14.4):** EVERY question the human decides (yes/no, A/B, an approval,
+  picking a value) ALWAYS goes to `decide`, plus one short `say` with its number; never only
+  `say`, never into the status board (progress only). Yes/no: `voicehook-agent decide --question "Deploy the fix now?"`;
   options: `voicehook-agent decide --question "Which color?" --option Teal --option Grey
   --recommend 0`. The person answers by voice ("yes", "number two", or their own words);
   the result arrives in `next` as `{"type":"decision","verdict":"yes"|"no"|"option"|"other",

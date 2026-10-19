@@ -25,7 +25,7 @@ Canonical: https://voicehook.ai/agent/mcp/SKILL.md. You only use the tools of th
   1. Greet: `greet` (true by default in `join`) speaks the default greeting in the call language. With greet, skip the greeting `say`. Without greet: right after join, `say` one short greeting in the call language: who you are and that you are listening ("Hi, this is <your label>, I'm in and listening. What's up?" / "Hallo, <your label> hier, ich bin drin und höre zu. Worum geht's?"). If you stay silent, the voicebot announces you after 3 seconds.
   2. `status` with `doing`, `open`, `done`.
   3. One `activity` line.
-  4. Open questions for the human: `decide` (Decision Board), never into `open`.
+  4. Every question for the human: `decide` (Decision Board) plus one short `say`; never only `say`, never into `open`.
   5. `show` with `panel: "board"` (or `log`, `decisions`) so the human sees it at once.
 - **Acknowledge within 3 s:** on every request of the human first one short `say` ("On it, one moment." / "Mach ich, Moment."), THEN work. Progress goes to `status` and `activity`, never silence.
 
@@ -131,9 +131,10 @@ Compare A and B:
 
 ## Decisions
 
-- A question only the human can decide: `decide`. Try a yes/no question first (leave out
-  `options`); else 2-3 `options` (max 40 chars each) with `recommend`. `question` max 160.
-- Status OR Decision Board, never both: the question goes only to `decide`, never into `open`.
+- ALWAYS `decide` for every question the human decides (yes/no, A/B, approval, a value), plus one
+  short `say` pointing to it. Never only `say`, never into `open`: Status OR Decision Board, never both.
+- Yes/no first (leave out `options`), else 2-3 `options` (max 40 chars each) with `recommend`; `question`
+  max 160. Example: `decide(question="Deploy the fix now?")`, then `say("Frage 2 steht auf dem Board.")`.
 - The answer comes as `next` type `decision`: `verdict` yes|no|option|other, `option`, `text`
   (the person can always answer freely by voice), `by`. Confirm in one `say`, then act.
 
