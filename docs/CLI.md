@@ -254,7 +254,18 @@ keys and hooks, refuses to touch invalid JSON):
 ```bash
 voicehook-agent hook install              # or: --settings PATH
 voicehook-agent hook print                # the snippet, to paste by hand
+voicehook-agent doctor                    # 0.21.0: installed + runnable without ~/.local/bin?
 ```
+
+0.21.0: the commands carry the **absolute path** of `voicehook-agent-hook` (PATH at install
+time, else next to this Python; a symlink such as uv tool's `~/.local/bin` link is kept, so
+`uv tool upgrade` does not break it; `$VOICEHOOK_HOOK_BIN` overrides). Claude Code runs hooks
+with `/bin/sh` and the session's PATH; a session started by a service or `claude --resume`
+from a unit often has no `~/.local/bin`, and a bare `voicehook-agent-hook` was "not found" on
+every tool call. Re-running `hook install` rewrites an older bare (or moved) command in
+place, never twice. `voicehook-agent doctor` checks every hook of ours under `/bin/sh` with
+`PATH=/usr/bin:/bin`: `ok` / `FAIL` per event, exit 1 with the fix (`hook install`).
+The snippet below shows the bare form.
 
 ```json
 {"hooks": {

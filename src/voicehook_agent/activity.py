@@ -845,35 +845,83 @@ class ActivityDue:
 # --------------------------------------------------------------------------- #
 # settings.json snippet + installer
 # --------------------------------------------------------------------------- #
-def hook_entry(event: str = "PostToolUse") -> dict:
+HOOK_BIN = "voicehook-agent-hook"
+HOOK_BIN_ENV = "VOICEHOOK_HOOK_BIN"
+# Claude Code runs hook commands with /bin/sh and the PATH of the session; a session started
+# by a service or `claude --resume` from a unit often has no ~/.local/bin in PATH, so a bare
+# `voicehook-agent-hook` is "not found" on every tool call (crown, 19.10.2026). Hence 0.21.0:
+# `hook install` writes the absolute path. Doctor checks with this minimal PATH.
+MINIMAL_PATH = "/usr/bin:/bin"
+_OUR_BIN_RX = re.compile(r"^(?:'[^']*/voicehook-agent-hook'|\"[^\"]*/voicehook-agent-hook\"|"
+                         r"[^\s'\"]*/voicehook-agent-hook)(?=\s|$)")
+
+
+def hook_bin() -> str:
+    """Absolute path of `voicehook-agent-hook` for settings.json: $VOICEHOOK_HOOK_BIN, else
+    PATH, else next to this Python (venv / uv tool), else the bare name. Symlinks are kept
+    (uv tool's ~/.local/bin link survives upgrades)."""
+    env = (os.environ.get(HOOK_BIN_ENV) or "").strip()
+    if env:
+        return env
+    import shutil
+    cand = shutil.which(HOOK_BIN)
+    if not cand:
+        p = Path(sys.executable).parent / HOOK_BIN
+        cand = str(p) if p.is_file() and os.access(p, os.X_OK) else ""
+    return str(Path(cand).absolute()) if cand else HOOK_BIN
+
+
+def _with_bin(command: str, exe: str) -> str:
+    if exe == HOOK_BIN or not command.startswith(HOOK_BIN + " "):
+        return command
+    import shlex
+    return shlex.quote(exe) + command[len(HOOK_BIN):]
+
+
+def normalize_command(command: object) -> str:
+    """A hook command with an absolute (or quoted) path to voicehook-agent-hook -> the bare
+    form, so an install with any path counts as ours."""
+    return _OUR_BIN_RX.sub(HOOK_BIN, str(command or "").strip(), count=1)
+
+
+def hook_entry(event: str = "PostToolUse", exe: str = HOOK_BIN) -> dict:
     timeout = HOOK_TIMEOUT if event in ("PreToolUse", "PostToolUse") else RELAY_HOOK_TIMEOUT
-    hooks = [{"type": "command", "command": HOOK_COMMANDS[event], "timeout": timeout}]
+    hooks = [{"type": "command", "command": _with_bin(HOOK_COMMANDS[event], exe), "timeout": timeout}]
     return {"hooks": hooks} if event in NO_MATCHER_EVENTS else {"matcher": "*", "hooks": hooks}
 
 
-def snippet() -> dict:
-    return {"hooks": {ev: [hook_entry(ev)] for ev in HOOK_COMMANDS}}
+def snippet(exe: str = HOOK_BIN) -> dict:
+    return {"hooks": {ev: [hook_entry(ev, exe)] for ev in HOOK_COMMANDS}}
 
 
 def default_settings_path() -> Path:
     return Path.home() / ".claude" / "settings.json"
 
 
-def _installed(entries: list, event: str = "PostToolUse") -> bool:
+def _our_hooks(entries: list, event: str = "PostToolUse") -> list[dict]:
     ours = _OUR_COMMANDS_BY_EVENT[event]
+    out = []
     for e in entries:
         if not isinstance(e, dict):
             continue
         for h in e.get("hooks") or []:
-            if isinstance(h, dict) and str(h.get("command", "")).strip() in ours:
-                return True
-    return False
+            if isinstance(h, dict) and normalize_command(h.get("command", "")) in ours:
+                out.append(h)
+    return out
 
 
-def install(path: Path) -> tuple[int, str]:
+def _installed(entries: list, event: str = "PostToolUse") -> bool:
+    return bool(_our_hooks(entries, event))
+
+
+def install(path: Path, exe: str | None = None) -> tuple[int, str]:
     """Merge our hooks (Pre/PostToolUse; 0.15.0 also PostToolUseFailure, UserPromptSubmit,
-    Stop for the multi-session relay; 0.18.0 Notification, PermissionRequest) into settings.json. Idempotent (an older install
-    gets the missing ones added); refuses to touch a file that is not a JSON object."""
+    Stop for the multi-session relay; 0.18.0 Notification, PermissionRequest; 0.21.0
+    SessionStart) into settings.json. Idempotent (an older install gets the missing ones
+    added); 0.21.0: commands carry the absolute path of voicehook-agent-hook (hook_bin), an
+    existing entry of ours with another command is rewritten in place. Refuses to touch a
+    file that is not a JSON object."""
+    exe = hook_bin() if exe is None else exe
     data: dict = {}
     if path.exists():
         try:
@@ -890,17 +938,77 @@ def install(path: Path) -> tuple[int, str]:
     for ev in HOOK_COMMANDS:
         if hooks.get(ev) is not None and not isinstance(hooks.get(ev), list):
             return 1, f"[error] {path}: 'hooks.{ev}' is not a list; not changed."
-    added = []
-    for ev in HOOK_COMMANDS:
+    added, updated = [], []
+    for ev, template in HOOK_COMMANDS.items():
         entries = hooks.setdefault(ev, [])
-        if not _installed(entries, ev):
-            entries.append(hook_entry(ev))
+        want = _with_bin(template, exe)
+        mine = _our_hooks(entries, ev)
+        if not mine:
+            entries.append(hook_entry(ev, exe))
             added.append(ev)
-    if not added:
-        return 0, f"already installed in {path}"
+            continue
+        for h in mine:
+            if h.get("command") != want:
+                h["command"] = want
+                if ev not in updated:
+                    updated.append(ev)
+    if not added and not updated:
+        return 0, f"already installed in {path} ({exe})"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    return 0, f"installed {' + '.join(added)} hook{'s' if len(added) > 1 else ''} in {path}"
+    parts = []
+    if added:
+        parts.append(f"installed {' + '.join(added)} hook{'s' if len(added) > 1 else ''}")
+    if updated:
+        parts.append(f"updated {' + '.join(updated)} to {exe}")
+    return 0, "; ".join(parts) + f" in {path}"
+
+
+def _resolves(word: str) -> bool:
+    """Does `word` (the first word of a hook command) run under /bin/sh with MINIMAL_PATH?"""
+    import subprocess
+    try:
+        r = subprocess.run(["/bin/sh", "-c", 'command -v "$1" >/dev/null', "sh", word],
+                           env={"PATH": MINIMAL_PATH, "HOME": str(Path.home())},
+                           capture_output=True, timeout=5, check=False)
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def doctor(path: Path) -> tuple[int, list[str]]:
+    """0.21.0 `voicehook-agent doctor`: are our hooks in settings.json and does each command
+    run under /bin/sh with a minimal PATH (as a session started by a service sees it)?"""
+    import shlex
+    lines: list[str] = []
+    rc = 0
+    try:
+        data = json.loads(path.read_text(encoding="utf-8") or "{}")
+        hooks = data.get("hooks") if isinstance(data, dict) else None
+    except (OSError, ValueError) as e:
+        return 1, [f"FAIL settings: {path} not readable ({type(e).__name__}); run voicehook-agent hook install"]
+    hooks = hooks if isinstance(hooks, dict) else {}
+    for ev in HOOK_COMMANDS:
+        entries = hooks.get(ev) if isinstance(hooks.get(ev), list) else []
+        mine = _our_hooks(entries, ev)
+        if not mine:
+            rc = 1
+            lines.append(f"FAIL {ev}: not installed (voicehook-agent hook install)")
+            continue
+        for h in mine:
+            cmd = str(h.get("command") or "")
+            try:
+                word = shlex.split(cmd)[0]
+            except (ValueError, IndexError):
+                word = ""
+            if word and _resolves(word):
+                lines.append(f"ok   {ev}: {word}")
+            else:
+                rc = 1
+                lines.append(f"FAIL {ev}: {word or cmd!r} not found under /bin/sh with "
+                             f"PATH={MINIMAL_PATH} (sessions started by a service see no "
+                             "~/.local/bin): run voicehook-agent hook install")
+    return rc, lines
 
 
 def relay_hook(raw: str) -> None:
@@ -1041,6 +1149,18 @@ def main(argv: list[str] | None = None) -> int:
             delay = 0.0
         bridge_flush(delay=delay)
         return 0
+    if cmd == "doctor":  # 0.21.0: hooks installed and runnable without ~/.local/bin in PATH?
+        opts, err = _install_opts(args[1:])
+        if err:
+            print(f"[error] {err}", file=sys.stderr)
+            return 2
+        path = opts["settings"] or default_settings_path()
+        rc, lines = doctor(path)
+        print(f"voicehook-agent doctor: {path}")
+        print("\n".join(lines))
+        if rc:
+            print(f"-> fix: voicehook-agent hook install  (writes {hook_bin()})")
+        return rc
     if cmd in ("print", "install"):
         opts, err = _install_opts(args[1:])
         if err:
@@ -1064,7 +1184,7 @@ def main(argv: list[str] | None = None) -> int:
         print(msg, file=sys.stderr if rc else sys.stdout)
         return rc
     print("usage: voicehook-agent hook {pre-tool-use|post-tool-use|post-tool-use-failure|"
-          "user-prompt-submit|stop|notification|permission-request|session-start|"
+          "user-prompt-submit|stop|notification|permission-request|session-start|doctor|"
           "print [--agent claude|codex]|install [--agent claude|codex] [--settings PATH] "
           "[--codex-home DIR]|codex <event>|codex-notify <json>|mcp [--agent NAME]}",
           file=sys.stderr)

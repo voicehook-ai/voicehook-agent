@@ -3122,7 +3122,8 @@ def main(argv: list[str] | None = None) -> None:
     p_hook = sub.add_parser("hook", help="activity feed: Claude Code hooks (pre-tool-use | post-tool-use | post-tool-use-failure | user-prompt-submit | stop | notification | permission-request | print | install [--settings PATH]); 0.15.0: other sessions report via ~/.voicehook/relay.json; 0.18.0: permission prompts and questions of every session as decisions")
     p_hook.add_argument("action", choices=["pre-tool-use", "post-tool-use", "post-tool-use-failure",
                                            "user-prompt-submit", "stop", "notification",
-                                           "permission-request", "print", "install"])
+                                           "permission-request", "session-start", "doctor",
+                                           "print", "install"])
     p_hook.add_argument("--settings", default=None, metavar="PATH",
                         help="install: settings.json to merge into (default ~/.claude/settings.json)")
     p_hook.add_argument("--agent", choices=["claude", "codex"], default=None,
@@ -3130,6 +3131,12 @@ def main(argv: list[str] | None = None) -> None:
                              "(hooks.json + notify + MCP server in $CODEX_HOME, backup first)")
     p_hook.add_argument("--codex-home", default=None, metavar="DIR",
                         help="install --agent codex: Codex config dir (default $CODEX_HOME or ~/.codex)")
+    # 0.21.0: hooks installed and runnable for sessions started without ~/.local/bin in PATH
+    p_doc = sub.add_parser(
+        "doctor", help="check the Claude Code hooks: installed in settings.json and runnable under "
+        "/bin/sh with a minimal PATH (as a session started by a service sees it); exit 1 + fix hint")
+    p_doc.add_argument("--settings", default=None, metavar="PATH",
+                       help="settings.json to check (default ~/.claude/settings.json)")
     # 0.20.0 local MCP server for agents without Claude Code hooks (Codex CLI, ...)
     p_mcp = sub.add_parser(
         "mcp", help="local MCP server over stdio: status, decide, next, activity for this "
@@ -3208,6 +3215,8 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(_run_bridge_session(args))
     if args.cmd == "self-update":
         sys.exit(_run_self_update(args.dry_run))
+    if args.cmd == "doctor":
+        sys.exit(vactivity.main(["doctor"] + (["--settings", args.settings] if args.settings else [])))
     if args.cmd == "hook":
         hook_argv = [args.action] + (["--settings", args.settings] if args.settings else []) \
             + (["--agent", args.agent] if args.agent else []) \
