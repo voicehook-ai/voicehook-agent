@@ -71,6 +71,7 @@ MCP/bridge = one agent in the call; activity lines are only what that agent writ
 | `timeout` | silence (also `reconnect: true` = server restart); `humans_present` (in `join` and every `next`) `0` or `human_away: true` after `join` = the person is out right now | call `next` again; never create a new room or call |
 | `human_left` | the person dropped out; the call stays open `grace_s` s for them to come back | keep calling `next`, do not leave, never create a new room |
 | `human_rejoined` | the person is back (also when you joined while they were out) | greet them briefly in one `say` (not with `greeted: true`: your join `greet` was just spoken), go on |
+| `voicebot_left` / `voicebot_back` | the voicebot dropped out (e.g. server update; usually back within ~20 s, the person may hear silence) / is back after `seconds` | tell your user in chat (a `say` is not heard), keep calling `next`, never leave or create a new call / `say` works again, repeat the last important point briefly |
 | `operator` | another agent addressed YOU (`addressed_to_you: true`, max 1 per 5 s) | answer that agent |
 | `context` | the call language changed: new `context` block | speak `context.lang` from now on |
 | `data` | another agent sent you data with `send_data`: `from`, `kind` (`json`/`text`/`file`), `payload` (or `url` for a big file), `name`?, `mime`? | use it; never speak it |
@@ -87,12 +88,14 @@ or ambiguous) and `addressed_to_you`; `operators_said` lines also `to_human` (no
 ## One agent per call (solo), or several (rules: https://voicehook.ai/agent/MULTI-AGENT.md)
 
 One-agent call (default, `create_call` without `solo` or with `solo: true`): one agent per call, a second `join` gets `409`. Delta speaks in your voice (`join` `voice`) and in first person, as you, only from your `status`, `activity` and `decide`, each item once. Stream what you do there, step by step: Delta speaks it as you; use `say` only for urgent or verbatim text. `send_data` never reaches Delta. Several agents (`create_call` with `solo: false`), these rules are binding:
-1. Read `operators_said` in EVERY `next` result, `timeout` too. Answer only when `addressed_to_you` (or clearly meant); someone else or Delta addressed: stay silent.
+1. Read `operators_said` in EVERY `next` result, `timeout` too. Answer only when `addressed_to_you` (or clearly meant); someone else or Delta addressed: stay silent (except `routed_by_delta`: Delta handed you the request, do it).
 2. Never answer another agent's question to the human; never ask Delta yourself. Speak only `context.lang`, greeting included.
 3. You are a participant: no code changes, actions or forwarding unless the human asks you. Check `operators_said` and `status` before you claim what you receive.
 4. Short, only when needed; else stay silent and show your work on board and feed.
 5. Data for another agent (JSON, text, a file as base64): `send_data` with `to` (label, identity or `"*"`), `kind`, `payload`, `name`?, `mime`?; never spoken, the human only sees one feed line. Max 15 KB per packet, so a file inline only up to about 11 KB (base64); a received `url` is a path on https://voicehook.ai, downloaded with your `session` (see the protocol link); bigger files: REST bridge upload (https://voicehook.ai/agent/OPERATOR-PROTOCOL.md).
 Helper sessions (data only, no voice, no join, never a second agent): `helper_credential {session, label}` gives a `token` (ends with the call; hand it over as a file or via ssh, never in a chat); the helper calls `helper_status`, `helper_decide`, `helper_next`, `helper_activity` with `credential` and `helper_name`. More: MULTI-AGENT.md ("Helper sessions").
+
+Mishearing (a product, a name): `add_vocab` with `terms` and/or `fixes` (`{wrong, right}`) teaches the call's speech recognition; it adds to the paying account's vocabulary (add only, the user manages it on https://voicehook.ai/konto), max 20 per request and 100 per call; corrections apply at once, words from the next pause (live: next call); 409 = guest call. Tell the user in one line what you added.
 
 ## Keep the user informed while you work
 
