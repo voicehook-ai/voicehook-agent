@@ -323,6 +323,22 @@ class BridgeRoom:
             return None
         return {"token": j["token"], "url": j["url"], "expires_in": j.get("expires_in")}
 
+    async def post_vocab(self, body: dict) -> tuple[int, dict]:
+        """0.21.0: POST /api/bridge/vocab with this bridge session -> (status, json).
+        Never raises (status 0 on a network error)."""
+        if self._http is None or not self._session or self._closed:
+            return 0, {"detail": "bridge session not connected"}
+        try:
+            r = await self._http.post(f"{self.api_base}/api/bridge/vocab", headers=self._auth(),
+                                      json=body, timeout=10.0)
+        except Exception as e:  # noqa: BLE001
+            return 0, {"detail": f"request failed ({type(e).__name__})"}
+        try:
+            data = r.json()
+        except ValueError:
+            data = {}
+        return r.status_code, data if isinstance(data, dict) else {}
+
     # ---- internals ---------------------------------------------------------- #
     def _auth(self) -> dict:
         return {"authorization": f"Bearer {self._session}"}
