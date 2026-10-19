@@ -131,10 +131,9 @@ Compare A and B:
 
 ## Decisions
 
-- ALWAYS `decide` for every question the human decides (yes/no, A/B, approval, a value), plus one
-  short `say` pointing to it. Never only `say`, never into `open`: Status OR Decision Board, never both.
-- Yes/no first (leave out `options`), else 2-3 `options` (max 40 chars each) with `recommend`; `question`
-  max 160. Example: `decide(question="Deploy the fix now?")`, then `say("Frage 2 steht auf dem Board.")`.
+- ALWAYS `decide` for every question the human decides (yes/no, A/B, approval, a value), plus one short `say` pointing to it. Never only `say`, never into `open`: Status OR Decision Board, never both.
+- Yes/no first (leave out `options`), else 2-3 `options` (max 40 chars each) with `recommend`; `question` max 160. Example: `decide(question="Deploy the fix now?")`, then `say("Frage 2 steht auf dem Board.")`.
+- Every PR you opened that can be merged goes on the board by YOU (its author) via `decide`: repo, number, one sentence of content, test state; repos with auto-deploy add "merge after the call".
 - The answer comes as `next` type `decision`: `verdict` yes|no|option|other, `option`, `text`
   (the person can always answer freely by voice), `by`. Confirm in one `say`, then act.
 
