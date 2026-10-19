@@ -190,6 +190,7 @@ from livekit import rtc
 
 from . import __version__, relay
 from . import activity as vactivity
+from . import helperaccess as vhelp
 from . import multisession as vmulti
 from . import relayops as vrelayops
 from . import selfupdate as vselfupdate
@@ -544,7 +545,8 @@ _BG_TASKS: set = set()
 
 
 async def _publish_relay(room, tok: dict | None, slug: str, json_mode: bool,
-                         local_dir: Path | None = None) -> None:
+                         local_dir: Path | None = None, *, api_base: str = "",
+                         ctl: _Control | None = None, stop: asyncio.Event | None = None) -> None:
     """0.15.0: write ~/.voicehook/relay.json so the hooks of the OTHER Claude Code sessions
     of this machine feed this call (multisession.py). Bridge: mint a relay token with the
     bridge session; a `relay` in the join answer wins. Otherwise (WebRTC, the default, or
@@ -557,6 +559,8 @@ async def _publish_relay(room, tok: dict | None, slug: str, json_mode: bool,
         rel = vmulti.relay_from_answer(nested) if isinstance(nested, dict) else None
         if rel is None and hasattr(room, "mint_relay"):
             rel = await room.mint_relay(vmulti.machine_label())
+        if rel is None and ctl is not None and api_base and isinstance(tok, dict):
+            rel = await _helper_hub(ctl, api_base, str(tok.get("token") or ""))  # 0.17.0
         if rel is not None:
             path = vmulti.write_relay(rel["url"], rel["token"], slug, rel.get("expires_in"))
             kind = ""
@@ -570,6 +574,45 @@ async def _publish_relay(room, tok: dict | None, slug: str, json_mode: bool,
                      topic="_meta")
     except Exception as e:  # noqa: BLE001
         print(f"[warn] activity relay not written ({type(e).__name__})", file=sys.stderr, flush=True)
+    if ctl is not None and ctl.helper_pump is not None and stop is not None:
+        await _run_helper_pump(room, ctl, stop)
+
+
+async def _helper_hub(ctl: _Control, api_base: str, jwt: str) -> dict | None:
+    """0.17.0, WebRTC join: helper credential + pump token from the server (Bearer = our
+    LiveKit token), once per join; reconnects reuse it. None: older server (local relay)."""
+    if ctl.helper_rel is not None:
+        return ctl.helper_rel
+    if not jwt:
+        return None
+    if ctl.helper_http is None:
+        ctl.helper_http = httpx.AsyncClient(timeout=vhelp.HTTP_TIMEOUT_S,
+                                            headers={"user-agent": _USER_AGENT, "x-vh-cli": _VERSION})
+    rel = await vhelp.mint(ctl.helper_http, api_base, jwt, vmulti.machine_label())
+    if rel is None or not rel.get("pump"):
+        return None
+    ctl.helper_pump = vhelp.Pump(api_base, rel["pump"]["url"], rel["pump"]["token"])
+    ctl.helper_rel = {k: rel[k] for k in ("token", "url", "expires_in")}
+    return ctl.helper_rel
+
+
+async def _run_helper_pump(room, ctl: _Control, stop: asyncio.Event) -> None:
+    """Publish the helpers' packets as this join until the cycle ends (stop)."""
+    pump, http = ctl.helper_pump, ctl.helper_http
+    if pump is None or http is None:
+        return
+
+    async def publish_status(payload: dict) -> None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        await room.local_participant.publish_data(data, reliable=True, topic="operator.status")
+
+    def append_activity(line: str) -> None:
+        if ctl.activity_path is not None:
+            vactivity.append_line(ctl.activity_path.parent, vactivity.scrub_line(line))
+
+    await pump.run(http, publish_status=publish_status,
+                   decide=lambda body: _decide_rpc(ctl, body),
+                   append_activity=append_activity, stop=stop)
 
 
 def _quit_signals() -> list:
@@ -628,6 +671,11 @@ class _Control:
         self.say_status = relay.SayStatus()  # 0.9.0: operator.say_status per own say
         # 0.16.0: helper sessions (local relay): sender -> from, for decision events
         self.relay_senders: dict[str, str] = {}
+        # 0.17.0 helper access: the server's helper hub for this join (WebRTC), its
+        # credential (relay.json) and one HTTP client for the pump; spans reconnects
+        self.helper_pump: vhelp.Pump | None = None
+        self.helper_rel: dict | None = None
+        self.helper_http = None
 
     def attach(self, room: rtc.Room) -> None:
         self.room = room
@@ -837,6 +885,20 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         # bridge; the result arrives later as a `next` event type "decision".
         ctl.watchdog.touch()
         return await _decide_rpc(ctl, req)
+    if cmd == "helper_credential":
+        # 0.17.0: a helper credential for another machine (pipe it into ssh, never print it
+        # into a chat): WebRTC via the server's helper hub, bridge via the bridge session
+        label = str(req.get("label") or vmulti.machine_label())
+        rel = None
+        if ctl.helper_pump is not None and ctl.helper_http is not None:
+            rel = await ctl.helper_pump.credential(ctl.helper_http, label, bool(req.get("rotate")))
+        elif ctl.room is not None and hasattr(ctl.room, "mint_relay") and not req.get("rotate"):
+            rel = await ctl.room.mint_relay(label)
+        if rel is None:
+            return {"ok": False, "error": "no helper credential available (server too old, or "
+                                          "rotate needs a WebRTC join)"}
+        return {"ok": True, "type": "helper_credential", "token": rel["token"], "url": rel["url"],
+                "expires_in": rel.get("expires_in"), "label": label}
     if cmd == "next":
         try:
             timeout = float(req.get("timeout", 60))
@@ -1588,9 +1650,15 @@ async def _connect_and_listen(
                     and payload.get("type") == "decision"
                     and not _route_helper_decision(ctl, payload)):
                 # Decision Board: the worker sends the result only to the creator
-                # (destination = our identity), so no owner filter is needed.
-                # 0.16.0: a helper session's decision (sender) goes to its answer file.
-                ctl.events.put_nowait(payload)
+                # (destination = our identity), so no owner filter is needed. 0.17.0: a
+                # helper's question via the server hub (sender) goes back to it, never into our next.
+                snd = payload.get("sender")
+                if isinstance(snd, str) and snd and ctl.helper_pump is not None and ctl.helper_http is not None:
+                    t = asyncio.ensure_future(ctl.helper_pump.answer(ctl.helper_http, snd, payload))
+                    _BG_TASKS.add(t)
+                    t.add_done_callback(_BG_TASKS.discard)
+                else:
+                    ctl.events.put_nowait(payload)
             sender = getattr(pkt.participant, "identity", "?") if pkt.participant else "?"
             line = payload.get("text", "")
             if topic == "operator.say_status":
@@ -1708,11 +1776,14 @@ async def _connect_and_listen(
         f"{[p.identity for p in room.remote_participants.values()]}",
         topic="_meta",
     )
+    cycle_tasks: list = []  # 0.17.0: relay + helper pump of this cycle, cancelled at its end
     if not vmulti.relay_disabled():  # 0.15.0: relay.json for the other sessions of this machine
         local_dir = ctl.activity_path.parent if ctl is not None and ctl.activity_path else None
-        relay_task = asyncio.create_task(_publish_relay(room, tok, slug, json_mode, local_dir))
+        relay_task = asyncio.create_task(_publish_relay(room, tok, slug, json_mode, local_dir,
+                                                        api_base=api_base, ctl=ctl, stop=stop))
         _BG_TASKS.add(relay_task)
         relay_task.add_done_callback(_BG_TASKS.discard)
+        cycle_tasks.append(relay_task)
     if share_hint is not None and not share_hint.get("shown"):
         share_hint["shown"] = True  # once per join: never again on a reconnect cycle
         _emit_share_hint(json_mode)
@@ -1866,7 +1937,7 @@ async def _connect_and_listen(
     finally:
         if ctl is not None:
             ctl.detach()
-        for t in (hb_task, quit_task):
+        for t in (hb_task, quit_task, *cycle_tasks):
             t.cancel()
             try:
                 await t
@@ -2140,6 +2211,13 @@ async def _join(
                 break
     finally:
         ctl.quit.set()
+        if ctl.helper_pump is not None and ctl.helper_http is not None:  # 0.17.0: helpers -> 410
+            await ctl.helper_pump.end(ctl.helper_http)
+        if ctl.helper_http is not None:
+            try:
+                await ctl.helper_http.aclose()
+            except Exception:  # noqa: BLE001, S110
+                pass
         vmulti.remove_relay(owner_pid=os.getpid(), room=slug)  # 0.15.0: only our own file
         if rc == RC_RESTART:  # a waiting `next` learns why, instead of "ended"
             ctl.events.put_front_nowait({
@@ -2285,6 +2363,8 @@ def _client_request(args) -> dict:
         return {"cmd": "visual", **vvisual.payload(shape, emo)}
     if args.cmd == "next":
         return {"cmd": "next", "timeout": args.timeout}
+    if args.cmd == "helper-credential":
+        return {"cmd": "helper_credential", "label": args.label, "rotate": bool(args.rotate)}
     if args.cmd == "says":
         return {"cmd": "says"}
     if args.cmd == "activity":
@@ -2379,6 +2459,17 @@ def _relay_owner_pid() -> int | None:
         if pid > 0:
             return pid
     return None
+
+
+def _run_helper_import() -> int:
+    """`helper-import`: credential JSON on stdin (over ssh, never a chat) -> relay.json."""
+    try:
+        path = vhelp.import_credential(sys.stdin.read())
+    except (OSError, ValueError) as e:
+        print(json.dumps({"ok": False, "type": "error", "error": str(e)}), flush=True)
+        return 1
+    print(json.dumps({"ok": True, "type": "helper-import", "path": path}), flush=True)
+    return 0
 
 
 def _run_client(args) -> int:
@@ -2789,6 +2880,19 @@ def main(argv: list[str] | None = None) -> None:
         "to your own decide questions as JSON lines (type decision); {\"type\":\"timeout\"} if none")
     p_rn.add_argument("--timeout", type=float, default=25.0, metavar="SEC",
                       help="wait up to SEC seconds for an answer (default 25; 0 = only what is there)")
+    # 0.17.0 helper access (server /api/helper/*): data only, no voice, no join
+    p_hc = sub.add_parser(
+        "helper-credential", help="print a helper credential of the running join as JSON for "
+        "ANOTHER machine; pipe it into ssh: `voicehook-agent helper-credential --label crown | "
+        "ssh crown 'voicehook-agent helper-import'` (never paste it into a chat)")
+    p_hc.add_argument("--label", default=None, metavar="NAME",
+                      help="the helper machine, shown as 'Helfer NAME: ...' (max 22 chars)")
+    p_hc.add_argument("--rotate", action="store_true", default=False,
+                      help="invalidate every earlier helper credential of this call (WebRTC join)")
+    _add_session(p_hc)
+    sub.add_parser("helper-import", help="read a helper credential (JSON) from stdin and write "
+                   "~/.voicehook/relay.json (0600): then `decide`, `status` and `relay-next` "
+                   "and the Claude Code hooks of this machine feed the call")
     # 0.13.0: bridge session for the hook (Quickstart A, curl bridge join)
     p_bs = sub.add_parser(
         "bridge-session", help="store {base, session} of a curl bridge join (Quickstart A) in "
@@ -2844,7 +2948,9 @@ def main(argv: list[str] | None = None) -> None:
             _restart_after_update(argv, updater)
             rc = 1  # only reached when the exec failed
         sys.exit(rc)
-    if args.cmd in ("say", "next", "says", "leave", "status", "activity", "decide"):
+    if args.cmd == "helper-import":
+        sys.exit(_run_helper_import())
+    if args.cmd in ("say", "next", "says", "leave", "status", "activity", "decide", "helper-credential"):
         sys.exit(_run_client(args))
     if args.cmd == "show":
         sys.exit(_run_client(args))
