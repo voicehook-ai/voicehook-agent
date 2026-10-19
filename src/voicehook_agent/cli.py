@@ -193,6 +193,7 @@ from livekit import rtc
 
 from . import __version__, relay
 from . import activity as vactivity
+from . import cards as vcards
 from . import helperaccess as vhelp
 from . import multisession as vmulti
 from . import relayops as vrelayops
@@ -681,6 +682,11 @@ class _Control:
         self.helper_pump: vhelp.Pump | None = None
         self.helper_rel: dict | None = None
         self.helper_http = None
+        # 0.21.0 cards (show --card): own seq, the api base + LiveKit token of the current
+        # WebRTC cycle (image upload)
+        self.card_seq = 0
+        self.api_base = ""
+        self.lk_jwt = ""
 
     def attach(self, room: rtc.Room) -> None:
         self.room = room
@@ -749,6 +755,102 @@ async def _publish_visual(room, body: dict) -> dict:
 
 VISUAL_RATE_ERROR = ("rate limit: at most one shape per 2 s per operator, "
                      "nothing drawn; send it again in 2 s or skip it")
+CARD_IMAGE_OLD_SERVER = ("image cards over WebRTC need a newer server (POST /api/card/image "
+                         "missing); text, code and link cards work")
+
+
+async def _upload_card_image(ctl: _Control, image: str) -> dict:
+    """0.21.0: store an image card on the server (POST /api/card/image, Bearer = the LiveKit
+    token of this cycle, after it expired the helper pump token) -> {ok, id, url, mime}.
+    Never prints a token."""
+    bearers = [b for b in (ctl.lk_jwt, getattr(ctl.helper_pump, "token", None)) if b]
+    if not ctl.api_base or not bearers:
+        return {"ok": False, "type": "card", "error": "not connected to the room (yet)"}
+    r = None
+    async with httpx.AsyncClient(timeout=20.0, headers={"user-agent": _USER_AGENT,
+                                                        "x-vh-cli": _VERSION}) as http:
+        for bearer in bearers:
+            try:
+                r = await http.post(ctl.api_base.rstrip("/") + vcards.IMAGE_PATH, json={"image": image},
+                                    headers={"authorization": f"Bearer {bearer}"})
+            except httpx.HTTPError as e:
+                return {"ok": False, "type": "card", "error": f"image not sent: {type(e).__name__}"}
+            if r.status_code != 404 or len(bearers) == 1:
+                break
+    try:
+        j = r.json()
+    except ValueError:
+        j = {}
+    j = j if isinstance(j, dict) else {}
+    detail = str(j.get("detail") or "")[:300]
+    if r.status_code == 200 and vcards.image_url_ok(j.get("url"), j.get("id")):
+        return {"ok": True, "id": j["id"], "url": j["url"], "mime": str(j.get("mime") or "")}
+    if r.status_code in (404, 405) and detail in ("", "Not Found", "Method Not Allowed"):
+        return {"ok": False, "type": "card", "error": CARD_IMAGE_OLD_SERVER}
+    if r.status_code == 422:
+        return {"ok": False, "type": "invalid", "error": f"server rejected the image: {detail}"}
+    if r.status_code == 429:
+        return {"ok": False, "type": "rate_limited", "error": "too many images, try again in a minute"}
+    return {"ok": False, "type": "card", "error": f"image not sent: HTTP {r.status_code} {detail}".strip()}
+
+
+async def _publish_card(ctl: _Control, room, body: dict) -> dict:
+    """0.21.0 `show --card`: bridge -> POST /api/bridge/show (same body); WebRTC -> the card
+    as topic operator.card (image: stored on the server first) and the panel as delta.ui to
+    the humans only. Answer {ok, type: card, via, id?, seq?, kind?, panel?}."""
+    send_card = getattr(room, "send_card", None)
+    if send_card is not None:
+        try:
+            out = await send_card(body)
+        except vtransport.BridgeError as e:
+            if e.status == 429:
+                return {"ok": False, "type": "rate_limited", "error": "too many sends, try again shortly"}
+            if e.status == 422:
+                return {"ok": False, "type": "invalid", "error": f"server rejected the card: {e}"}
+            return {"ok": False, "type": "card", "error": f"card not sent: {e}"}
+        out = out if isinstance(out, dict) else {}
+        res = {"ok": True, "type": "card", "via": "bridge"}
+        res.update({k: out[k] for k in ("id", "seq", "panel", "large") if k in out})
+        if "kind" in body:
+            res["kind"] = body["kind"]
+        return res
+    res: dict = {"ok": True, "type": "card", "via": "datachannel"}
+    if "kind" in body:
+        url = mime = cid = None
+        if body["kind"] == "image":
+            up = await _upload_card_image(ctl, body["image"])
+            if not up.get("ok"):
+                return up
+            url, mime, cid = up["url"], up["mime"], up["id"]
+        try:
+            card = vcards.make_card(seq=ctl.card_seq + 1, body=body, url=url, mime=mime, cid=cid)
+        except vcards.CardError as e:
+            return {"ok": False, "type": "invalid", "error": str(e)}
+        data = json.dumps(card, ensure_ascii=False).encode("utf-8")
+        try:
+            await room.local_participant.publish_data(data, reliable=True, topic=vcards.TOPIC)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "type": "card", "error": f"card not sent: {type(e).__name__}"}
+        ctl.card_seq += 1
+        res.update(id=card["id"], seq=card["seq"], kind=card["kind"])
+    panel, large = body.get("panel"), body.get("large") is True
+    if panel is not None:
+        humans = [p.identity for p in room.remote_participants.values()
+                  if relay.is_human_peer(_kind_label(p), dict(getattr(p, "attributes", None) or {}))]
+        if humans:
+            try:
+                for pkt in vcards.ui_packets(panel, large=large, cid=res.get("id")):
+                    await room.local_participant.publish_data(
+                        json.dumps(pkt).encode("utf-8"), reliable=True, topic=vcards.UI_TOPIC,
+                        destination_identities=humans)
+            except Exception as e:  # noqa: BLE001
+                return {**res, "ok": False, "error": f"panel not opened: {type(e).__name__}"}
+        else:
+            res["hint"] = "no human in the call: panel not opened"
+        res["panel"] = panel
+        if large:
+            res["large"] = True
+    return res
 
 
 SHOW_HELP = """\
@@ -772,6 +874,18 @@ Examples:
       {"type":"path","d":"M0.38,0.5 L0.62,0.5"},
       {"type":"polygon","points":[[0.7,0.25],[0.9,0.25],[0.9,0.75],[0.7,0.75]]}]}'
   voicehook-agent say "Erst testen, dann ausrollen." --shape-preset arrow_right
+
+Cards on the call page (0.21.0, same as bridge/MCP show, never spoken; a new card shows up
+as a small preview top left). --card text|code|link|image with --text T ('-' = stdin) or
+--file PATH (image: svg/png/jpeg/webp), optional --title. --panel cards|board|log|decisions|
+none opens that panel for the humans (none closes all). --large opens the card view big in
+the middle with this card at full size, for diagrams (swimlanes, many steps and arrows).
+Limits: text 4000 chars, title 80, SVG 300 KB (no <script>, <foreignObject>, on* attributes
+or external references), PNG/JPEG/WebP 1 MB; invalid: exit 2, nothing sent.
+  voicehook-agent show --card code --title Fix --text "git push origin main"
+  voicehook-agent show --card link --text https://voicehook.ai --panel cards
+  voicehook-agent show --card image --title Ablauf --file swimlane.svg --large
+  voicehook-agent show --panel board
 """
 
 
@@ -872,6 +986,17 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         if res.get("ok"):
             ctl.visual_at = now
         return res
+    if cmd == "card":
+        ctl.watchdog.touch()
+        try:  # same rules as the client, checked again (stdin-free path)
+            body = vcards.validate({k: req.get(k) for k in ("kind", "title", "text", "image", "panel",
+                                                            "large") if req.get(k) is not None})
+        except vcards.CardError as e:
+            return {"ok": False, "type": "invalid", "error": str(e)}
+        room = await ctl.wait_room(10.0)
+        if room is None:
+            return {"ok": False, "error": "not connected to the room (yet)"}
+        return await _publish_card(ctl, room, body)
     if cmd == "board":
         ctl.watchdog.touch()
         board = req.get("board")
@@ -1609,6 +1734,8 @@ async def _connect_and_listen(
                 check=update_check):
             return 0, "SELF_UPDATE"  # never connected: nothing to leave
         room = rtc.Room()
+        if ctl is not None:  # 0.21.0: image cards (POST /api/card/image), newest token per cycle
+            ctl.api_base, ctl.lk_jwt = api_base, str(tok.get("token") or "")
     stop = asyncio.Event()
     turn_event = asyncio.Event()  # set on finalized user-turn → graph re-sync
     disconnect_reason: dict[str, str | None] = {"name": None}
@@ -2422,6 +2549,16 @@ def _client_request(args) -> dict:
                                       getattr(args, "emotion", None)))
         return req
     if args.cmd == "show":
+        if args.card is not None or args.panel is not None or args.large:  # 0.21.0 cards
+            if (args.preset or args.polygon or args.path or args.json is not None or args.open
+                    or args.label is not None or args.hold_ms is not None or args.emotion is not None):
+                raise vcards.CardError("--card/--panel cannot be combined with shape flags "
+                                       "(--preset/--polygon/--path/--json/--label/--hold-ms/--emotion)")
+            return vcards.request_from_args(kind=args.card, title=args.title, text=args.text,
+                                            file=args.file, panel=args.panel, large=args.large,
+                                            stdin=sys.stdin)
+        if args.title is not None or args.text is not None or args.file is not None:
+            raise vcards.CardError("--title/--text/--file need --card text|code|link|image")
         shape = vvisual.shape_from_args(
             presets=args.preset, polygons=args.polygon, paths=args.path,
             json_text=args.json, open_=args.open, label=args.label, hold_ms=args.hold_ms)
@@ -2543,7 +2680,7 @@ def _run_client(args) -> int:
     next timeout), 1 = request failed, 3 = no running join / join ended."""
     try:
         req = _client_request(args)
-    except vvisual.VisualError as e:  # bad shape/emotion: nothing sent, exit 2
+    except (vvisual.VisualError, vcards.CardError) as e:  # bad shape/card: nothing sent, exit 2
         print(json.dumps({"ok": False, "type": "invalid", "error": str(e)}, ensure_ascii=False),
               flush=True)
         print(f"[error] {e}", file=sys.stderr, flush=True)
@@ -2862,7 +2999,8 @@ def main(argv: list[str] | None = None) -> None:
                           help="board file {doing, open[], done[]}; flags add to it")
     _add_session(p_status)
     p_show = sub.add_parser(
-        "show", help="draw a shape in the ring (operator.visual): preset, polygon, path or multi",
+        "show", help="draw a shape in the ring (operator.visual), or 0.21.0 --card: a text, code, "
+                     "link or image card on the call page",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=SHOW_HELP)
     p_show.add_argument("--preset", action="append", default=[], metavar="NAME",
@@ -2883,6 +3021,24 @@ def main(argv: list[str] | None = None) -> None:
                              "(default: server)")
     p_show.add_argument("--emotion", default=None, metavar="LABEL",
                         help="tint of the ring: " + " ".join(vvisual.EMOTIONS))
+    # 0.21.0 cards on the call page (same as bridge /api/bridge/show, MCP show)
+    p_show.add_argument("--card", default=None, choices=vcards.KINDS,
+                        help="0.21.0: put a card on the call page instead of a ring shape: "
+                             + " ".join(vcards.KINDS) + " (never spoken)")
+    p_show.add_argument("--title", default=None, metavar="T",
+                        help=f"card heading, max {vcards.TITLE_MAX} chars")
+    p_show.add_argument("--text", default=None, metavar="T",
+                        help=f"card text (code: the code, link: one http(s) URL), max {vcards.TEXT_MAX} "
+                             "chars; '-' reads stdin")
+    p_show.add_argument("--file", default=None, metavar="PATH",
+                        help="text/code/link: UTF-8 text file; image: svg (max 300 KB, no scripts or "
+                             "external refs), png, jpeg or webp (max 1 MB)")
+    p_show.add_argument("--panel", default=None, choices=vcards.PANELS,
+                        help="open on the human's page: cards (card view) board log decisions, "
+                             "none = close all; alone or with --card")
+    p_show.add_argument("--large", action="store_true", default=False,
+                        help="open the card view big in the middle with this card at full size "
+                             "(diagrams; implies --panel cards)")
     _add_session(p_show)
     # log-summary: the 2nd micro agent (digests the call log into operator.graph)
     p_sum = sub.add_parser("log-summary", help="watch a call log and emit operator.graph digests")

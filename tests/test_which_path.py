@@ -2,8 +2,8 @@
 sagt dasselbe wie voicehook-v4 (Kanon web/agent/_snippets/which-path.md dort).
 
 Kernsatz wörtlich in README, docs/CLI.md, Plugin-README und Plugin-Skill; `--help` trägt den
-Teilsatz "cannot see the user's local sessions". Dazu die Behauptung der Tabelle, dass CLI-`show`
-nur Ringformen zeichnet: bekommt `show` Karten, fällt dieser Test und die Texte werden angepasst.
+Teilsatz "cannot see the user's local sessions". Dazu die Aussage der Tabelle, dass CLI-`show`
+Karten zeigt (0.21.0, "Cards from the CLI").
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ def test_table_in_cli_doc_and_plugin_skill():
         assert '## Which path: MCP, CLI or bridge? (Oliver 19.10.2026, decision "A")' in text, rel
         rows = [ln for ln in text.splitlines() if ln.startswith(("| **MCP**", "| **CLI**", "| **Bridge**"))]
         assert len(rows) == 3, rel
-        assert "**Why the CLI stays:**" in text and "**Until the CLI has cards:**" in text, rel
+        assert "**Why the CLI stays:**" in text and "**Cards from the CLI (0.21.0+):**" in text, rel
 
 
 def test_help_header_says_what_the_cli_is_for(capsys):
@@ -57,14 +57,13 @@ def test_help_header_says_what_the_cli_is_for(capsys):
     assert FACT_PART in out
 
 
-def test_cli_show_still_draws_shapes_only(capsys):
-    """Tabelle: 'CLI `show` draws ring shapes only'. Stimmt das nicht mehr, Texte anpassen."""
+def test_cli_show_has_cards_and_shapes(capsys):
+    """0.21.0: Tabelle sagt 'Cards from the CLI (0.21.0+)'; show kann Karten und Ringformen."""
     with pytest.raises(SystemExit):
         main(["show", "--help"])
     out = capsys.readouterr().out
-    assert "--preset" in out
-    for card_flag in ("--kind", "--text", "--image", "--panel"):
-        assert card_flag not in out, card_flag
+    for flag in ("--preset", "--card", "--text", "--file", "--panel", "--large"):
+        assert flag in out, flag
 
 
 def test_no_dashes_in_core():
