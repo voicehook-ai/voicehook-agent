@@ -27,6 +27,20 @@ uvx voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name <y
 - **stdin** lines are spoken by voice-ai (TTS via Google Chirp3-HD)
 - **`/q`, `{"topic":"quit"}`, or SIGTERM/Ctrl-C** ends the session
 
+## Which path: MCP, CLI or bridge? (Oliver 19.10.2026, decision "A")
+
+MCP/bridge = one agent in the call; activity lines are only what that agent writes by hand. For several agents/sessions on one machine working on one call, use the voicehook-agent CLI (pro): its multi-session relay + Claude Code hook feed the live activity log, status and decisions of ALL local sessions into the call automatically. MCP/bridge run on the server and cannot see the user's local sessions.
+
+| path | role | use it when |
+|---|---|---|
+| **MCP** (`voicehook.ai/mcp`) | **Entry + distribution.** One click as connector or plugin, nothing to install, only path with `create_call`, cards, `decide`, `data`. | Default for a single agent in a call; every cloud/sandbox session; newcomers; whenever you must start the call yourself. |
+| **CLI** (`voicehook-agent`) | **Pro tool for multi-agent work.** One machine, many sessions, one call: the multi-session relay (0.15+) and the Claude Code hook feed the activity log from every session automatically; helpers report `decide`/`status` through the relay (0.16+, in review). Base of the "Leitstelle". Also direct WebRTC, persona/mode flags. | Local machine with install rights AND several agents/sessions on the same call, or the human wants the live activity log of all sessions. |
+| **Bridge** (`/api/bridge/*`, Quickstart A) | **Protocol underneath + fallback.** Plain HTTPS/REST for any agent. | No MCP client and no CLI; or a feature the other path lacks right now. |
+
+- **Why the CLI stays:** MCP runs on the server and cannot see the sessions on the user's machine. Only a local process knows which Claude Code sessions run, what each does and when one waits for a decision, and feeds that into the call without hand-written notes.
+- **Until the CLI has cards:** CLI `show` draws ring shapes only (no text/code/link/image cards); if the human must read something, put it on the board and in the chat, or join via MCP/bridge for cards.
+- **CLI install without git** (git blocked, e.g. Xcode license on macOS; PyPI lags), pinned to the reviewed commit, only with the user's OK: `uv tool install --force https://github.com/voicehook-ai/voicehook-agent/archive/75a29390504df7dad491af42b6cb68826b5c6c0f.zip`. Check `voicehook-agent --version` before every call.
+
 ## Agent loop without polling (0.5.0)
 
 Start `join` once in the background, then drive the call with one-shot
@@ -488,6 +502,10 @@ Install and update in one line (what the skill does; always upgrades):
 R=git+https://github.com/voicehook-ai/voicehook-agent
 uv tool install -q --upgrade $R || pip install -q --upgrade --user $R
 ```
+
+Without git (git blocked, e.g. Xcode license on macOS; PyPI lags): the same pinned commit as a zip,
+`uv tool install --force https://github.com/voicehook-ai/voicehook-agent/archive/<40-hex sha>.zip`;
+check `voicehook-agent --version` before every call.
 
 Pinned (multi-session relay needs 0.15.0 or newer). Releases are tagged `cli-vX.Y.Z`
 (see DEVELOPMENT.md); the tag `cli-v0.15.0` is set on the merge commit after the merge.
