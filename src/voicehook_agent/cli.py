@@ -682,7 +682,7 @@ class _Control:
         self.helper_pump: vhelp.Pump | None = None
         self.helper_rel: dict | None = None
         self.helper_http = None
-        # 0.19.0 cards (show --card): own seq, the api base + LiveKit token of the current
+        # 0.21.0 cards (show --card): own seq, the api base + LiveKit token of the current
         # WebRTC cycle (image upload)
         self.card_seq = 0
         self.api_base = ""
@@ -760,7 +760,7 @@ CARD_IMAGE_OLD_SERVER = ("image cards over WebRTC need a newer server (POST /api
 
 
 async def _upload_card_image(ctl: _Control, image: str) -> dict:
-    """0.19.0: store an image card on the server (POST /api/card/image, Bearer = the LiveKit
+    """0.21.0: store an image card on the server (POST /api/card/image, Bearer = the LiveKit
     token of this cycle, after it expired the helper pump token) -> {ok, id, url, mime}.
     Never prints a token."""
     bearers = [b for b in (ctl.lk_jwt, getattr(ctl.helper_pump, "token", None)) if b]
@@ -795,7 +795,7 @@ async def _upload_card_image(ctl: _Control, image: str) -> dict:
 
 
 async def _publish_card(ctl: _Control, room, body: dict) -> dict:
-    """0.19.0 `show --card`: bridge -> POST /api/bridge/show (same body); WebRTC -> the card
+    """0.21.0 `show --card`: bridge -> POST /api/bridge/show (same body); WebRTC -> the card
     as topic operator.card (image: stored on the server first) and the panel as delta.ui to
     the humans only. Answer {ok, type: card, via, id?, seq?, kind?, panel?}."""
     send_card = getattr(room, "send_card", None)
@@ -875,7 +875,7 @@ Examples:
       {"type":"polygon","points":[[0.7,0.25],[0.9,0.25],[0.9,0.75],[0.7,0.75]]}]}'
   voicehook-agent say "Erst testen, dann ausrollen." --shape-preset arrow_right
 
-Cards on the call page (0.19.0, same as bridge/MCP show, never spoken; a new card shows up
+Cards on the call page (0.21.0, same as bridge/MCP show, never spoken; a new card shows up
 as a small preview top left). --card text|code|link|image with --text T ('-' = stdin) or
 --file PATH (image: svg/png/jpeg/webp), optional --title. --panel cards|board|log|decisions|
 none opens that panel for the humans (none closes all). --large opens the card view big in
@@ -1734,7 +1734,7 @@ async def _connect_and_listen(
                 check=update_check):
             return 0, "SELF_UPDATE"  # never connected: nothing to leave
         room = rtc.Room()
-        if ctl is not None:  # 0.19.0: image cards (POST /api/card/image), newest token per cycle
+        if ctl is not None:  # 0.21.0: image cards (POST /api/card/image), newest token per cycle
             ctl.api_base, ctl.lk_jwt = api_base, str(tok.get("token") or "")
     stop = asyncio.Event()
     turn_event = asyncio.Event()  # set on finalized user-turn → graph re-sync
@@ -2529,7 +2529,7 @@ def _client_request(args) -> dict:
                                       getattr(args, "emotion", None)))
         return req
     if args.cmd == "show":
-        if args.card is not None or args.panel is not None or args.large:  # 0.19.0 cards
+        if args.card is not None or args.panel is not None or args.large:  # 0.21.0 cards
             if (args.preset or args.polygon or args.path or args.json is not None or args.open
                     or args.label is not None or args.hold_ms is not None or args.emotion is not None):
                 raise vcards.CardError("--card/--panel cannot be combined with shape flags "
@@ -2979,7 +2979,7 @@ def main(argv: list[str] | None = None) -> None:
                           help="board file {doing, open[], done[]}; flags add to it")
     _add_session(p_status)
     p_show = sub.add_parser(
-        "show", help="draw a shape in the ring (operator.visual), or 0.19.0 --card: a text, code, "
+        "show", help="draw a shape in the ring (operator.visual), or 0.21.0 --card: a text, code, "
                      "link or image card on the call page",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=SHOW_HELP)
@@ -3001,9 +3001,9 @@ def main(argv: list[str] | None = None) -> None:
                              "(default: server)")
     p_show.add_argument("--emotion", default=None, metavar="LABEL",
                         help="tint of the ring: " + " ".join(vvisual.EMOTIONS))
-    # 0.19.0 cards on the call page (same as bridge /api/bridge/show, MCP show)
+    # 0.21.0 cards on the call page (same as bridge /api/bridge/show, MCP show)
     p_show.add_argument("--card", default=None, choices=vcards.KINDS,
-                        help="0.19.0: put a card on the call page instead of a ring shape: "
+                        help="0.21.0: put a card on the call page instead of a ring shape: "
                              + " ".join(vcards.KINDS) + " (never spoken)")
     p_show.add_argument("--title", default=None, metavar="T",
                         help=f"card heading, max {vcards.TITLE_MAX} chars")
