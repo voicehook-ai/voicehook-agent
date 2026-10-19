@@ -614,7 +614,7 @@ def helper_decision_event(payload: dict, *, frm: str | None = None, label: str |
               "number": payload.get("number"), "question": question, "verdict": payload.get("verdict")}
         if "option" in payload:
             ev["option"] = payload.get("option")
-        if payload.get("verdict") in ("other", "unclear"):  # 0.19.0 unclear: why, as text
+        if payload.get("verdict") in ("other", "unclear"):  # 0.21.0 unclear: why, as text
             ev["text"] = str(payload.get("answer") or payload.get("text") or "")
         if payload.get("changed"):
             ev["changed"] = True
@@ -624,7 +624,7 @@ def helper_decision_event(payload: dict, *, frm: str | None = None, label: str |
     return ev
 
 
-# 0.19.0 "Silent Mode": the server sets these attributes on HUMAN participants, "1"/"0"
+# 0.21.0 "Silent Mode": the server sets these attributes on HUMAN participants, "1"/"0"
 HUMAN_ATTR_MIC = "vh.mic_muted"
 HUMAN_ATTR_SPEAKER = "vh.speaker_muted"
 HUMAN_ATTR_AWAY = "vh.away"

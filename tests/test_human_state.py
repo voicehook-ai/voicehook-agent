@@ -1,4 +1,4 @@
-"""0.19.0 Silent Mode: the humans' vh.mic_muted / vh.speaker_muted / vh.away attributes as an
+"""0.21.0 Silent Mode: the humans' vh.mic_muted / vh.speaker_muted / vh.away attributes as an
 aggregate human_state on every `next` and as an event type human_state when it changes (WebRTC
 participant attributes; bridge: peer-updated over SSE carries the same attributes)."""
 from __future__ import annotations

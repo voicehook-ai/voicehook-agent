@@ -374,14 +374,14 @@ class BridgeRoom:
         return out if isinstance(out, dict) else {}
 
     async def send_ui(self, body: dict) -> dict:
-        """0.19.0: POST /api/bridge/ui {cmd, win?, state?, preset?, slot?, project?} (no v/via):
+        """0.21.0: POST /api/bridge/ui {cmd, win?, state?, preset?, slot?, project?} (no v/via):
         the server sends delta.ui to the humans in the room. {ok, applied} or BridgeError
         (422 = invalid). Over WebRTC the CLI publishes topic delta.ui itself."""
         r = await self._post_retry("/api/bridge/ui", body, "ui")
         return _json(r)
 
     async def send_decide(self, body: dict) -> dict:
-        """0.19.0: POST /api/bridge/decide {question, options?, recommend?, context?, recent?}
+        """0.21.0: POST /api/bridge/decide {question, options?, recommend?, context?, recent?}
         | {id, ...changes} | {id, delete: true} -> {ok, id, number}; BridgeError with the
         status otherwise (403/404/409/422/503). Over WebRTC: the vh.decide RPC."""
         r = await self._post_retry("/api/bridge/decide", body, "decide")
@@ -500,7 +500,7 @@ class BridgeRoom:
             self.emit("participant_disconnected", p)
         elif t == "peer-updated":
             p = self._participant(ev)
-            # 0.19.0: attributes (Silent Mode vh.mic_muted/...) like rtc.Room's event
+            # 0.21.0: attributes (Silent Mode vh.mic_muted/...) like rtc.Room's event
             self.emit("participant_attributes_changed", dict(p.attributes), p)
         elif t == "speakers":
             self.emit("active_speakers_changed",

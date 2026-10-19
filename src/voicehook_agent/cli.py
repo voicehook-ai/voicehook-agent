@@ -173,7 +173,7 @@ of this machine is in the call: `decide` and `status --doing/--open/--done` go o
 relay (via:"relay", sender/sub = its session name); `relay-next [--timeout S]` prints the
 answers; `decide --wait [--timeout S]` waits for this one (docs/CLI.md).
 
-Decision background + page control (0.19.0):
+Decision background + page control (0.21.0):
     decide ... --context TEXT        background for Delta (max 1500 chars, never shown): what,
                                      why, what happens on yes / on no; --recent TEXT (max 600)
                                      = the last turn of the asking session. Also with --id and
@@ -732,7 +732,7 @@ class _Control:
         self.activity_path: Path | None = None
         self.stale_s = relay.stale_error_seconds()  # 0.13.0 stale_error threshold
         self.activity_sent: tuple[str, float] | None = None  # 0.13.0 activity_now
-        self.activity_project: str | None = None  # 0.19.0 `activity --project`, kept for later packets
+        self.activity_project: str | None = None  # 0.21.0 `activity --project`, kept for later packets
         self.leaving = False
         # 0.10.1: no-human guard. Starts at join (nobody seen yet), stops while a
         # human is in the room, restarts when the last one leaves. Spans reconnects.
@@ -757,7 +757,7 @@ class _Control:
         self.card_seq = 0
         self.api_base = ""
         self.lk_jwt = ""
-        # 0.19.0 Silent Mode: aggregate of the humans' vh.mic_muted/vh.speaker_muted/vh.away
+        # 0.21.0 Silent Mode: aggregate of the humans' vh.mic_muted/vh.speaker_muted/vh.away
         self.human_state = relay.human_state([])
 
     def attach(self, room: rtc.Room) -> None:
@@ -769,7 +769,7 @@ class _Control:
         self.room_ready.clear()
 
     def humans_changed(self, room) -> None:
-        """Recount humans in `room` (see relay.is_human_peer), arm/stop the guard. 0.19.0: also
+        """Recount humans in `room` (see relay.is_human_peer), arm/stop the guard. 0.21.0: also
         the human state (Silent Mode); a change is queued for `next` as type human_state."""
         peers = [(_kind_label(p), dict(getattr(p, "attributes", None) or {}))
                  for p in room.remote_participants.values()]
@@ -815,7 +815,7 @@ def _human_identities(room) -> list[str]:
 
 
 async def _publish_ui(room, body: dict) -> dict:
-    """0.19.0 page control: bridge -> POST /api/bridge/ui (body without v/via), WebRTC ->
+    """0.21.0 page control: bridge -> POST /api/bridge/ui (body without v/via), WebRTC ->
     topic delta.ui (v2 packet) ONLY to the humans in the room. No human: nothing is sent
     (an empty destination list would reach everyone)."""
     send_ui = getattr(room, "send_ui", None)
@@ -1003,7 +1003,7 @@ or external references), PNG/JPEG/WebP 1 MB; invalid: exit 2, nothing sent.
 
 
 UI_HELP = f"""\
-Control the call page of the humans in the room (0.19.0), like their own clicks.
+Control the call page of the humans in the room (0.21.0), like their own clicks.
 
   voicehook-agent ui open|close|min|medium|large|max <window>
   voicehook-agent ui layout <preset>
@@ -1033,8 +1033,8 @@ Examples:
 _SAY_MODES = ("append", "overwrite", "revise")
 SAY_DEFAULT_MODE = "append"
 _DECIDE_RPC = "vh.decide"  # decisions.RPC_METHOD on the worker (Decision Board)
-DECIDE_CONTEXT_MAX = 1500  # 0.19.0 decisions.CONTEXT_MAX: background for Delta, never shown
-DECIDE_RECENT_MAX = 600    # 0.19.0 decisions.RECENT_MAX: last turn of the asking session
+DECIDE_CONTEXT_MAX = 1500  # 0.21.0 decisions.CONTEXT_MAX: background for Delta, never shown
+DECIDE_RECENT_MAX = 600    # 0.21.0 decisions.RECENT_MAX: last turn of the asking session
 
 
 def _decide_text(value: str | None, flag: str, limit: int) -> str | None:
@@ -1050,7 +1050,7 @@ def _decide_text(value: str | None, flag: str, limit: int) -> str | None:
 
 async def _decide_rpc(ctl: _Control, req: dict) -> dict:
     """vh.decide RPC to the voicebot (own decide, and 0.16.0 helper requests with sender;
-    a helper request never touches the idle watchdog). 0.19.0: context/recent ride along;
+    a helper request never touches the idle watchdog). 0.21.0: context/recent ride along;
     bridge transport: POST /api/bridge/decide instead of the RPC."""
     body = {k: v for k, v in (
         ("question", req.get("question")), ("options", req.get("options") or None),
@@ -1229,7 +1229,7 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
             if stale:
                 hints["stale_error"] = stale
             hints.update(_now_view(ctl))
-        hints["human_state"] = dict(ctl.human_state)  # 0.19.0 Silent Mode, on every next
+        hints["human_state"] = dict(ctl.human_state)  # 0.21.0 Silent Mode, on every next
         if ev is None:
             return {"ok": True, "type": "timeout", "pending": 0, **hints}
         if ev.get("type") == "user":
@@ -1257,7 +1257,7 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
             return {"ok": False, "error": str(e)}
         if ctl.activity_path is None:
             return {"ok": False, "error": "activity log not available in this join"}
-        if project is not None:  # 0.19.0: field project on this and every later operator.activity
+        if project is not None:  # 0.21.0: field project on this and every later operator.activity
             ctl.activity_project = project
         try:
             vactivity.append_line(ctl.activity_path.parent, line)
@@ -1383,7 +1383,7 @@ async def _publish_activity(ctl: _Control, lines: list[str]) -> bool:
     if room is None:
         return False
     payload: dict = {"lines": lines, "ts": time.time()}
-    if ctl.activity_project:  # 0.19.0 `activity --project`: overrides the derived project tag
+    if ctl.activity_project:  # 0.21.0 `activity --project`: overrides the derived project tag
         payload["project"] = ctl.activity_project
     try:
         await room.local_participant.publish_data(
@@ -2060,7 +2060,7 @@ async def _connect_and_listen(
                                       _room_name(), stop.is_set()))
 
     def _on_attributes_changed(changed, p) -> None:
-        if ctl is not None:  # 0.19.0 Silent Mode: vh.mic_muted / vh.speaker_muted / vh.away
+        if ctl is not None:  # 0.21.0 Silent Mode: vh.mic_muted / vh.speaker_muted / vh.away
             ctl.humans_changed(room)
 
     room.on("participant_connected", _on_participant_connected)
@@ -2778,7 +2778,7 @@ def _client_request(args) -> dict:
     if args.cmd == "leave":
         return {"cmd": "leave", "say": args.say} if args.say else {"cmd": "leave"}
     if args.cmd == "decide":
-        # 0.19.0: background for Delta; over the limit -> ValueError, nothing sent
+        # 0.21.0: background for Delta; over the limit -> ValueError, nothing sent
         context = _decide_text(getattr(args, "context", None), "--context", DECIDE_CONTEXT_MAX)
         recent = _decide_text(getattr(args, "recent", None), "--recent", DECIDE_RECENT_MAX)
         if args.delete or args.id:
@@ -2815,7 +2815,7 @@ def _client_request(args) -> dict:
             req["recent"] = recent
         return req
     faq_raw = getattr(args, "faq", None) or []
-    project = vui.project_field(getattr(args, "project", None))  # 0.19.0
+    project = vui.project_field(getattr(args, "project", None))  # 0.21.0
     if (args.text is not None or args.doing is not None or args.open or args.done or args.file
             or faq_raw):
         file_obj = None
@@ -2926,7 +2926,7 @@ def _run_client(args) -> int:
         return 3
     if wait_answer and reply.get("ok"):
         reply["hint"] = "own join: the answer comes as a `next` event type decision"
-    if req.get("cmd") == "ui" and reply.get("ok"):  # 0.19.0: one confirmation line
+    if req.get("cmd") == "ui" and reply.get("ok"):  # 0.21.0: one confirmation line
         line = vui.summary(reply.get("applied") if isinstance(reply.get("applied"), dict) else req["body"])
         print(line + (" (no human in the call, nothing shown)" if reply.get("humans") == 0 else ""),
               flush=True)
@@ -3219,7 +3219,7 @@ def main(argv: list[str] | None = None) -> None:
     p_status.add_argument("-f", "--file", default=None, metavar="JSON",
                           help="board file {doing, open[], done[]}; flags add to it")
     p_status.add_argument("--project", default=None, metavar="NAME",
-                          help="0.19.0: your project (1-40 chars, e.g. voicehook, salesengine, kunden, "
+                          help="0.21.0: your project (1-40 chars, e.g. voicehook, salesengine, kunden, "
                                "sonstiges), sent as board field project; overrides the project the "
                                "server derives for the focus filter. Also over the relay (helper)")
     _add_session(p_status)
@@ -3265,7 +3265,7 @@ def main(argv: list[str] | None = None) -> None:
                         help="open the card view big in the middle with this card at full size "
                              "(diagrams; implies --panel cards)")
     _add_session(p_show)
-    # 0.19.0: control the humans' call page (topic delta.ui / POST /api/bridge/ui)
+    # 0.21.0: control the humans' call page (topic delta.ui / POST /api/bridge/ui)
     p_ui = sub.add_parser(
         "ui", help="control the call page of the humans: open/close/min/medium/large/max a "
         "window, pick a layout, move a window into a slot, focus one project",
@@ -3327,7 +3327,7 @@ def main(argv: list[str] | None = None) -> None:
     p_act.add_argument("text", nargs="+", help="what is happening now ('-' reads it from stdin); "
                        "scrubbed, capped at 120 chars; no paths, secrets or personal data")
     p_act.add_argument("--project", default=None, metavar="NAME",
-                       help="0.19.0: your project (1-40 chars), sent as field project on this and "
+                       help="0.21.0: your project (1-40 chars), sent as field project on this and "
                             "every later operator.activity of the join (focus filter)")
     _add_session(p_act)
     # Decision Board: a question only the human can decide (yes/no or 2-3 options). The
@@ -3346,11 +3346,11 @@ def main(argv: list[str] | None = None) -> None:
     p_dec.add_argument("--delete", action="store_true", default=False,
                        help="delete the decision given by --id")
     p_dec.add_argument("--context", default=None, metavar="TEXT",
-                       help=f"0.19.0, always pass it: background for Delta, never shown to the human "
+                       help=f"0.21.0, always pass it: background for Delta, never shown to the human "
                             f"(max {DECIDE_CONTEXT_MAX} chars): 2-4 plain sentences, what it is about, why, "
                             "what happens on yes, what on no. With --id: change it ('' clears)")
     p_dec.add_argument("--recent", default=None, metavar="TEXT",
-                       help=f"0.19.0: the last turn of the asking session, one short line (max "
+                       help=f"0.21.0: the last turn of the asking session, one short line (max "
                             f"{DECIDE_RECENT_MAX} chars)")
     p_dec.add_argument("--timeout", type=float, default=120.0, metavar="SEC",
                        help="0.16.0, with --wait (no SEC): wait up to SEC for the answer (default 120)")

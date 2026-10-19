@@ -14,7 +14,7 @@ no join control socket answers.
 
 Remote relay (relay.json kind remote {url, token}, url = <base>/api/activity/relay):
 * POST <url>/decide  {from, question?, options?, recommend?, id?, delete?, context?, recent?}
-  -> {ok, id, number} (0.19.0: context/recent = background for Delta)
+  -> {ok, id, number} (0.21.0: context/recent = background for Delta)
 * POST <url>/status  {from, doing?, open?, done?, project?} -> {ok}; all empty removes the card
 * GET  <url>/next?from=<label>&timeout=<0..25> -> {events: [{type: "decision", ...}]}
 Bearer relay token, never in the URL. 401 marks the token dead (relay.dead) like the hook.
@@ -309,7 +309,7 @@ def clear_dir(dir_: Path) -> None:
 # --------------------------------------------------------------------------- #
 # request bodies (both relay kinds)
 # --------------------------------------------------------------------------- #
-DECIDE_KEYS = ("question", "options", "recommend", "id", "delete", "context", "recent")  # 0.19.0
+DECIDE_KEYS = ("question", "options", "recommend", "id", "delete", "context", "recent")  # 0.21.0
 STATUS_KEYS = ("doing", "open", "done", "project")
 
 
@@ -319,7 +319,7 @@ def decide_body(req: dict) -> dict:
 
 def status_body(board: dict) -> dict:
     """{doing, open, done, project?} of a CLI board (faq is not part of the relay contract;
-    0.19.0: project = `status --project`)."""
+    0.21.0: project = `status --project`)."""
     out: dict = {}
     if isinstance(board.get("doing"), str):
         out["doing"] = board["doing"]
@@ -337,7 +337,7 @@ def _valid_decide(body: object) -> dict | None:
         return None
     out: dict = {}
     for k, typ in (("question", str), ("id", str), ("delete", bool),
-                   ("context", str), ("recent", str)):  # 0.19.0 context/recent
+                   ("context", str), ("recent", str)):  # 0.21.0 context/recent
         if body.get(k) is not None:
             if not isinstance(body[k], typ):
                 return None
@@ -368,7 +368,7 @@ def _valid_status(body: object) -> dict | None:
             if not isinstance(v, list) or len(v) > 10 or not all(isinstance(x, str) for x in v):
                 return None
             out[k] = v
-    if body.get("project") is not None:  # 0.19.0 `status --project` of a helper
+    if body.get("project") is not None:  # 0.21.0 `status --project` of a helper
         p = body["project"]
         if not isinstance(p, str) or not 1 <= len(p) <= 40:
             return None

@@ -1,4 +1,4 @@
-"""0.19.0 `voicehook-agent ui`: control the humans' call page. Normalization (aliases, case,
+"""0.21.0 `voicehook-agent ui`: control the humans' call page. Normalization (aliases, case,
 umlauts), the v2 packet on topic delta.ui only to the humans (WebRTC), POST /api/bridge/ui
 (bridge), errors before sending, the confirmation line."""
 from __future__ import annotations

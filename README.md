@@ -79,10 +79,10 @@ uvx voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name <y
 - stdout prints what the user and the voicebot say; every line on stdin is spoken.
 
 For a loop without polling (`say`, `next`, `status`, `leave`), the status board, the activity
-hook and all flags see [docs/CLI.md](docs/CLI.md). Since 0.19.0: `decide --context "..."`
+hook and all flags see [docs/CLI.md](docs/CLI.md). Since 0.21.0: `decide --context "..."`
 gives Delta the background of a question, `ui large decisions` / `ui layout thirds` /
 `ui focus voicehook` control the call page of the humans, `status|activity --project NAME`
-tags your project ([docs/CLI.md](docs/CLI.md#page-control-ui-0190)).
+tags your project ([docs/CLI.md](docs/CLI.md#page-control-ui-0210)).
 
 Several Claude Code sessions on one machine (0.15.0): run `voicehook-agent hook install`
 once; while one session is in a call, every other session reports turn goal, PR, deploy

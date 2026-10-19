@@ -1,4 +1,4 @@
-"""0.19.0: background for Delta on decisions (`decide --context/--recent`, length limits, both
+"""0.21.0: background for Delta on decisions (`decide --context/--recent`, length limits, both
 transports, the helper relay), verdict "unclear" in `next` and for helpers, and `--project`
 on status/activity (board field, operator.activity field, relay body)."""
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""Control the call page of the humans in the room: `voicehook-agent ui` (0.19.0).
+"""Control the call page of the humans in the room: `voicehook-agent ui` (0.21.0).
 
     ui open|close|min|medium|large|max <window>   one window (state)
     ui layout <preset>                            the layout preset
