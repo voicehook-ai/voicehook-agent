@@ -570,7 +570,7 @@ def print_snippet(agent: str) -> str:
         return (f"# {codex_home() / 'hooks.json'}\n" + json.dumps(codex_hooks_snippet(), indent=2)
                 + f"\n\n# {codex_home() / 'config.toml'} (notify only if you have none yet)\n"
                 + codex_toml_snippet())
-    return json.dumps(vact.snippet(), indent=2)
+    return json.dumps(vact.snippet(vact.hook_bin()), indent=2)
 
 
 def main(args: list[str]) -> int:
