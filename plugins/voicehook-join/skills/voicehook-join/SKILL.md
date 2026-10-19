@@ -71,6 +71,7 @@ MCP/bridge = one agent in the call; activity lines are only what that agent writ
 | `timeout` | silence (also `reconnect: true` = server restart); `humans_present` (in `join` and every `next`) `0` or `human_away: true` after `join` = the person is out right now | call `next` again; never create a new room or call |
 | `human_left` | the person dropped out; the call stays open `grace_s` s for them to come back | keep calling `next`, do not leave, never create a new room |
 | `human_rejoined` | the person is back (also when you joined while they were out) | greet them briefly in one `say` (not with `greeted: true`: your join `greet` was just spoken), go on |
+| `voicebot_left` / `voicebot_back` | the voicebot dropped out (e.g. server update; usually back within ~20 s, the person may hear silence) / is back after `seconds` | tell your user in chat at once (a `say` is not heard), keep calling `next`, never leave; not back within about a minute, or `ended`: offer your user a new call (`create_call` + background watcher), never on your own / `say` works again, repeat the last important point briefly |
 | `operator` | another agent addressed YOU (`addressed_to_you: true`, max 1 per 5 s) | answer that agent |
 | `context` | the call language changed: new `context` block | speak `context.lang` from now on |
 | `data` | another agent sent you data with `send_data`: `from`, `kind` (`json`/`text`/`file`), `payload` (or `url` for a big file), `name`?, `mime`? | use it; never speak it |
@@ -79,24 +80,26 @@ MCP/bridge = one agent in the call; activity lines are only what that agent writ
 `user` events and `operators_said` lines carry `addressed_to` (labels/names addressed, incl. `"Delta"`; empty = nobody named
 or ambiguous) and `addressed_to_you`; `operators_said` lines also `to_human` (no one addressed, or the person).
 
-- Read `agent_said` (what the voicebot said on its own) before answering: never repeat it; correct it in one sentence if it was wrong; say nothing if it already answered fully.
+- Read `agent_said` (what the voicebot said on its own) before every `say`: never repeat it or talk over him; add only what is missing, correct it in one sentence if it was wrong; say nothing if it already answered fully. Filters or wrappers around `next` must never drop `agent_said`.
 - `operators_said` = `[{speaker, op, model?, text, ...}]`: what OTHER agents said since the last `next` (never your own echo); never repeat it.
 - `stale_error` in `next`: your board or feed is older than 60 s while you work. Do what its `message` says NOW (call `status` / `activity`), then `say`. `board_now` / `activity_now`: what the voicebot knows about you.
 - A tool error that starts with `404` or `410`: the session is over. Do not rejoin with the old handle; ask the user for a fresh link if they want to continue.
 
 ## One agent per call (solo), or several (rules: https://voicehook.ai/agent/MULTI-AGENT.md)
 
-One-agent call (default, `create_call` without `solo` or with `solo: true`): one agent per call, a second `join` gets `409`. Delta speaks in your voice (`join` `voice`) and in first person, as you, only from your `status`, `activity` and `decide`, each item once. Stream what you do there, step by step: Delta speaks it as you; use `say` only for urgent or verbatim text. `send_data` never reaches Delta. Several agents (`create_call` with `solo: false`), these rules are binding:
+One-agent call (default, `create_call` without `solo` or with `solo: true`): one agent per call, a second `join` gets `409`. Delta speaks in your voice (`join` `voice`) and in first person, as you, only from your `status`, `activity` and `decide`, each item once. Stream what you do there, step by step: Delta speaks it as you, in his own flow. **ONE voice:** `say` only to answer a direct question, or when Delta is wrong or forgot something important (a `say` overrides him and breaks his flow); your other sessions are helpers (data only, below), never a second voice. `send_data` never reaches Delta. Several agents (`create_call` with `solo: false`), these rules are binding:
 1. Read `operators_said` in EVERY `next` result, `timeout` too. Answer only when `addressed_to_you` (or clearly meant); someone else or Delta addressed: stay silent (except `routed_by_delta`: Delta handed you the request, do it).
 2. Never answer another agent's question to the human; never ask Delta yourself. Speak only `context.lang`, greeting included.
 3. You are a participant: no code changes, actions or forwarding unless the human asks you. Check `operators_said` and `status` before you claim what you receive.
 4. Short, only when needed; else stay silent and show your work on board and feed.
 5. Data for another agent (JSON, text, a file as base64): `send_data` with `to` (label, identity or `"*"`), `kind`, `payload`, `name`?, `mime`?; never spoken, the human only sees one feed line. Max 15 KB per packet, so a file inline only up to about 11 KB (base64); a received `url` is a path on https://voicehook.ai, downloaded with your `session` (see the protocol link); bigger files: REST bridge upload (https://voicehook.ai/agent/OPERATOR-PROTOCOL.md).
-Helper sessions (data only, no voice, no join, never a second agent): `helper_credential {session, label}` gives a `token` (ends with the call; hand it over as a file or via ssh, never in a chat); the helper calls `helper_status`, `helper_decide`, `helper_next`, `helper_activity` with `credential` and `helper_name`. More: MULTI-AGENT.md ("Helper sessions").
+Helper sessions (data only, no voice, no join, never a second agent): `helper_credential {session, label}` gives a `token` (ends with the call; hand it over through a pipe such as ssh, never in a chat, argv or a file of yours); the helper calls `helper_status`, `helper_decide`, `helper_next`, `helper_activity` with `credential` and `helper_name`. More: MULTI-AGENT.md ("Helper sessions").
+
+Mishearing (a product, a name): `add_vocab` with `terms` and/or `fixes` (`{wrong, right}`) teaches the call's speech recognition; it adds to the paying account's vocabulary (add only, the user manages it on https://voicehook.ai/konto), max 20 per request and 100 per call; corrections apply at once, words from the next pause (live: next call); 409 = guest call. Tell the user in one line what you added.
 
 ## Keep the user informed while you work
 
-- **Status board** (`status`, never spoken): `doing` = current step + ETA (max 400 chars), `open`/`done` = short items, `faq` = the 3 questions the user most likely asks next with short answers (max 6 pairs). Always send the WHOLE board; it replaces the last one. Update it on every request, delegation, result and deploy step. Finished: move it to `done`.
+- **Status board** (`status`, never spoken): `doing` = current step + ETA (max 400 chars), `open`/`done` = short items, `faq` = the 3 questions the user most likely asks next with short answers (max 6 pairs). Always send the WHOLE board; it replaces the last one. Update it on every request, delegation, result and deploy step. Finished: move it to `done`. Only while you really work: update it at least every 3 min while working; all done or idle: clear it (empty `doing`/`open`/`done`).
 - **Board items stand alone:** every `open`/`done` item says WHAT concretely (thing and place), readable without context. Questions waiting for the user never go into `open` (use `decide`). One item per thing, never bundles. Max 10 items per list (200 chars each): if more, keep the most important, the rest goes to `faq`. `doing` = the concrete current step.
   Good: `Login-Redirect nach Token-Refresh testen` · `PR #250: Überlappung mit Gate prüfen` · `doing: Prüfe PR #250 auf Überlappung`. Bad: `6 Entscheidungen von Oliver` · `diverse Fixes` · `doing: arbeite an PRs`.
   Optional `emoji` on `status`: pick the emoji that best shows your current state, thought or mood; your own choice, change it whenever it changes.
@@ -111,7 +114,7 @@ Helper sessions (data only, no voice, no join, never a second agent): `helper_cr
 
 ### Good explanatory images, fast
 
-- **Image or text?** An image when it shows a relation, a flow, a comparison or a layout: what takes three sentences to say and one look to see. Lists, code and plain facts stay text or code.
+- **Image or text?** An image when it shows a relation, a flow, a comparison or a layout: what takes three sentences to say and one look to see. Lists, code and plain facts stay text or code. Ring shapes (`say` with `shape`) only for short signals and state (check, cross, question, attention); explanations and diagrams = image card, shown large (`panel: "cards"`).
 - **Build SVG**, not pixels: small, sharp on every screen, quick to write.
   - `viewBox` only (no fixed width/height): `0 0 800 800` square or `0 0 800 1000` portrait, both read well on a phone.
   - Small card (seen as preview or on a phone): few clear shapes, about 7 boxes or terms, one idea per image. Big type: `font-size` 24 or more at an 800 wide viewBox; labels of 1 to 3 words. Big diagram (swimlanes, process with many steps, arrows and labels): draw everything it needs, wide `viewBox` (e.g. `0 0 1800 800`), `font-size` 24+ at that width, and `show` it with `large: true`.
@@ -134,10 +137,10 @@ Compare A and B:
 
 ## Decisions
 
-- ALWAYS `decide` for every question the human decides (yes/no, A/B, approval, a value), plus one short `say` pointing to it. Never only `say`, never into `open`: Status OR Decision Board, never both.
+- ALWAYS `decide` (a clickable question) for every question the human decides (yes/no, A/B, approval, a value), one topic each, understandable without the conversation, plus one short `say` pointing to it. Never only by voice, never into `open`: Status OR Decision Board, never both. The question text stays short and self-contained; pass `context` where supported: hidden background (what it is about, what happens on yes / no, why it matters), not shown on the card, Delta uses it to explain the question when the human asks.
 - Yes/no first (leave out `options`), else 2-3 `options` (max 40 chars each) with `recommend`; `question` max 160. Example: `decide(question="Deploy the fix now?")`, then `say("Frage 2 steht auf dem Board.")`.
-- Every PR you opened that can be merged goes on the board by YOU (its author) via `decide`: repo, number, one sentence of content, test state; repos with auto-deploy add "merge after the call".
-- The answer comes as `next` type `decision`: `verdict` yes|no|option|other, `option`, `text` (the person can always answer freely by voice), `by`. Confirm in one `say`, then act. `next` type `helper_decision` (`from`, `label`, `id`, `number`, `question`, `verdict`, ...) = the human answered a HELPER session's question: a routing hint, never speak or answer it; send the answer to that session (e.g. Claude Code SendMessage / your harness's session messaging) so it continues.
+- Every PR you opened that can be merged goes on the board by YOU (its author) via `decide`: repo, number, one sentence of content, test state; repos with auto-deploy add "merge after the call". Merge only on fully green CI (all checks, also without branch protection); verify a deploy live (e.g. the version endpoint), never by the deploy run's status: a run can be a no-op ("superseded").
+- The answer comes as `next` type `decision`: `verdict` yes|no|option|other, `option`, `text` (the person can always answer freely by voice), `by`. Confirm in one `say`, then act. `next` type `helper_decision` (`from`, `label`, `id`, `number`, `question`, `verdict`, ...) = the human answered a HELPER session's question: a routing hint, never speak or answer it; send question and answer to exactly that session (`from`; e.g. Claude Code SendMessage / your harness's session messaging) so it continues, never to all sessions. A remote-controlled session on another machine may not get it: check that it reacted (its board or activity), else, with your user's OK, type into its terminal (e.g. tmux send-keys over ssh).
 
 ## Operator rhythm (mandatory)
 
@@ -156,7 +159,7 @@ Compare A and B:
 - Plain, complete, phone-ready sentences: no abbreviations, symbols, URLs, codes, markdown, lists or emoji; round numbers. One complete thought per `say`; split long content into several `say` (`mode: "append"`, the default).
 - Status, decisions and topic changes always with context: which project, what happened, why it matters, what happens on A and on B. One question per topic.
 - `mode: "overwrite"` replaces your not yet spoken says; `"revise"` does the same and sends you a `revise` event.
-- No secrets and no personal data in `say`, board or feed: they travel in clear text.
+- No secrets and no personal data in `say`, board or feed: they travel in clear text. Credentials (passwords, API keys, the helper `token`) never in a chat, a call, a board, a card, argv or a file of yours. Never type a password into a login page yourself: put it on your user's clipboard and guide them one step at a time.
 
 ## Notices from the call
 
