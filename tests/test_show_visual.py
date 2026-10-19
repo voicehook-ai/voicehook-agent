@@ -1,6 +1,6 @@
 """`show` + `say --shape-*`: shapes and emotion for the ring (operator.visual).
 
-Parsing and validation like the server (range 0..1, <=200 points, <=2 KB, only
+Parsing and validation like the server (range 0..1, <=400 points, <=2 KB, only
 M L Q C Z, multi <=4, label <=24, hold 800..8000), invalid -> exit 2 and nothing
 sent, transport choice: WebRTC data channel topic operator.visual vs. bridge
 POST /api/bridge/visual."""
@@ -70,7 +70,7 @@ def test_path_rejects(d, msg):
     ({"type": "preset", "name": "check", "hold_ms": 1000.5}, "whole number"),
     ({"type": "preset", "name": "check", "label": "x" * 25}, "max 24"),
     ({"type": "multi", "items": []}, "non-empty"),
-    ({"type": "multi", "items": [{"type": "preset", "name": "one"}] * 5}, "max 4"),
+    ({"type": "multi", "items": [{"type": "preset", "name": "one"}] * 13}, "max 12"),
     ({"type": "multi", "items": [{"type": "multi", "items": []}]}, "nested"),
     ({"type": "multi", "items": [{"type": "preset", "name": "x"}]}, "multi item 1"),
     ("check", "JSON object"),
@@ -81,21 +81,21 @@ def test_shape_rejects(shape, msg):
 
 
 def test_point_limit_over_whole_multi():
-    pts = [[0.5, 0.5]] * 100
+    pts = [[0.5, 0.5]] * 200
     ok = {"type": "multi", "items": [{"type": "polygon", "points": pts[:3]}] * 2}
     vv.validate_shape(ok)
     too_many = {"type": "multi", "items": [{"type": "polygon", "points": pts},
                                            {"type": "polygon", "points": pts},
                                            {"type": "polygon", "points": pts[:3]}]}
-    with pytest.raises(vv.VisualError, match="203 points, max 200"):
+    with pytest.raises(vv.VisualError, match="403 points, max 400"):
         vv.validate_shape(too_many)
 
 
-def test_size_limits_path_2kb_shape_8kb():
-    ok = [[0.123456789, 0.987654321]] * 200  # 200 points fit into 8 KB
+def test_size_limits_path_2kb_shape_12kb():
+    ok = [[0.123456789, 0.987654321]] * 400  # 400 points fit into 12 KB
     vv.validate_shape({"type": "polygon", "points": ok})
-    big = [[0.12345678901234568, 0.9876543209876543]] * 200  # ~8.2 KB
-    with pytest.raises(vv.VisualError, match="bytes as JSON, max 8192"):
+    big = [[0.12345678901234568, 0.9876543209876543]] * 400  # ~16 KB
+    with pytest.raises(vv.VisualError, match="bytes as JSON, max 12288"):
         vv.validate_shape({"type": "polygon", "points": big})
     d = "M0.1,0.1 " + "L0.12345678901234568,0.9876543209876543 " * 60  # 61 pairs, >2 KB
     with pytest.raises(vv.VisualError, match="path d is .* bytes, max 2048"):
@@ -327,3 +327,16 @@ def test_rate_limit_local_and_bridge_429(monkeypatch):
     assert r429 == {"ok": False, "type": "rate_limited", "error": cli.VISUAL_RATE_ERROR}
     r400 = asyncio.run(cli._control_handler(_ctl(_Rejected(remote_participants={})), req))
     assert r400["type"] == "invalid" and "bad label" in r400["error"]
+
+
+def test_chart_five_paths_ok():
+    """Oliver 2026-10-19: a bar chart from 5 paths (axes, 3 bars, trend line) failed with "max 4"."""
+    chart = {"type": "multi", "label": "Umsatz", "items": [
+        {"type": "path", "d": "M0.1 0.1 L0.1 0.9 L0.9 0.9"},
+        {"type": "path", "d": "M0.2 0.9 L0.2 0.6 L0.3 0.6 L0.3 0.9"},
+        {"type": "path", "d": "M0.45 0.9 L0.45 0.45 L0.55 0.45 L0.55 0.9"},
+        {"type": "path", "d": "M0.7 0.9 L0.7 0.3 L0.8 0.3 L0.8 0.9"},
+        {"type": "path", "d": "M0.15 0.7 L0.5 0.5 L0.85 0.25"},
+    ]}
+    s = vv.validate_shape(chart)
+    assert len(s["items"]) == 5
