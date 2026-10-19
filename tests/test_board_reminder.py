@@ -407,10 +407,29 @@ def test_answer_text_scrubs():
     assert "fakefakefakefake" not in t and "Antwort von Oliver auf deine Frage:" in t
 
 
-def test_subagent_tool_calls_get_the_reminder_too():
-    """Agent tool: the subagent's hooks carry the parent's session_id plus agent_id; it is
-    reminded like the main agent (same board, same name)."""
+def test_subagent_has_its_own_board_also_in_the_joining_session():
+    """Agent tool: hook events carry the parent's session_id plus agent_id. 0.21.1: each
+    subagent is its own helper, also inside the joining session (Oliver: "ich seh immer nur
+    deine"); reminder only after 3 min without a board, then with its own name."""
+    _relay(owner=ms.session_hash("sess-1"))
+    sub = {"agent_id": "a1b2c3", "agent_type": "general-purpose"}
+    assert board.handle(ev(), now=T0) is None                         # the joining session itself
+    assert board.handle(ev(**sub), now=T0) is None                    # subagent, just started
+    out = ctx(board.handle(ev(**sub), now=T0 + board.REMIND_AFTER_S + 1))["additionalContext"]
+    assert "kein Board" in out and '"general-purpose ' in out
+    board.handle(bash('vh-helper status "Hook" "PR 84, ETA 5 Min"', **sub), now=T0 + 200)
+    assert board.handle(ev(**sub), now=T0 + 300) is None              # fresh
+    out = ctx(board.handle(ev(**sub), now=T0 + 200 + 400))["additionalContext"]
+    assert 'vh-helper status "Hook"' in out and "6 Min alt" in out
+    assert board.handle(ev(), now=T0 + 700) is None                   # parent still silent
+
+
+def test_subagent_state_only_with_board_and_separate_from_parent():
     _relay()
-    board.handle(bash('vh-helper status "SE Gate" "x"'), now=T0)
-    out = board.handle(ev(agent_id="a1b2", agent_type="general-purpose"), now=T0 + 400)
-    assert 'vh-helper status "SE Gate"' in ctx(out)["additionalContext"]
+    sub = {"agent_id": "zz9", "agent_type": "Explore"}
+    board.handle(ev(), now=T0)                                        # parent helper: arbeitet
+    board.handle(ev(**sub), now=T0 + 1)                               # no board yet: no state
+    assert [p["from"] for p in POSTS] == ["salesengine " + ms.label_suffix("sess-1")]
+    board.handle(bash('vh-helper status "Scout" "x"', **sub), now=T0 + 2)
+    board.handle(ev("PreToolUse", tool_name="Read", tool_input={}, **sub), now=T0 + 3)
+    assert POSTS[-1] == {"op": "state", "from": "Scout", "state": "arbeitet"}
