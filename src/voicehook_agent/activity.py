@@ -976,6 +976,12 @@ def main(argv: list[str] | None = None) -> int:
                 relay_hook(raw)
                 notify_progress(raw)  # 0.18.0: the session goes on, its question leaves
         return 0  # always 0, nothing on stdout (PreToolUse: no output = allow)
+    if cmd in ("codex", "codex-notify"):  # 0.20.0: Codex CLI hooks + notify (agents.py)
+        from . import agents
+        return agents.main(args)
+    if cmd == "mcp":  # 0.20.0: local MCP server (status/decide/next/activity), stdio
+        from . import mcpserver
+        return mcpserver.main(args[1:])
     if cmd == "notify-post":  # 0.18.0: detached child of the hook, job on stdin
         from . import notify
         try:
@@ -997,26 +1003,56 @@ def main(argv: list[str] | None = None) -> int:
             delay = 0.0
         bridge_flush(delay=delay)
         return 0
-    if cmd == "print":
-        print(json.dumps(snippet(), indent=2))
-        return 0
-    if cmd == "install":
-        path = default_settings_path()
-        rest = args[1:]
-        if rest[:1] == ["--settings"] and len(rest) >= 2:
-            path = Path(rest[1]).expanduser()
-        elif rest and rest[0].startswith("--settings="):
-            path = Path(rest[0].split("=", 1)[1]).expanduser()
-        elif rest:
-            print(f"[error] unknown argument {rest[0]!r}", file=sys.stderr)
+    if cmd in ("print", "install"):
+        opts, err = _install_opts(args[1:])
+        if err:
+            print(f"[error] {err}", file=sys.stderr)
             return 2
-        rc, msg = install(path)
+        from . import agents
+        if cmd == "print":
+            print(agents.print_snippet(opts["agent"]))
+            return 0
+        if opts["agent"] == agents.CODEX:
+            if opts["settings"]:
+                print("[error] --settings is for Claude Code; Codex: --codex-home DIR",
+                      file=sys.stderr)
+                return 2
+            rc, msg = agents.install_codex(opts["codex_home"])
+        else:
+            if opts["codex_home"]:
+                print("[error] --codex-home needs --agent codex", file=sys.stderr)
+                return 2
+            rc, msg = install(opts["settings"] or default_settings_path())
         print(msg, file=sys.stderr if rc else sys.stdout)
         return rc
     print("usage: voicehook-agent hook {pre-tool-use|post-tool-use|post-tool-use-failure|"
-          "user-prompt-submit|stop|notification|permission-request|print|"
-          "install [--settings PATH]}", file=sys.stderr)
+          "user-prompt-submit|stop|notification|permission-request|"
+          "print [--agent claude|codex]|install [--agent claude|codex] [--settings PATH] "
+          "[--codex-home DIR]|codex <event>|codex-notify <json>|mcp [--agent NAME]}",
+          file=sys.stderr)
     return 2
+
+
+def _install_opts(rest: list[str]) -> tuple[dict, str]:
+    """--agent claude|codex, --settings PATH (Claude Code), --codex-home DIR (Codex)."""
+    opts: dict = {"agent": "claude", "settings": None, "codex_home": None}
+    rest = list(rest)
+    while rest:
+        a = rest.pop(0)
+        key, _, val = a.partition("=")
+        if key not in ("--agent", "--settings", "--codex-home"):
+            return opts, f"unknown argument {a!r}"
+        if not _:
+            if not rest:
+                return opts, f"{key} needs a value"
+            val = rest.pop(0)
+        if key == "--agent":
+            if val not in ("claude", "codex"):
+                return opts, f"--agent must be claude or codex, got {val!r}"
+            opts["agent"] = val
+        else:
+            opts[key.lstrip("-").replace("-", "_")] = Path(val).expanduser()
+    return opts, ""
 
 
 def console_main() -> None:  # `voicehook-agent-hook`

@@ -679,6 +679,66 @@ join; the CLI sends its version as `X-VH-CLI`).
   `voicehook-agent --version` adds `neue Version verfügbar: x.y.z` (German: "new version
   available") when the last server answer named a newer one.
 
+## Other coding agents (0.20.0)
+
+The automation above was Claude-Code-only. `voicehook-agent hook install --agent codex`
+brings it to the **OpenAI Codex CLI**; other agents get the local MCP server and the
+manual commands (`activity`, `status`, `decide`, `relay-next`).
+
+| capability | Claude Code | Codex CLI | Gemini/Antigravity CLI | opencode | Cursor | pi |
+|---|---|---|---|---|---|---|
+| line per tool call | hook | hook (`PreToolUse`/`PostToolUse`) | hooks (BeforeTool/AfterTool), no adapter yet | plugin (`tool.execute.*`), no adapter yet | hooks (IDE; cursor-agent fires few), no adapter yet | extension (`tool_execution_*`), no adapter yet |
+| turn start/end, error | hook | hook (`UserPromptSubmit`, `Stop`) + `notify` | BeforeAgent/AfterAgent | `session.idle`/`session.error` | `stop`, `postToolUseFailure` | `agent_settled`, `turn_end` |
+| text into the session | `additionalContext`, Stop block | same JSON (`additionalContext`, Stop `decision: block`) | `additionalContext` | `session.prompt` (noReply) | `additional_context`, `followup_message` | `sendUserMessage` |
+| permission prompt -> Decision | `PermissionRequest`, `Notification` | `PermissionRequest` (no question event) | Notification (observe only) | `permission.asked` | ask on shell/MCP only | none built in |
+| MCP tools | remote MCP | `voicehook-agent-hook mcp` | `mcpServers` | `mcp` | `.cursor/mcp.json` | `mcp.json` |
+
+### Codex CLI
+
+```bash
+voicehook-agent hook install --agent codex      # $CODEX_HOME (default ~/.codex)
+voicehook-agent hook print --agent codex        # only show what it would write
+```
+
+Writes, each changed file copied to `<file>.voicehook-backup-<UTC time>` first (invalid
+JSON/TOML: nothing changed):
+
+- `hooks.json`: PreToolUse, PostToolUse, UserPromptSubmit, Stop, PermissionRequest,
+  SessionStart -> `voicehook-agent-hook codex <event> || true`. **Codex runs new hooks only
+  after you trust them once:** start `codex`, type `/hooks`, trust the voicehook entries.
+- `config.toml`: `notify = ["voicehook-agent-hook", "codex-notify"]` (only when no `notify`
+  is set; yours stays) and `[mcp_servers.voicehook-local]` (`voicehook-agent-hook mcp
+  --agent codex`, env_vars `VOICEHOOK_*` passed through).
+
+What works in Codex:
+
+- Activity line per tool call. Codex sends no tool `description`: Bash shows a category of a
+  fixed list (`Bash: Tests`, `Git`, `Build`, `Install`, `Lint`, `PR`, `Deploy`), never the
+  command; `apply_patch` shows `Edit: <basename>`.
+- Helper sessions (another session owns the join): `neuer Auftrag`, `Turn fertig`, PR
+  opened/merged, deploy, `Fehler bei Bash` (exit code != 0) over the relay, like Claude Code.
+- Own join (Codex ran `join` from its shell): `Codex: neuer Auftrag` / `Codex: Turn fertig`
+  in its own activity log. Session id = `CODEX_THREAD_ID` (hooks: `session_id`).
+- Turn end also without trusted hooks (`notify`); Stop hook and notify share a turn list,
+  one line per turn.
+- Permission prompt -> a decision on the Decision Board (`Freigabe für Bash: <Codex's
+  reason>?`); the hook never answers it, you still decide in Codex.
+- board.py features (session state, board reminder, answers delivered into the session,
+  0.19.0) run in the Codex adapter as well when this CLI has them; their JSON is what Codex
+  reads (`additionalContext`, Stop `decision: block`).
+- Not available in Codex: questions (`request_user_input`) have no hook event, there is no
+  error event besides a failed tool.
+
+### Local MCP server (any MCP client)
+
+`voicehook-agent-hook mcp [--agent NAME]` (also `voicehook-agent mcp`) speaks MCP over
+stdio with four tools: `status` {doing, open[], done[]}, `decide` {question, options[2-3]?,
+recommend?, wait_s?}, `next` {timeout_s?} and `activity` {text}. A session with its own join
+talks to that join's control socket; every other session is a helper over
+`~/.voicehook/relay.json`. Helper name: `$VOICEHOOK_SESSION_LABEL`, else the name the
+agent's hook used last in that directory, else `<dir> <agent>`. Nothing is spoken, the
+token never appears in tool output. No call on the machine: an error result, nothing sent.
+
 ## Claude Code plugin
 
 This repository is also a Claude Code plugin marketplace (`voicehook`) with one plugin,

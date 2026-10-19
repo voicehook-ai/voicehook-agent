@@ -101,9 +101,22 @@ def session_hash(session_id: object) -> str:
     return _h(sid, "vh-session") if sid else ""
 
 
+SESSION_ID_ENVS = ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID")  # 0.20.0: Codex CLI too
+
+
+def own_session_id() -> str:
+    """Id of the calling agent session: Claude Code (CLAUDE_CODE_SESSION_ID in the Bash tool
+    env), else Codex CLI (CODEX_THREAD_ID in its shell env, the session_id of its hooks)."""
+    for name in SESSION_ID_ENVS:
+        v = (os.environ.get(name) or "").strip()
+        if v:
+            return v
+    return ""
+
+
 def own_session_hash() -> str:
-    """The calling Claude Code session (Bash tool env CLAUDE_CODE_SESSION_ID)."""
-    return session_hash(os.environ.get("CLAUDE_CODE_SESSION_ID"))
+    """Hash of the calling agent session (own_session_id), '' outside an agent."""
+    return session_hash(own_session_id())
 
 
 def _token_hash(token: str) -> str:
@@ -751,8 +764,7 @@ def handle_event(raw: str, now: float | None = None, post=None) -> str | None:
         event = json.loads(raw) if raw and raw.strip() else {}
         if not isinstance(event, dict):
             return None
-        skey = session_hash(event.get("session_id")) or session_hash(
-            os.environ.get("CLAUDE_CODE_SESSION_ID"))
+        skey = session_hash(event.get("session_id")) or own_session_hash()
         if not skey:
             skey = "cwd-" + _h(str(event.get("cwd") or ""), "vh-cwd")
         own = str(rel.get("owner_session") or "")

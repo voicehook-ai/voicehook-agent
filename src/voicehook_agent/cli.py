@@ -2895,6 +2895,17 @@ def main(argv: list[str] | None = None) -> None:
                                            "permission-request", "print", "install"])
     p_hook.add_argument("--settings", default=None, metavar="PATH",
                         help="install: settings.json to merge into (default ~/.claude/settings.json)")
+    p_hook.add_argument("--agent", choices=["claude", "codex"], default=None,
+                        help="0.20.0 print/install: claude (default, settings.json) or codex "
+                             "(hooks.json + notify + MCP server in $CODEX_HOME, backup first)")
+    p_hook.add_argument("--codex-home", default=None, metavar="DIR",
+                        help="install --agent codex: Codex config dir (default $CODEX_HOME or ~/.codex)")
+    # 0.20.0 local MCP server for agents without Claude Code hooks (Codex CLI, ...)
+    p_mcp = sub.add_parser(
+        "mcp", help="local MCP server over stdio: status, decide, next, activity for this "
+        "session (own join or helper via ~/.voicehook/relay.json); Codex: hook install --agent codex")
+    p_mcp.add_argument("--agent", default="", metavar="NAME",
+                       help="agent name for the default session label (e.g. codex)")
     # 0.13.0: manual activity line for agents without the hook
     p_act = sub.add_parser(
         "activity", help="append one line `HH:MM:SS note: <text>` to the activity log of the "
@@ -2958,8 +2969,13 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "self-update":
         sys.exit(_run_self_update(args.dry_run))
     if args.cmd == "hook":
-        hook_argv = [args.action] + (["--settings", args.settings] if args.settings else [])
+        hook_argv = [args.action] + (["--settings", args.settings] if args.settings else []) \
+            + (["--agent", args.agent] if args.agent else []) \
+            + (["--codex-home", args.codex_home] if args.codex_home else [])
         sys.exit(vactivity.main(hook_argv))
+    if args.cmd == "mcp":
+        from . import mcpserver
+        sys.exit(mcpserver.main(["--agent", args.agent] if args.agent else []))
     if args.cmd == "join":
         missing = _missing_self_report(args.name, args.model)
         if missing:
