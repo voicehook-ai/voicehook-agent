@@ -331,7 +331,8 @@ def test_real_hook_process_posts_helper_decision_to_relay(tmp_path):
         url = f"http://127.0.0.1:{srv.server_address[1]}/api/activity/relay"
         ms.write_relay(url, TOKEN, "room-a", 3600, owner_pid=os.getpid(),
                        owner_session=ms.session_hash("JOINER"))
-        env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path), ms.LABEL_ENV: "SE Refill"}
+        env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path), ms.LABEL_ENV: "SE Refill",
+               "VOICEHOOK_BOARD_REMIND": "0"}  # 0.19.0 board reminder has its own tests
         r = subprocess.run([sys.executable, "-m", "voicehook_agent.activity", "permission-request"],
                            input=_perm_req(), capture_output=True, text=True, timeout=30,
                            env=env, check=False)
