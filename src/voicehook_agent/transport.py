@@ -347,7 +347,17 @@ class BridgeRoom:
         retry as _send. Over WebRTC the CLI publishes topic operator.visual instead."""
         await self._post_retry("/api/bridge/visual", body, "visual")
 
-    async def _post_retry(self, path: str, body: dict, topic: str) -> None:
+    async def send_card(self, body: dict) -> dict:
+        """0.19.0: POST /api/bridge/show {kind?, title?, text?, image?, panel?, large?}: a card on
+        the call page and/or a panel for the humans. Same retry as _send; the server's answer."""
+        r = await self._post_retry("/api/bridge/show", body, "show")
+        try:
+            out = r.json()
+        except ValueError:
+            return {}
+        return out if isinstance(out, dict) else {}
+
+    async def _post_retry(self, path: str, body: dict, topic: str) -> httpx.Response:
         if self._http is None or not self._session or self._closed:
             raise BridgeError("bridge not connected")
         loop = asyncio.get_running_loop()
@@ -372,6 +382,7 @@ class BridgeRoom:
         if r.status_code != 200:
             raise BridgeError(f"bridge send {topic} failed: HTTP {r.status_code} {_detail(r)}",
                               status=r.status_code)
+        return r
 
     def _fire_disconnected(self, reason: str) -> None:
         if self._fired_disconnect:
