@@ -227,7 +227,14 @@ def test_snippet_shape():
             {"type": "command", "command": "voicehook-agent-hook user-prompt-submit || true",
              "timeout": 3}]}],
         "Stop": [{"hooks": [
-            {"type": "command", "command": "voicehook-agent-hook stop || true", "timeout": 3}]}]}}
+            {"type": "command", "command": "voicehook-agent-hook stop || true", "timeout": 3}]}],
+        # 0.18.0 the session waits for the human (notify.py)
+        "Notification": [{"matcher": "*", "hooks": [
+            {"type": "command", "command": "voicehook-agent-hook notification || true",
+             "timeout": 3}]}],
+        "PermissionRequest": [{"matcher": "*", "hooks": [
+            {"type": "command", "command": "voicehook-agent-hook permission-request || true",
+             "timeout": 3}]}]}}
 
 
 def test_install_idempotent_keeps_other_keys(tmp_path):

@@ -105,6 +105,9 @@ Activity feed (0.10.0): Delta sees what you are doing, one line per tool call.
                                      older Post-only install)
     hook print                       print the settings.json snippet
     hook pre-tool-use|post-tool-use  the hooks themselves (fast path: voicehook-agent-hook)
+    hook notification|permission-request  0.18.0: a session waits for the human (permission
+                                     prompt, AskUserQuestion, idle): a decision on the
+                                     Decision Board + a feed line; never auto-approves
                                      join publishes the newest 15 lines as operator.activity
                                      {lines, ts}, on change, at most every 5 s.
 
@@ -2843,9 +2846,10 @@ def main(argv: list[str] | None = None) -> None:
     p_su = sub.add_parser("self-update", help="update this CLI now (uv tool upgrade, else pip --upgrade)")
     p_su.add_argument("--dry-run", action="store_true", default=False,
                       help="only print the command that would run")
-    p_hook = sub.add_parser("hook", help="activity feed: Claude Code hooks (pre-tool-use | post-tool-use | post-tool-use-failure | user-prompt-submit | stop | print | install [--settings PATH]); 0.15.0: other sessions report via ~/.voicehook/relay.json")
+    p_hook = sub.add_parser("hook", help="activity feed: Claude Code hooks (pre-tool-use | post-tool-use | post-tool-use-failure | user-prompt-submit | stop | notification | permission-request | print | install [--settings PATH]); 0.15.0: other sessions report via ~/.voicehook/relay.json; 0.18.0: permission prompts and questions of every session as decisions")
     p_hook.add_argument("action", choices=["pre-tool-use", "post-tool-use", "post-tool-use-failure",
-                                           "user-prompt-submit", "stop", "print", "install"])
+                                           "user-prompt-submit", "stop", "notification",
+                                           "permission-request", "print", "install"])
     p_hook.add_argument("--settings", default=None, metavar="PATH",
                         help="install: settings.json to merge into (default ~/.claude/settings.json)")
     # 0.13.0: manual activity line for agents without the hook
