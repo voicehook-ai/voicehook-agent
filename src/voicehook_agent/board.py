@@ -20,8 +20,10 @@ The hook (`voicehook-agent-hook post-tool-use|user-prompt-submit|stop|...`) now:
   IDLE_CLEAR_S after a Stop, the sleeper clears the session's board over the relay
   (POST <relay>/status {from} / local relay request), so an idle session leaves no stale
   board behind. Any new work before that cancels it;
-* reports the session STATE read from the hook events alone (arbeitet | frage | leerlauf |
-  problem, see next_state) on change: detached POST <relay>/state {from, state};
+* reports the session STATE read from the hook events alone (arbeitet | wartet | frage |
+  leerlauf | problem, see next_state / tool_kind) on change: detached POST <relay>/state
+  {from, state}; a tool call that only waits (`vh-helper next`, `relay-next`, `sleep`, an
+  until-loop, Monitor) is `wartet` (0.21.2), not `arbeitet`;
 * delivers the human's answers to the session's own questions (fetch_answers / deliver):
   additionalContext, or on Stop `decision: block` + reason, exactly once per answer.
 
@@ -187,6 +189,122 @@ def status_command(command: object) -> tuple[str, bool] | None:
 
 
 # --------------------------------------------------------------------------- #
+# which tool call only waits (0.21.2): wartet instead of arbeitet
+# --------------------------------------------------------------------------- #
+KIND_WAIT, KIND_META, KIND_WORK = "wait", "meta", "work"
+# tools that only wait for something else (a background job, a condition)
+WAIT_TOOLS = {"Monitor", "TaskOutput", "BashOutput"}
+# shell keywords in front of a command (`until X; do sleep 5; done`)
+_KEYWORDS = {"until", "while", "do", "done", "then", "else", "elif", "if", "fi", "!", "{", "}",
+             "time"}
+# commands that only look (the condition of a wait loop) or do nothing
+_PROBES = {"echo", "printf", "true", "false", ":", "date", "test", "[", "[[", "]]", "curl",
+           "grep", "egrep", "jq", "cat", "tail", "head", "ls", "pgrep", "ps", "wc", "break",
+           "continue", "exit", "stat", "lsof", "nc"}
+_GH_LOOK = {("run", "view"), ("run", "list"), ("pr", "checks"), ("pr", "view"), ("pr", "status")}
+_WRAPPERS = {"timeout", "gtimeout", "nice", "nohup"}
+
+
+def _wait_segments(command: str) -> list[list[str]]:
+    """Segments like _segments, but a redirection drops its target (`sleep 5 >/dev/null 2>&1`)
+    and shell keywords / `for x in ...` headers are no command of their own."""
+    try:
+        toks = _tokens(command)
+    except ValueError:
+        return []
+    out: list[list[str]] = [[]]
+    skip = False
+    for t in toks:
+        if skip:
+            skip = False
+            continue
+        if t and set(t) <= set("&|<>") and ("<" in t or ">" in t):
+            skip = True          # `>`, `>>`, `2>&`, `&>`: the next token is the target
+            continue
+        if t in _PUNCT or (t and set(t) <= set("&|;()<>")):
+            out.append([])
+        else:
+            out[-1].append(t)
+    segs = []
+    for seg in out:
+        while seg and seg[0] in _KEYWORDS:
+            seg = seg[1:]
+        if seg and seg[0] in ("for", "select", "case", "esac"):
+            continue
+        if seg:
+            segs.append(seg)
+    return segs
+
+
+def _unwrap(words: list[str]) -> list[str]:
+    words = _cmd_start(words)
+    while words and words[0].rsplit("/", 1)[-1] in _WRAPPERS:
+        words = words[1:]
+        while words and (words[0].startswith("-") or words[0][:1].isdigit()):
+            words = words[1:]    # timeout -k 5 60 <cmd> / nice -n 5 <cmd>
+    if words and words[0] == "pipx" and words[1:2] == ["run"]:
+        words = words[1:]        # pipx run voicehook-agent ...
+    if len(words) > 1 and words[0] in ("uvx", "run") and words[1].split("@")[0] == "voicehook-agent":
+        words = ["voicehook-agent"] + words[2:]
+    return words
+
+
+def _seg_kind(words: list[str]) -> str | None:
+    """wait | meta | probe | None (= real work) for one simple command."""
+    words = _unwrap(words)
+    if not words:
+        return "probe"
+    exe = words[0].rsplit("/", 1)[-1]
+    sub = words[1] if len(words) > 1 else ""
+    if exe in ("sleep", "wait"):
+        return KIND_WAIT
+    if exe == "vh-helper":
+        if sub == "next":
+            return KIND_WAIT
+        return KIND_META if sub in ("status", "activity") else None
+    if exe in ("voicehook-agent", "voicehook_agent"):
+        if sub in ("next", "relay-next"):
+            return KIND_WAIT
+        return KIND_META if sub in ("status", "activity") else None
+    if exe == "gh":
+        if words[1:3] == ["run", "watch"] or (words[1:3] == ["pr", "checks"] and "--watch" in words):
+            return KIND_WAIT
+        return "probe" if tuple(words[1:3]) in _GH_LOOK else None
+    if exe == "curl" and any("/relay/next" in w for w in words[1:]):
+        return KIND_WAIT         # the helper long poll by hand
+    if exe in _PROBES:
+        return "probe"
+    return None
+
+
+def command_kind(command: object) -> str:
+    """wait: the Bash command only waits (at least one `sleep`/`wait`/`vh-helper next`/
+    `voicehook-agent next|relay-next`/`gh run watch`/relay long poll, everything else only
+    looks: an until-loop on curl/grep, echo, `vh-helper status`); meta: only board/activity
+    bookkeeping; else work. Read-only, never raises."""
+    try:
+        kinds = [_seg_kind(s) for s in _wait_segments(str(command or ""))]
+    except Exception:  # noqa: BLE001
+        return KIND_WORK
+    if not kinds or None in kinds:
+        return KIND_WORK
+    if KIND_WAIT in kinds:
+        return KIND_WAIT
+    return KIND_META if KIND_META in kinds else KIND_WORK
+
+
+def tool_kind(event: dict) -> str:
+    """wait | meta | work for the tool of a Pre/PostToolUse event (work when unsure)."""
+    tool = str(event.get("tool_name") or "")
+    if tool in WAIT_TOOLS or (tool.startswith("mcp__") and tool.rsplit("__", 1)[-1] == "next"):
+        return KIND_WAIT
+    if tool == "Bash":
+        ti = event.get("tool_input") if isinstance(event.get("tool_input"), dict) else {}
+        return command_kind(ti.get("command"))
+    return KIND_WORK
+
+
+# --------------------------------------------------------------------------- #
 # state
 # --------------------------------------------------------------------------- #
 def _with_state(fn) -> object:
@@ -293,7 +411,8 @@ def _label(event: dict, skey: str) -> str:
 
 
 STATE_WORK, STATE_ASK, STATE_IDLE, STATE_PROBLEM = "arbeitet", "frage", "leerlauf", "problem"
-STATES = (STATE_WORK, STATE_ASK, STATE_IDLE, STATE_PROBLEM)
+STATE_WAIT = "wartet"      # 0.21.2: only a wait/poll loop runs (tool_kind == wait)
+STATES = (STATE_WORK, STATE_WAIT, STATE_ASK, STATE_IDLE, STATE_PROBLEM)
 FAIL_STREAK = 3            # failed tool calls in a row -> problem
 STATE_RESEND_S = 600.0     # same state again at most this often (server restart heals)
 ASK_EVENTS = ("Notification", "PermissionRequest")
@@ -309,9 +428,11 @@ def _failed(event: dict) -> bool:
 
 def next_state(event: dict, me: dict) -> str | None:
     """Session state from the hook event alone (never from what the agent writes):
-    PreToolUse/PostToolUse/UserPromptSubmit -> arbeitet; Notification, PermissionRequest,
-    AskUserQuestion -> frage; Stop -> leerlauf; FAIL_STREAK failed tools in a row -> problem.
-    Updates the failure streak in `me`."""
+    PreToolUse/PostToolUse/UserPromptSubmit -> arbeitet; a tool call that only waits
+    (tool_kind == wait: `vh-helper next`, `relay-next`, `sleep`, until-loop, Monitor) ->
+    wartet, board bookkeeping (`vh-helper status`) keeps wartet; Notification,
+    PermissionRequest, AskUserQuestion -> frage; Stop -> leerlauf; FAIL_STREAK failed tools in
+    a row -> problem. Updates the failure streak in `me`."""
     name = str(event.get("hook_event_name") or "")
     tool = str(event.get("tool_name") or "")
     if name in ASK_EVENTS or (name == "PreToolUse" and tool == "AskUserQuestion"):
@@ -326,10 +447,17 @@ def next_state(event: dict, me: dict) -> str | None:
         if name == "PostToolUseFailure" and event.get("is_interrupt") is True:
             return None
         me["fails"] = int(me.get("fails") or 0) + 1 if _failed(event) else 0
-        return STATE_PROBLEM if me["fails"] >= FAIL_STREAK else STATE_WORK
+        return STATE_PROBLEM if me["fails"] >= FAIL_STREAK else _tool_state(event, me)
     if name == "PreToolUse":
-        return STATE_PROBLEM if int(me.get("fails") or 0) >= FAIL_STREAK else STATE_WORK
+        return STATE_PROBLEM if int(me.get("fails") or 0) >= FAIL_STREAK else _tool_state(event, me)
     return None
+
+
+def _tool_state(event: dict, me: dict) -> str:
+    kind = tool_kind(event)
+    if kind == KIND_WAIT or (kind == KIND_META and me.get("state") == STATE_WAIT):
+        return STATE_WAIT
+    return STATE_WORK
 
 
 def _known_name(skey: str) -> bool:
@@ -551,13 +679,18 @@ def _spawn_post(job: dict) -> None:
 
 def post_state(rel: dict, frm: str, state: str) -> bool:
     """POST <relay>/state {from, state} (server merges it into the helper's board card).
-    An older server answers 404/405: ignored. Remote relay only."""
+    An older server answers 404/405: ignored; one without `wartet` (422) gets `leerlauf`
+    instead. Remote relay only."""
     from . import relayops
     if vmulti._is_local(rel) or state not in STATES:
         return False
     try:
-        status, _ = relayops._http(rel, "POST", relayops.endpoint(rel, "state"),
-                                   {"from": frm, "state": state}, relayops.HTTP_TIMEOUT_S)
+        url = relayops.endpoint(rel, "state")
+        status, _ = relayops._http(rel, "POST", url, {"from": frm, "state": state},
+                                   relayops.HTTP_TIMEOUT_S)
+        if status == 422 and state == STATE_WAIT:
+            status, _ = relayops._http(rel, "POST", url, {"from": frm, "state": STATE_IDLE},
+                                       relayops.HTTP_TIMEOUT_S)
         return status < 300
     except Exception:  # noqa: BLE001
         return False

@@ -446,3 +446,115 @@ def test_raw_helper_credential_in_relay_json_is_usable(monkeypatch):
     assert rel is not None and rel["url"] == URL
     assert ms.load_relay(now=os.lstat(ms.relay_path()).st_mtime + 43201) is None
     assert board.handle(ev(), now=None) is not None
+
+
+# ---- 0.21.2 state pill: a tool call that only waits is `wartet` ----
+@pytest.mark.parametrize("cmd", [
+    'vh-helper next "Trello"',
+    "sleep 30",
+    "sleep 5 >/dev/null 2>&1; vh-helper next T",
+    "until curl -s https://x/health | grep -q ok; do sleep 5; done",
+    "while true; do vh-helper next T; sleep 1; done",
+    "for i in 1 2 3; do sleep 1; done",
+    "timeout 60 voicehook-agent relay-next --timeout 25",
+    "uvx voicehook-agent@latest relay-next",
+    "pipx run voicehook-agent next --timeout 60",
+    "voicehook-agent next --timeout 300",
+    "/Users/x/.local/bin/voicehook-agent next",
+    "gh run watch 123 --exit-status",
+    "gh pr checks 12 --watch",
+    "sleep 60 && gh pr checks 12",
+    "curl -s \"$U/relay/next?from=T&timeout=25\" -H @h",
+    'VOICEHOOK_RELAY=/r.json vh-helper next "T" ; vh-helper status "T" "wartet"',
+    "wait",
+])
+def test_command_kind_wait(cmd):
+    assert board.command_kind(cmd) == board.KIND_WAIT
+
+
+@pytest.mark.parametrize("cmd", [
+    "pytest -q", "uv run pytest", "npm run build", "git status", "sleep 2 && npm run build",
+    "until make; do sleep 5; done", "curl -s https://api.trello.com/1/cards -X POST",
+    "gh pr merge 12", "vh-helper decide T 'Merge?'", "voicehook-agent say hallo",
+    "python3 - <<'EOF'\nimport time; time.sleep(5)\nEOF", "echo 'unbalanced", "",
+])
+def test_command_kind_work(cmd):
+    assert board.command_kind(cmd) == board.KIND_WORK
+
+
+def test_command_kind_meta():
+    assert board.command_kind('vh-helper status "T" "Polling Trello"') == board.KIND_META
+    assert board.command_kind('vh-helper activity "T" "Board aktualisiert"') == board.KIND_META
+    assert board.command_kind("voicehook-agent status --doing x") == board.KIND_META
+
+
+def test_tool_kind():
+    assert board.tool_kind({"tool_name": "Monitor"}) == board.KIND_WAIT
+    assert board.tool_kind({"tool_name": "TaskOutput"}) == board.KIND_WAIT
+    assert board.tool_kind({"tool_name": "mcp__13a0__next"}) == board.KIND_WAIT
+    assert board.tool_kind({"tool_name": "mcp__13a0__say"}) == board.KIND_WORK
+    for t in ("Edit", "Write", "Read", "Grep", "Agent"):
+        assert board.tool_kind({"tool_name": t}) == board.KIND_WORK
+    assert board.tool_kind({"tool_name": "Bash", "tool_input": "sleep 5"}) == board.KIND_WORK
+    assert board.tool_kind({"tool_name": "Bash", "tool_input": {"command": "sleep 5"}}) == board.KIND_WAIT
+
+
+def _pre(cmd):
+    return ev("PreToolUse", tool_name="Bash", tool_input={"command": cmd})
+
+
+def test_helper_poll_loop_is_wartet_and_reported_only_on_change(monkeypatch):
+    """The live bug: a Trello helper that only runs `vh-helper next` (25 s long poll) and a
+    board update every 3 min showed `arbeitet`."""
+    _relay()
+    monkeypatch.setenv(ms.LABEL_ENV, "Trello")
+    t = T0
+    for _ in range(6):                      # 2.5 min of polling
+        board.handle(_pre('vh-helper next "Trello"'), now=t)
+        board.handle(bash('vh-helper next "Trello"', tool_response={"stdout": '{"events":[]}'}),
+                     now=t + 25)
+        t += 26
+    board.handle(_pre('vh-helper status "Trello" "wartet auf Karten"'), now=t)      # board update
+    board.handle(bash('vh-helper status "Trello" "wartet auf Karten"'), now=t + 1)
+    board.handle(_pre('vh-helper next "Trello"'), now=t + 2)
+    assert [s for _, s in _states()] == ["wartet"]
+    # a card arrives: real work flips to arbeitet, the next poll back to wartet
+    board.handle(ev("PreToolUse", tool_name="Edit", tool_input={"file_path": "/x"}), now=t + 30)
+    board.handle(ev(tool_name="Edit"), now=t + 31)
+    board.handle(_pre("sleep 30"), now=t + 40)
+    board.handle(ev("Stop"), now=t + 80)
+    assert [s for _, s in _states()] == ["wartet", "arbeitet", "wartet", "leerlauf"]
+
+
+def test_board_update_during_work_stays_arbeitet(monkeypatch):
+    _relay()
+    monkeypatch.setenv(ms.LABEL_ENV, "SE Gate")
+    board.handle(ev("UserPromptSubmit", prompt="x"), now=T0)
+    board.handle(bash('vh-helper status "SE Gate" "Tests"'), now=T0 + 1)
+    board.handle(ev("PreToolUse", tool_name="Monitor", tool_input={}), now=T0 + 2)
+    assert [s for _, s in _states()] == ["arbeitet", "wartet"]
+
+
+def test_failing_wait_loop_is_still_problem(monkeypatch):
+    _relay()
+    for i in range(3):
+        board.handle(bash('vh-helper next "T"', tool_response={"exit_code": 7, "stderr": "x"}),
+                     now=T0 + i)
+    assert [s for _, s in _states()][-1] == "problem"
+
+
+def test_post_state_wartet_falls_back_to_leerlauf_on_old_server(monkeypatch):
+    from voicehook_agent import relayops
+    _relay()
+    calls = []
+
+    def http(rel, m, url, body, to):
+        calls.append(body["state"])
+        return (422, {}) if body["state"] == "wartet" else (200, {})
+    monkeypatch.setattr(relayops, "_http", http)
+    assert board.post_state(ms.load_relay(T0), "T", "wartet") is True
+    assert calls == ["wartet", "leerlauf"]
+    calls.clear()
+    monkeypatch.setattr(relayops, "_http", lambda *a: calls.append(a[3]["state"]) or (200, {}))
+    assert board.post_state(ms.load_relay(T0), "T", "wartet") is True and calls == ["wartet"]
+    assert "wartet" in board.STATES
