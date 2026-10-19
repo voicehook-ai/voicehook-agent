@@ -315,7 +315,11 @@ needs nothing on the server.
 
 - `join` over the HTTPS bridge (`--transport bridge`, or `auto` when it falls back):
   right after connect, with its bridge session. `owner_pid` = the join.
-- WebRTC `join` (the default transport on Mac and crown): a LOCAL relay,
+- WebRTC `join` (0.17.0, server with `/api/helper/credential`): right after connect the
+  join gets the helper credential from the server with its LiveKit token and writes it
+  like a bridge join (token kind); it runs the helper pump for the whole join (see
+  "Helper access for every main agent" below). An older server: the LOCAL relay.
+- WebRTC `join` (0.15.0/0.16.0, or an older server): a LOCAL relay,
   `{kind: "local", dir, label, room, expires_at, owner_pid, owner_session, written_at}`
   without any token. The hooks append `HH:MM:SS relay: Helfer <machine>: <session>: <text>`
   to the join's own `activity.log` (only when its `session.json` names `owner_pid`), the
@@ -334,6 +338,29 @@ needs nothing on the server.
 - Readers ignore a symlink, a file of another user or readable by group/world, an
   expired file and one whose `owner_pid` is gone. 401/403/410 from the relay marks the
   token dead (`relay.dead`, a hash of the token); a reader never deletes the file.
+
+### Helper access for every main agent (0.17.0)
+
+The server issues the helper credential (`POST /api/helper/credential`) however the main
+agent joined (WebRTC, bridge, MCP); it ends with the call (410). Helpers use it as in
+"Helper sessions: Decision Board and own status board" below (`decide`, `status`,
+`relay-next`), no voice, no chip, never a second agent in a solo call.
+
+- Main agent joined over WebRTC: right after connect the join asks the server with its
+  LiveKit token and writes a token `relay.json` (the local relay of 0.15/0.16 stays the
+  fallback for an older server). The join holds the server's helper hub: it long-polls
+  `GET /api/helper/pump` (pump token, never printed) and publishes the helpers' packets
+  as itself (`operator.status` with `sub`, the `vh.decide` RPC with `sender`, the line
+  `relay: Helfer <machine>: <helper>: <text>` in its own activity.log). The answer to a
+  helper question goes back to the server (`POST /api/helper/pump/answer`), never into
+  the join's own `next`. On leave `POST /api/helper/pump/end`: every credential answers 410.
+- Another machine: the credential travels over ssh, never through a chat or a transcript:
+  `voicehook-agent helper-credential --label crown | ssh crown 'voicehook-agent helper-import'`
+  (on the main agent's machine; `--rotate` invalidates every earlier credential of the
+  call). `helper-import` writes `relay.json` (0600, no owner pid); then `decide`, `status`,
+  `relay-next` and the hooks of that machine work there. A curl/MCP bridge main agent
+  pipes the REST answer:
+  `curl -s -X POST "$B/api/helper/credential" -H "Authorization: Bearer $S" -d '{"label":"crown"}' | ssh crown 'voicehook-agent helper-import'`.
 
 **What each session reports** (one line per event, `<session>: <text>`):
 
