@@ -66,6 +66,7 @@ stdin (JSONL):
 | `operator.status_request` | in    | the user asked what you are doing; `next` yields `{"type":"status_request"}` |
 | `operator.visual`    | room      | `{shape, emotion?}`: draw a shape in the ring (CLI `show`; bridge: `POST /api/bridge/visual`). Not the MCP tool `show` (cards on the call page) |
 | `delta.ui`           | to humans | 0.19.0 (CLI `ui`): v2 `{v:2, cmd:"window", win, state, via:"agent"}`, `{v:2, cmd:"layout", preset, ...}`, `{v:2, cmd:"move", win, slot, preset?, ...}`, `{v:2, cmd:"focus", project, ...}`, reliable, `destination_identities` = only the humans (no `vh.role`, not the worker). Bridge: `POST /api/bridge/ui` with the body without `v`/`via` -> `{ok, applied}` or 422 |
+| attributes `vh.mic_muted` / `vh.speaker_muted` / `vh.away` | in | 0.19.0 Silent Mode, on human participants, "1"/"0": `next` carries the aggregate `human_state {mic_muted, speaker_muted, away}` (true only for ALL humans) and an event `{type:"human_state", ...}` on a change. While `speaker_muted` or `away` nobody hears: says are queued and not spoken, Delta sums up on return; put what matters on board, cards or decide |
 | RPC `vh.decide`      | to worker | Decision Board (`decide`): `{question, options?, recommend?, context?, recent?}` / `{id, ...changes}` / `{id, delete:true}`, helpers add `sender`; bridge: `POST /api/bridge/decide`. Result later as `next` `{type:"decision", verdict:"yes"\|"no"\|"option"\|"other"\|"unclear", ...}` |
 
 *`out` here = emitted on the CLI's **stdout** (not published to the room).

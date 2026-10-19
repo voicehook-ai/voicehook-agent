@@ -188,6 +188,10 @@ Decision background + page control (0.19.0):
                                      bridge: POST /api/bridge/ui. Prints `ui: window log large`.
     status ... --project NAME        field project (1-40 chars) on operator.status;
     activity ... --project NAME      on operator.activity (the join keeps it for later packets)
+    next                             Silent Mode: human_state {mic_muted, speaker_muted, away} on
+                                     every output, event type human_state on a change. While
+                                     speaker_muted/away nobody hears: says wait, Delta sums up on
+                                     return; put what matters on board, cards or decide.
 """
 from __future__ import annotations
 
@@ -753,6 +757,8 @@ class _Control:
         self.card_seq = 0
         self.api_base = ""
         self.lk_jwt = ""
+        # 0.19.0 Silent Mode: aggregate of the humans' vh.mic_muted/vh.speaker_muted/vh.away
+        self.human_state = relay.human_state([])
 
     def attach(self, room: rtc.Room) -> None:
         self.room = room
@@ -763,13 +769,19 @@ class _Control:
         self.room_ready.clear()
 
     def humans_changed(self, room) -> None:
-        """Recount humans in `room` (see relay.is_human_peer), arm/stop the guard."""
-        n = sum(1 for p in room.remote_participants.values()
-                if relay.is_human_peer(_kind_label(p), dict(getattr(p, "attributes", None) or {})))
-        if n:
+        """Recount humans in `room` (see relay.is_human_peer), arm/stop the guard. 0.19.0: also
+        the human state (Silent Mode); a change is queued for `next` as type human_state."""
+        peers = [(_kind_label(p), dict(getattr(p, "attributes", None) or {}))
+                 for p in room.remote_participants.values()]
+        humans = [attrs for kind, attrs in peers if relay.is_human_peer(kind, attrs)]
+        if humans:
             self.no_human_since = None
         elif self.no_human_since is None:
             self.no_human_since = time.monotonic()
+        st = relay.human_state(humans)
+        if st != self.human_state:
+            self.human_state = st
+            self.events.put_nowait(relay.human_state_event(st))
 
     async def wait_room(self, timeout: float) -> rtc.Room | None:
         if self.room is not None:
@@ -1217,6 +1229,7 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
             if stale:
                 hints["stale_error"] = stale
             hints.update(_now_view(ctl))
+        hints["human_state"] = dict(ctl.human_state)  # 0.19.0 Silent Mode, on every next
         if ev is None:
             return {"ok": True, "type": "timeout", "pending": 0, **hints}
         if ev.get("type") == "user":
@@ -2046,8 +2059,13 @@ async def _connect_and_listen(
         _voicebot_event(voicebot.left(_kind_label(p), [_kind_label(o) for o in rest], humans,
                                       _room_name(), stop.is_set()))
 
+    def _on_attributes_changed(changed, p) -> None:
+        if ctl is not None:  # 0.19.0 Silent Mode: vh.mic_muted / vh.speaker_muted / vh.away
+            ctl.humans_changed(room)
+
     room.on("participant_connected", _on_participant_connected)
     room.on("participant_disconnected", _on_participant_disconnected)
+    room.on("participant_attributes_changed", _on_attributes_changed)
 
     def _on_active_speakers(spk_list) -> None:
         new_set = {s.identity for s in spk_list}

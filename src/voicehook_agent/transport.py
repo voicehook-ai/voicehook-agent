@@ -499,7 +499,9 @@ class BridgeRoom:
             p = self.remote_participants.pop(ev.get("identity"), None) or BridgeParticipant(ev)
             self.emit("participant_disconnected", p)
         elif t == "peer-updated":
-            self._participant(ev)
+            p = self._participant(ev)
+            # 0.19.0: attributes (Silent Mode vh.mic_muted/...) like rtc.Room's event
+            self.emit("participant_attributes_changed", dict(p.attributes), p)
         elif t == "speakers":
             self.emit("active_speakers_changed",
                       [SimpleNamespace(identity=i) for i in ev.get("speakers") or []])

@@ -256,6 +256,17 @@ the voicebot); without a human nothing is sent (`(no human in the call, nothing 
 Bridge: `POST /api/bridge/ui` with the same body without `v`/`via`; a 422 of the server
 exits 1 with its message.
 
+### Silent Mode: human state (0.19.0)
+
+The server sets `vh.mic_muted`, `vh.speaker_muted`, `vh.away` ("1"/"0") on the human
+participants. Every `next` carries `"human_state": {"mic_muted", "speaker_muted", "away"}`
+(true only when it holds for every human; `speaker_muted` also when away; no human: all
+false), and a change comes as `{"type":"human_state","role":"system","mic_muted":..,
+"speaker_muted":..,"away":..,"ts":..}`. While `speaker_muted` or `away` the human cannot
+hear: says are queued and not spoken, Delta sums up when they come back; put what matters
+on the board, cards or `decide`. `mic_muted` alone: Delta still speaks, but expect no spoken
+answer. Bridge transport: the same, from the participant attributes the bridge streams.
+
 ### Project tag (0.19.0)
 
 `status ... --project NAME` and `activity ... --project NAME` (1-40 chars) send the field
