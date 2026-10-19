@@ -68,6 +68,7 @@ voicehook-agent leave --say "See you soon."             # clean exit
 | `status [TEXT] [--doing T] [--open T]... [--done T]... [-f board.json]` (0.7.0) | `{"type":"board","board":{...}}`: sends your status board | 0 ok, 1 failed |
 | `decide --question T [--option T]... [--recommend N] [--context T] [--recent T]` (0.14.4) | `{"ok":true,"id":"d...","number":1}`: a question ONLY the human can decide (Decision Board, not the status board); the answer comes back in `next` as `{"type":"decision","verdict":"yes"\|"no"\|"option"\|"other"\|"unclear","option":N?,"text":"..."?}` | 0 ok, 1 failed |
 | `ui open\|close\|min\|medium\|large\|max <window>`, `ui layout <preset>`, `ui move <window> <slot> [--preset P]`, `ui focus <project\|all>` (0.21.0) | one line `ui: window log large`: the humans' call page changes like on their own click (see [Page control](#page-control-ui-0210)) | 0 ok, 1 failed, 2 invalid |
+| `notify-me --reason done\|blocked\|decision [--message T]`, `call-me --reason ... [--message T]` | the server's answer, e.g. `{"ok":true,"type":"notify_me","status":"sms_sent",...}` or `{"ok":true,"type":"call_me","status":"refused","why":"no_account"}`: reach the human outside the call (see [Notify the human](#notify-the-human-notify-me-call-me)) | 0 ok, 1 failed, 2 invalid |
 
 - `next` returns ONE event, oldest first; `pending` says how many more are queued.
 - **Several operators (0.11.0):** a running say is never cut, except by your own
@@ -790,6 +791,28 @@ Max 20 entries per request, 100 per call, 50 characters each. Output: one JSON l
 errors `{"ok": false, "type": "vocab", "status", "error"}` (409 = guest call without an
 account, 429 = limit, 410 = call ended). Corrections apply right away; in normal mode the
 word list reaches the speech recognition at the next pause, in live mode from the next call.
+
+## Notify the human (`notify-me`, `call-me`)
+
+The human left the call page and you are done, blocked or need a decision:
+
+```sh
+voicehook-agent notify-me --reason decision --message "Merge PR 92?"   # SMS, max 120 chars
+voicehook-agent call-me --reason blocked --message "CI red, need you"  # phone call, max 200 chars
+```
+
+`notify-me` sends an SMS with a single-use 10-minute link back into the call (login or PIN);
+if it is not opened within 2 minutes the server phones as a follow-up. `call-me` phones the
+human who owns the call on their own confirmed number and blocks until the call ends. The
+number never comes from the agent; the account's rules (enabled, reasons, quiet hours, budget,
+cooldown) decide. The running join POSTs `/api/cli/notify_me` / `/api/cli/call_me` (server
+voicehook-v4) with its own LiveKit token (expired: the helper pump token), bridge transport
+`/api/bridge/notify_me` / `/api/bridge/call_me` with its session. Output: one JSON line, the
+server's answer plus `ok`/`type`: `{status: refused, why}` or `{status: sms_sent|sms_failed|
+insufficient, phone_call_id, billed_eur, link_valid_s, fallback_call_in_s}` (notify-me),
+`{status: answered|no_answer|busy|failed|insufficient, phone_call_id, billed_eur}` (call-me);
+errors `{"ok": false, "type", "status", "error"}` (422 bad reason/message, 429 more than 5 per
+minute, 410 call ended).
 
 ## Shapes in the ring (`show`)
 

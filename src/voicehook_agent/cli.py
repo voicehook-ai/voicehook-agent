@@ -651,6 +651,71 @@ async def _vocab_add(ctl: _Control, body: dict) -> dict:
     return {"ok": False, "type": "vocab", "status": status, "error": str(detail or f"HTTP {status}")}
 
 
+# notify-me / call-me: the server's existing features (voicehook-v4 billing/notify_me.py,
+# billing/call_me.py). WebRTC join: POST /api/cli/<kind> with its LiveKit token (after it
+# expired: the helper pump token), bridge join: /api/bridge/<kind> with its session.
+PHONE_KINDS = ("notify_me", "call_me")
+PHONE_REASONS = ("done", "blocked", "decision")
+PHONE_MESSAGE_MAX = {"notify_me": 120, "call_me": 200}
+CLI_PHONE_PATH = "/api/cli/{kind}"
+PHONE_HTTP_TIMEOUT_S = {"notify_me": 20.0, "call_me": 720.0}   # server dials up to 690 s
+PHONE_SOCK_TIMEOUT_S = {"notify_me": 30.0, "call_me": 750.0}
+
+
+def phone_request(kind: str, reason: str, message: str | None) -> dict:
+    """`notify-me|call-me --reason R [--message M]` -> control request; ValueError on bad input."""
+    if kind not in PHONE_KINDS:
+        raise ValueError(f"unknown kind {kind!r}")
+    if reason not in PHONE_REASONS:
+        raise ValueError(f"--reason must be one of {', '.join(PHONE_REASONS)}")
+    req: dict = {"cmd": kind, "reason": reason}
+    if message is not None:
+        m = " ".join(str(message).split())
+        if not m:
+            raise ValueError("--message is empty")
+        if len(m) > PHONE_MESSAGE_MAX[kind]:
+            raise ValueError(f"--message max {PHONE_MESSAGE_MAX[kind]} characters")
+        req["message"] = m
+    return req
+
+
+async def _phone_post(ctl: _Control, kind: str, body: dict) -> dict:
+    """POST notify_me / call_me with this join's operator credential -> the server's JSON
+    ({status, why?, phone_call_id?, ...}) plus ok/type. Never the token in the answer."""
+    room = ctl.room
+    if room is not None and hasattr(room, "post_phone"):
+        status, data = await room.post_phone(kind, body, PHONE_HTTP_TIMEOUT_S[kind])
+    else:
+        bearers = [b for b in (ctl.lk_jwt, getattr(ctl.helper_pump, "token", None)) if b]
+        if not ctl.api_base or not bearers:
+            return {"ok": False, "type": kind, "error": "not connected to the call (yet)"}
+        url = ctl.api_base.rstrip("/") + CLI_PHONE_PATH.format(kind=kind)
+        status, data = 0, {}
+        try:
+            async with httpx.AsyncClient(timeout=PHONE_HTTP_TIMEOUT_S[kind],
+                                         headers={"user-agent": _USER_AGENT, "x-vh-cli": _VERSION}) as http:
+                for bearer in bearers:   # LiveKit token expired (404) -> pump token
+                    r = await http.post(url, json=body, headers={"authorization": f"Bearer {bearer}"})
+                    status = r.status_code
+                    try:
+                        data = r.json()
+                    except ValueError:
+                        data = {}
+                    if status != 404 or len(bearers) == 1:
+                        break
+        except httpx.HTTPError as e:
+            return {"ok": False, "type": kind, "error": f"request failed ({type(e).__name__})"}
+        data = data if isinstance(data, dict) else {}
+    if status == 200 and isinstance(data, dict):
+        return {"ok": True, "type": kind, **data}
+    detail = data.get("detail") if isinstance(data, dict) else None
+    if status in (404, 405) and detail in (None, "", "Not Found", "Method Not Allowed"):
+        detail = f"server has no {kind} endpoint for the CLI (too old)"
+    if status == 429 and not detail:
+        detail = "too many requests, try again in a minute"
+    return {"ok": False, "type": kind, "status": status, "error": str(detail or f"HTTP {status}")[:300]}
+
+
 async def _helper_hub(ctl: _Control, api_base: str, jwt: str) -> dict | None:
     """0.17.0, WebRTC join: helper credential + pump token from the server (Bearer = our
     LiveKit token), once per join; reconnects reuse it. None: older server (local relay)."""
@@ -1192,6 +1257,18 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         # 0.21.0: teach the call's speech recognition (server adds to the payer's account)
         ctl.watchdog.touch()
         return await _vocab_add(ctl, {"terms": req.get("terms") or [], "fixes": req.get("fixes") or []})
+    if cmd in PHONE_KINDS:
+        # notify-me / call-me: SMS with a single-use link / phone call to the human (server rules)
+        try:
+            body = phone_request(cmd, str(req.get("reason") or ""), req.get("message"))
+        except ValueError as e:
+            return {"ok": False, "type": "invalid", "error": str(e)}
+        body.pop("cmd")
+        ctl.watchdog.enter()   # call_me blocks while the phone rings: counts as alive
+        try:
+            return await _phone_post(ctl, cmd, body)
+        finally:
+            ctl.watchdog.leave()
     if cmd == "helper_credential":
         # 0.17.0: a helper credential for another machine (pipe it into ssh, never print it
         # into a chat): WebRTC via the server's helper hub, bridge via the bridge session
@@ -2761,6 +2838,8 @@ def _client_request(args) -> dict:
         return {"cmd": "helper_credential", "label": args.label, "rotate": bool(args.rotate)}
     if args.cmd == "vocab":
         return vocab_request(args.term, args.wrong)
+    if args.cmd in ("notify-me", "call-me"):
+        return phone_request(args.cmd.replace("-", "_"), args.reason, args.message)
     if args.cmd == "says":
         return {"cmd": "says"}
     if args.cmd == "activity":
@@ -2914,7 +2993,7 @@ def _run_client(args) -> int:
     try:
         sock = vsession.resolve_socket(args.session,
                                        wait=30.0 if wait_answer else args.wait)
-        sock_timeout = None if args.cmd == "next" else 30.0
+        sock_timeout = None if args.cmd == "next" else PHONE_SOCK_TIMEOUT_S.get(req["cmd"], 30.0)
         reply = vsession.request(sock, req, timeout=sock_timeout)
     except vsession.SessionError as e:
         print(json.dumps({"ok": False, "type": "no-session", "error": str(e)},
@@ -3388,6 +3467,20 @@ def main(argv: list[str] | None = None) -> None:
     p_vo.add_argument("--wrong", action="append", default=[], metavar="TEXT",
                       help="a known mishearing of TERM (repeatable); corrected in every transcript")
     _add_session(p_vo)
+    # notify the human outside the call (server voicehook-v4 notify_me / call_me, account rules)
+    for name, kind, what in (
+            ("notify-me", "notify_me", ("text the human who owns the call: SMS with a single-use "
+                                        "10-min link back into the call, a phone call follows "
+                                        "after 2 min if unopened")),
+            ("call-me", "call_me", ("phone the human who owns the call on their confirmed "
+                                    "number; blocks until the call ends"))):
+        p_ph = sub.add_parser(name, help=f"{what}; the account's rules decide (refused -> why). "
+                              "Prints the server's JSON")
+        p_ph.add_argument("--reason", required=True, choices=PHONE_REASONS,
+                          help="why: done, blocked or decision")
+        p_ph.add_argument("--message", default=None, metavar="TEXT",
+                          help=f"optional short text, max {PHONE_MESSAGE_MAX[kind]} chars")
+        _add_session(p_ph)
     sub.add_parser("helper-import", help="read a helper credential (JSON) from stdin and write "
                    "~/.voicehook/relay.json (0600): then `decide`, `status` and `relay-next` "
                    "and the Claude Code hooks of this machine feed the call")
@@ -3456,7 +3549,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "helper-import":
         sys.exit(_run_helper_import())
     if args.cmd in ("say", "next", "says", "leave", "status", "activity", "decide", "helper-credential",
-                    "vocab", "ui"):
+                    "vocab", "ui", "notify-me", "call-me"):
         sys.exit(_run_client(args))
     if args.cmd == "show":
         sys.exit(_run_client(args))
