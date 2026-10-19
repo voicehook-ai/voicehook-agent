@@ -164,6 +164,11 @@ join writes a local relay: the hooks append to its own activity.log) and deletes
 file on leave. The hooks
 of every OTHER Claude Code session here report turn goal, PR opened/merged, deploy and
 errors under their session name (docs/CLI.md). Off: VOICEHOOK_NO_RELAY=1.
+
+Helper sessions (0.16.0): a Claude Code session without its own join, while another one
+of this machine is in the call: `decide` and `status --doing/--open/--done` go over the
+relay (via:"relay", sender/sub = its session name); `relay-next [--timeout S]` prints the
+answers; `decide --wait [--timeout S]` waits for this one (docs/CLI.md).
 """
 from __future__ import annotations
 
@@ -186,6 +191,7 @@ from livekit import rtc
 from . import __version__, relay
 from . import activity as vactivity
 from . import multisession as vmulti
+from . import relayops as vrelayops
 from . import selfupdate as vselfupdate
 from . import session as vsession
 from . import transport as vtransport
@@ -620,6 +626,8 @@ class _Control:
         self.clock = relay.TurnClock(due_s=relay.status_due_seconds())
         self.agent_said = relay.AgentSaid()  # 0.7.0: Delta's own lines for `next`
         self.say_status = relay.SayStatus()  # 0.9.0: operator.say_status per own say
+        # 0.16.0: helper sessions (local relay): sender -> from, for decision events
+        self.relay_senders: dict[str, str] = {}
 
     def attach(self, room: rtc.Room) -> None:
         self.room = room
@@ -721,6 +729,43 @@ SAY_DEFAULT_MODE = "append"
 _DECIDE_RPC = "vh.decide"  # decisions.RPC_METHOD on the worker (Decision Board)
 
 
+async def _decide_rpc(ctl: _Control, req: dict) -> dict:
+    """vh.decide RPC to the voicebot (own decide, and 0.16.0 helper requests with sender;
+    a helper request never touches the idle watchdog)."""
+    body = {k: v for k, v in (
+        ("question", req.get("question")), ("options", req.get("options") or None),
+        ("recommend", req.get("recommend")), ("id", req.get("id")),
+        ("delete", True if req.get("delete") else None)) if v is not None}
+    if req.get("sender"):  # 0.16.0: a helper session's question (Vertrag A)
+        body["sender"] = str(req["sender"])
+    room = await ctl.wait_room(10.0)
+    if room is None:
+        return {"ok": False, "error": "not connected to the room (yet)"}
+    worker = next((p.identity for p in room.remote_participants.values()
+                   if _kind_label(p) == "agent"), None)
+    if worker is None:
+        return {"ok": False, "status": 503, "error": "voicebot not in the call, try again shortly"}
+    deadline = time.monotonic() + 8.0  # decisions.DECIDE_READY_S: 425 right after join
+    while True:
+        try:
+            raw = await room.local_participant.perform_rpc(
+                destination_identity=worker, method=_DECIDE_RPC,
+                payload=json.dumps(body, ensure_ascii=False), response_timeout=8.0)
+        except Exception as e:  # noqa: BLE001  RPC error/timeout: only the class
+            return {"ok": False, "status": 503, "error": f"decide rpc failed: {type(e).__name__}"}
+        try:
+            out = json.loads(raw or "{}")
+        except ValueError:
+            return {"ok": False, "status": 502, "error": "bad answer"}
+        if not isinstance(out, dict):
+            return {"ok": False, "status": 502, "error": "bad answer"}
+        if out.get("status") != 425 or time.monotonic() >= deadline:
+            if out.get("status") == 425:
+                return {"ok": False, "status": 503, "error": "voicebot not ready, try again shortly"}
+            return {**out, "type": "decide"} if "type" not in out else out
+        await asyncio.sleep(0.25)
+
+
 async def _control_handler(ctl: _Control, req: dict) -> dict:
     """One request from `voicehook-agent say|next|leave|status|activity`."""
     cmd = req.get("cmd")
@@ -791,36 +836,7 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         # to the voicebot (worker, method vh.decide), mirroring Session.decide in the
         # bridge; the result arrives later as a `next` event type "decision".
         ctl.watchdog.touch()
-        body = {k: v for k, v in (
-            ("question", req.get("question")), ("options", req.get("options") or None),
-            ("recommend", req.get("recommend")), ("id", req.get("id")),
-            ("delete", True if req.get("delete") else None)) if v is not None}
-        room = await ctl.wait_room(10.0)
-        if room is None:
-            return {"ok": False, "error": "not connected to the room (yet)"}
-        worker = next((p.identity for p in room.remote_participants.values()
-                       if _kind_label(p) == "agent"), None)
-        if worker is None:
-            return {"ok": False, "status": 503, "error": "voicebot not in the call, try again shortly"}
-        deadline = time.monotonic() + 8.0  # decisions.DECIDE_READY_S: 425 right after join
-        while True:
-            try:
-                raw = await room.local_participant.perform_rpc(
-                    destination_identity=worker, method=_DECIDE_RPC,
-                    payload=json.dumps(body, ensure_ascii=False), response_timeout=8.0)
-            except Exception as e:  # noqa: BLE001  RPC error/timeout: only the class
-                return {"ok": False, "status": 503, "error": f"decide rpc failed: {type(e).__name__}"}
-            try:
-                out = json.loads(raw or "{}")
-            except ValueError:
-                return {"ok": False, "status": 502, "error": "bad answer"}
-            if not isinstance(out, dict):
-                return {"ok": False, "status": 502, "error": "bad answer"}
-            if out.get("status") != 425 or time.monotonic() >= deadline:
-                if out.get("status") == 425:
-                    return {"ok": False, "status": 503, "error": "voicebot not ready, try again shortly"}
-                return {**out, "type": "decide"} if "type" not in out else out
-            await asyncio.sleep(0.25)
+        return await _decide_rpc(ctl, req)
     if cmd == "next":
         try:
             timeout = float(req.get("timeout", 60))
@@ -1023,6 +1039,63 @@ async def _activity_loop(ctl: _Control, path: Path) -> None:
             print(f"[warn] activity loop: {e!r}", file=sys.stderr, flush=True)
         try:
             await asyncio.wait_for(ctl.quit.wait(), timeout=max(0.01, ctl.activity_interval))
+            return
+        except asyncio.TimeoutError:
+            pass
+
+
+def _route_helper_decision(ctl: _Control, payload: dict) -> bool:
+    """0.16.0: a decision event whose `sender` names a helper session of this machine
+    (local relay) goes into that helper's answer file, not into our own `next`."""
+    frm = ctl.relay_senders.get(str(payload.get("sender") or ""))
+    if not frm or ctl.activity_path is None:
+        return False
+    try:
+        vrelayops.append_jsonl(vrelayops.answer_path(ctl.activity_path.parent, frm), payload)
+    except (OSError, vrelayops.RelayError) as e:
+        print(f"[warn] relay answer not written ({type(e).__name__})", file=sys.stderr, flush=True)
+    return True
+
+
+async def _serve_relay_request(ctl: _Control, dir_: Path, obj: dict) -> None:
+    """0.16.0 (local relay, Vertrag A): one helper request -> decide RPC with `sender` or
+    operator.status with `sub`; the result goes to the helper's answer file."""
+    parsed = vrelayops.parse_request(obj)
+    if parsed is None:
+        return
+    rid, frm, op, body = parsed
+    sender = vrelayops.sender_for(frm)
+    if body is None:
+        res: dict = {"ok": False, "status": 422, "error": "invalid relay request"}
+    elif op == "decide":
+        ctl.relay_senders[sender] = frm  # before the RPC: an answer can be quick
+        out = await _decide_rpc(ctl, {**body, "sender": sender})
+        res = {k: v for k, v in out.items() if k != "type"}
+    else:
+        room = await ctl.wait_room(10.0)
+        if room is None:
+            res = {"ok": False, "status": 503, "error": "not connected to the room (yet)"}
+        else:
+            data = json.dumps({**body, "sub": sender}, ensure_ascii=False).encode("utf-8")
+            await room.local_participant.publish_data(data, reliable=True, topic="operator.status")
+            res = {"ok": True}
+    vrelayops.append_jsonl(vrelayops.answer_path(dir_, frm), {"type": "result", "rid": rid, **res})
+
+
+async def _relay_request_loop(ctl: _Control, dir_: Path) -> None:
+    """0.16.0: serve helper requests from <join dir>/relay-req.jsonl. Never crashes the
+    join; logs only the error class (never a question or board text)."""
+    while not ctl.quit.is_set():
+        try:
+            for obj in vrelayops.drain_requests(dir_):
+                try:
+                    await _serve_relay_request(ctl, dir_, obj)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[warn] relay request failed ({type(e).__name__})", file=sys.stderr, flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"[warn] relay request loop ({type(e).__name__})", file=sys.stderr, flush=True)
+        try:
+            await asyncio.wait_for(ctl.quit.wait(), timeout=vrelayops.POLL_S)
             return
         except asyncio.TimeoutError:
             pass
@@ -1512,9 +1585,11 @@ async def _connect_and_listen(
                 ctl.events.put_front_nowait(relay.status_request_event(payload))
                 ctl.clock.requested()
             elif (topic == "operator.decision" and ctl is not None
-                    and payload.get("type") == "decision"):
+                    and payload.get("type") == "decision"
+                    and not _route_helper_decision(ctl, payload)):
                 # Decision Board: the worker sends the result only to the creator
                 # (destination = our identity), so no owner filter is needed.
+                # 0.16.0: a helper session's decision (sender) goes to its answer file.
                 ctl.events.put_nowait(payload)
             sender = getattr(pkt.participant, "identity", "?") if pkt.participant else "?"
             line = payload.get("text", "")
@@ -1954,6 +2029,7 @@ async def _join(
             _print_event(json_mode, "system",
                          f"control socket ready: {server.sock_path}", topic="_meta")
     vactivity.clear(sess_dir)  # 0.10.0: no activity lines of a previous call leak in
+    vrelayops.clear_dir(sess_dir)  # 0.16.0: nor helper requests/answers
     ctl.activity_path = sess_dir / vactivity.ACTIVITY_NAME
     loop = asyncio.get_running_loop()
     for sig in _quit_signals():
@@ -1969,7 +2045,8 @@ async def _join(
     guard_tasks = [asyncio.create_task(_owner_loop(ctl, watched, json_mode, owner_say)),
                    asyncio.create_task(_alive_loop(ctl)),
                    asyncio.create_task(_no_human_loop(ctl, json_mode)),
-                   asyncio.create_task(_activity_loop(ctl, sess_dir / vactivity.ACTIVITY_NAME))]
+                   asyncio.create_task(_activity_loop(ctl, sess_dir / vactivity.ACTIVITY_NAME)),
+                   asyncio.create_task(_relay_request_loop(ctl, sess_dir))]
 
     rc = 0
     try:
@@ -2081,6 +2158,7 @@ async def _join(
             vsession.remove_info(sess_dir)
             vactivity.remove_pointer(sess_dir)
             vactivity.clear(sess_dir)
+            vrelayops.clear_dir(sess_dir)  # 0.16.0: helper requests/answers
             try:
                 sess_dir.rmdir()
             except OSError:
@@ -2316,8 +2394,16 @@ def _run_client(args) -> int:
     except (OSError, ValueError) as e:
         print(json.dumps({"ok": False, "type": "error", "error": str(e)}, ensure_ascii=False), flush=True)
         return 1
+    if req.get("cmd") in ("decide", "board"):
+        # 0.16.0: a Claude Code session without its own join, while another session of
+        # this machine is in the call: decide/board go over relay.json as a helper.
+        rel = vrelayops.client_relay(args.session)
+        if rel is not None:
+            return _run_relay_client(args, req, rel)
+    wait_answer = req.get("cmd") == "decide" and getattr(args, "wait", None) == WAIT_ANSWER
     try:
-        sock = vsession.resolve_socket(args.session, wait=args.wait)
+        sock = vsession.resolve_socket(args.session,
+                                       wait=30.0 if wait_answer else args.wait)
         sock_timeout = None if args.cmd == "next" else 30.0
         reply = vsession.request(sock, req, timeout=sock_timeout)
     except vsession.SessionError as e:
@@ -2328,10 +2414,78 @@ def _run_client(args) -> int:
         print(json.dumps({"ok": False, "type": "no-session", "error": repr(e)},
                          ensure_ascii=False), flush=True)
         return 3
+    if wait_answer and reply.get("ok"):
+        reply["hint"] = "own join: the answer comes as a `next` event type decision"
     print(json.dumps(reply, ensure_ascii=False), flush=True)
     if reply.get("type") == "ended":
         return 3
     return 0 if reply.get("ok") else 1
+
+
+WAIT_ANSWER = -1.0  # `decide --wait` without SEC: wait for the answer (helper sessions)
+
+
+def _print_json(obj: dict) -> None:
+    print(json.dumps(obj, ensure_ascii=False), flush=True)
+
+
+def _run_relay_client(args, req: dict, rel: dict) -> int:
+    """0.16.0 helper session: decide / status board over relay.json (remote: HTTP,
+    local: request file of the join). One JSON line, plus "via":"relay"."""
+    local = vmulti._is_local(rel)
+    try:
+        frm = vrelayops.check_from(vrelayops.session_label())
+        if req["cmd"] == "decide":
+            body = vrelayops.decide_body(req)
+            res = (vrelayops.local_request(rel, frm, "decide", body) if local
+                   else vrelayops.remote_decide(rel, frm, body))
+            out = {**res, "type": "decide", "via": "relay"}
+            if res.get("ok") and getattr(args, "wait", None) == WAIT_ANSWER and res.get("id"):
+                evs = vrelayops.next_events(rel, frm, max(0.0, float(args.timeout)),
+                                            match_id=str(res["id"]))
+                out["decision"] = evs[0] if evs else None
+                if not evs:
+                    out["timeout"] = True
+        else:
+            board = req.get("board") or {}
+            if board.get("faq"):
+                print("[warn] --faq is not sent over the relay (helper board: doing/open/done)",
+                      file=sys.stderr, flush=True)
+            body = vrelayops.status_body(board)
+            res = (vrelayops.local_request(rel, frm, "status", body) if local
+                   else vrelayops.remote_status(rel, frm, body))
+            out = {**res, "type": "board", **({"board": body} if res.get("ok") else {}),
+                   "via": "relay"}
+    except vrelayops.RelayError as e:
+        out = {"ok": False, "status": e.status or 503, "error": str(e), "via": "relay"}
+    except OSError as e:
+        out = {"ok": False, "status": 503, "error": f"relay: {type(e).__name__}", "via": "relay"}
+    _print_json(out)
+    return 0 if out.get("ok") else 1
+
+
+def _run_relay_next(args) -> int:
+    """0.16.0 `relay-next [--timeout S]`: the answers to this helper session's decisions,
+    one JSON line per event; {"type":"timeout"} when none came. Exit 3: no relay."""
+    rel = None if vmulti.relay_disabled() else vmulti.load_relay()
+    if rel is None:
+        _print_json({"ok": False, "type": "no-relay", "via": "relay",
+                     "error": "no usable ~/.voicehook/relay.json (no call on this machine)"})
+        return 3
+    try:
+        frm = vrelayops.check_from(vrelayops.session_label())
+        evs = vrelayops.next_events(rel, frm, max(0.0, float(args.timeout)))
+    except vrelayops.RelayError as e:
+        _print_json({"ok": False, "status": e.status or 503, "error": str(e), "via": "relay"})
+        return 1
+    except OSError as e:
+        _print_json({"ok": False, "status": 503, "error": f"relay: {type(e).__name__}", "via": "relay"})
+        return 1
+    if not evs:
+        _print_json({"ok": True, "type": "timeout", "via": "relay"})
+    for ev in evs:
+        _print_json({**ev, "via": "relay"})
+    return 0
 
 
 def _run_self_update(dry_run: bool = False, runner=None) -> int:
@@ -2486,9 +2640,16 @@ def main(argv: list[str] | None = None) -> None:
              f"spoken; env {QUIET_ENV}=1 works too).",
     )
     # one-shot commands against a running join
-    def _add_session(p):
+    def _add_session(p, answer_wait: bool = False):
         p.add_argument("--session", default=None, metavar="SLUG",
                        help="<slug>/<identity> of the running join (a slug alone is enough when only one join runs in that room); needed only when several joins run.")
+        if answer_wait:  # decide: `--wait` alone = wait for the answer (0.16.0)
+            p.add_argument("--wait", type=float, default=30.0, nargs="?", const=WAIT_ANSWER,
+                           metavar="SEC",
+                           help="--wait SEC: wait up to SEC seconds for the join to come up "
+                                "(default 30). --wait alone (0.16.0, helper session): wait for "
+                                "the answer (up to --timeout) and add it as \"decision\".")
+            return
         p.add_argument("--wait", type=float, default=30.0, metavar="SEC",
                        help="wait up to SEC seconds for the join to come up (default 30).")
     p_say = sub.add_parser(
@@ -2619,7 +2780,15 @@ def main(argv: list[str] | None = None) -> None:
                        help="change or delete this decision (d + 8 hex), only while still open")
     p_dec.add_argument("--delete", action="store_true", default=False,
                        help="delete the decision given by --id")
-    _add_session(p_dec)
+    p_dec.add_argument("--timeout", type=float, default=120.0, metavar="SEC",
+                       help="0.16.0, with --wait (no SEC): wait up to SEC for the answer (default 120)")
+    _add_session(p_dec, answer_wait=True)
+    # 0.16.0: answers for a helper session (decide over relay.json)
+    p_rn = sub.add_parser(
+        "relay-next", help="0.16.0 helper session (not itself in the call): print the answers "
+        "to your own decide questions as JSON lines (type decision); {\"type\":\"timeout\"} if none")
+    p_rn.add_argument("--timeout", type=float, default=25.0, metavar="SEC",
+                      help="wait up to SEC seconds for an answer (default 25; 0 = only what is there)")
     # 0.13.0: bridge session for the hook (Quickstart A, curl bridge join)
     p_bs = sub.add_parser(
         "bridge-session", help="store {base, session} of a curl bridge join (Quickstart A) in "
@@ -2679,6 +2848,8 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(_run_client(args))
     if args.cmd == "show":
         sys.exit(_run_client(args))
+    if args.cmd == "relay-next":
+        sys.exit(_run_relay_next(args))
     if args.cmd == "log-summary":
         try:
             rc = asyncio.run(_run_log_summary(args))

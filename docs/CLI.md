@@ -368,6 +368,57 @@ locally (`relay-state.json`, 0600) and hands the POST to a detached child
 relay appends directly, no child). The hook never waits on the
 network, prints nothing, always exits 0 and gives up after 3 s.
 
+### Helper sessions: Decision Board and own status board (0.16.0)
+
+A helper session is a Claude Code session of this machine that is not itself in the call
+while another one is (`~/.voicehook/relay.json` exists). `decide` and `status
+--doing/--open/--done` of a helper go over that relay automatically, under its session
+name (`from`, same rule as the hook: `$VOICEHOOK_SESSION_LABEL`, `/rename`, `ai-title`,
+fallback). The question shows the helper as sender, the answer comes back only to it, and
+every helper has its own card on the status board.
+
+```bash
+voicehook-agent decide --question "PR #81 mergen?" --option Ja --option Nein --recommend 0
+# {"ok": true, "id": "d0a1b2c3d", "number": 3, "type": "decide", "via": "relay"}
+voicehook-agent relay-next --timeout 60      # one JSON line per answer, else {"type":"timeout"}
+# {"type": "decision", "id": "d0a1b2c3d", "number": 3, "verdict": "option", "option": 0, "text": "Ja", "by": "Oliver", "via": "relay"}
+voicehook-agent decide --question "Deploy?" --wait --timeout 300
+# {"ok": true, "id": "d...", "number": 4, "type": "decide", "via": "relay", "decision": {...}}  (or "decision": null, "timeout": true)
+voicehook-agent status --doing "Tests fixen" --open "PR öffnen" --done "Repro"
+# {"ok": true, "type": "board", "via": "relay", "board": {"doing": "Tests fixen", "open": ["PR öffnen"], "done": ["Repro"]}}
+voicehook-agent status ""                    # all empty: removes the helper's card
+```
+
+| | |
+|---|---|
+| Routing | `--session` or `VOICEHOOK_NO_RELAY=1`: never the relay. Session that started the join (its hash in relay.json or a live join's session.json): its own join, as before. Any other Claude Code session: the relay. No Claude Code session id: the relay only when no join control socket answers. `status` without flags always asks the join |
+| `--wait` | `decide --wait` alone waits for this answer (up to `--timeout`, default 120 s); `--wait SEC` keeps its old meaning (wait for the join socket). Answers to other questions that arrive meanwhile stay queued for `relay-next` (`~/.voicehook/relay-inbox-<hash>.jsonl`, 0600). With an own join, `--wait` only adds a hint: the answer comes as a `next` event |
+| `--faq` | not sent over the relay (warning on stderr) |
+| Errors | `{"ok": false, "status": N, "error": ..., "via": "relay"}`, exit 1 (422/403/409/410/503 as on `/api/bridge/decide`, 504 = the local join did not answer in 20 s). Only 401 marks the token dead |
+| Never | the token in a URL, argv or output; question or board text on stderr |
+
+**Remote relay** (relay.json with `url` + `token`; `url` = `<base>/api/activity/relay`),
+Bearer relay token: `POST <url>/decide {from, question?, options?, recommend?, id?,
+delete?}` -> `{ok, id, number}`; `POST <url>/status {from, doing?, open?, done?}` ->
+`{ok}`; `GET <url>/next?from=<label>&timeout=<0..25>` -> `{events: [...]}` (longer
+`--timeout` = several calls).
+
+**Local relay** (`kind: local`, WebRTC join): no network, files in the join dir (checked
+like relay.json: a regular file of ours, 0600, never a symlink, and the dir's
+`session.json` names the relay's `owner_pid`):
+
+- `relay-req.jsonl`: the helper appends one line per request under flock,
+  `{"v":1, "rid":"<16 hex>", "from":"<label>", "op":"decide"|"status", "body":{...}, "ts":<unix>}`
+  (max 8 KB per line).
+- The join drains it every 0.3 s and runs the `vh.decide` RPC with
+  `sender = "<machine>: <from>"`, or `operator.status` with `sub = "<machine>: <from>"`
+  (its own board stays untouched, a helper request never resets its idle timer).
+- `relay-ans-<hash of from>.jsonl` (written by the join, capped at 256 KB): one
+  `{"type":"result", "rid":..., "ok":..., "id"?, "number"?, "status"?, "error"?}` per
+  request, and every later `operator.decision` event whose `sender` is that helper's
+  (instead of the join's own `next`). The helper takes the lines it reads (flock).
+- Both files are deleted on join start and end.
+
 ### Activity log: keep it filled (activity_due, 0.13.0)
 
 Why: in speech pauses Delta reads only fresh entries (younger than 60 s) aloud, "what is
@@ -507,13 +558,13 @@ Without git (git blocked, e.g. Xcode license on macOS; PyPI lags): the same pinn
 `uv tool install --force https://github.com/voicehook-ai/voicehook-agent/archive/<40-hex sha>.zip`;
 check `voicehook-agent --version` before every call.
 
-Pinned (multi-session relay needs 0.15.0 or newer). Releases are tagged `cli-vX.Y.Z`
-(see DEVELOPMENT.md); the tag `cli-v0.15.0` is set on the merge commit after the merge.
+Pinned (multi-session relay needs 0.15.0 or newer, helper decide/status 0.16.0). Releases are tagged `cli-vX.Y.Z`
+(see DEVELOPMENT.md); the tag `cli-v0.16.0` is set on the merge commit after the merge.
 Skills that must stay byte-stable (voicehook-v4 `REFERENCE.md`) pin the 40-hex commit
 sha of that tag instead of the tag name:
 
 ```bash
-R=git+https://github.com/voicehook-ai/voicehook-agent@cli-v0.15.0
+R=git+https://github.com/voicehook-ai/voicehook-agent@cli-v0.16.0
 uv tool install -q --force $R || pip install -q --user --force-reinstall $R
 voicehook-agent hook install
 ```

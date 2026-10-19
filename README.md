@@ -85,6 +85,9 @@ Several Claude Code sessions on one machine (0.15.0): run `voicehook-agent hook 
 once; while one session is in a call, every other session reports turn goal, PR, deploy
 and errors under its own name in the call's activity feed
 ([multi-session relay](docs/CLI.md#multi-session-relay-every-claude-code-session-of-a-machine-in-the-call-0150)).
+Since 0.16.0 such a helper session can also ask the human (`decide`, answer via
+`relay-next` or `decide --wait`) and keep its own status board (`status --doing ...`)
+([helper sessions](docs/CLI.md#helper-sessions-decision-board-and-own-status-board-0160)).
 
 ## Pricing
 
