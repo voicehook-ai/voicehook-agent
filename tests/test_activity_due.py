@@ -166,7 +166,8 @@ def test_install_upgrades_post_only_install_idempotently(tmp_path):
     assert rc == 0 and "PreToolUse" in msg
     data = json.loads(p.read_text())
     assert len(data["hooks"]["PostToolUse"]) == 1          # old post entry kept, not doubled
-    assert data["hooks"]["PreToolUse"] == [activity.hook_entry("PreToolUse")]
+    assert data["hooks"]["PreToolUse"] == [activity.hook_entry("PreToolUse"),
+                                           activity.extra_entry("PreToolUse")]
     first = p.read_text()
     rc, msg = activity.install(p)
     assert rc == 0 and "already installed" in msg and p.read_text() == first

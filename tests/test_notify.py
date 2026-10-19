@@ -128,8 +128,10 @@ def test_classify_ask_user_question_options():
     c = notify.classify(json.loads(_ask(options=("Teal", "Grey", "Mint"))))
     assert c["question"] == "Which color should the button get?"
     assert c["options"] == ["Teal", "Grey", "Mint"] and c["text"] == "hat eine Frage"
-    c = notify.classify(json.loads(_ask(options=("A", "B", "C", "D"))))
-    assert c["options"] == []                                  # > 3: yes/no on the question
+    c = notify.classify(json.loads(_ask(options=("Ant", "Bee", "Cat", "Dog"))))
+    assert c["options"] == ["Ant", "Bee", "Cat"]               # 0.21.3: > 3: the 4th in the question
+    assert c["question"] == "Which color should the button get? (Dog)"
+    assert "More options (answer as free text): Dog" in c["items"][0]["context"]
     assert notify.classify(json.loads(_ev("PreToolUse", tool_name="Bash",
                                           tool_input={"command": "ls"}))) is None
 
@@ -218,7 +220,8 @@ def test_post_main_creates_replaces_and_deletes(monkeypatch, relay_lines):
     job["replace"] = "dold00001"
     assert notify.post_main(json.dumps(job)) == 0
     assert calls == [{"id": "dold00001", "delete": True},
-                     {"question": "Which color should the button get?", "options": ["Teal", "Grey"]}]
+                     {"question": "Which color should the button get?", "options": ["Teal", "Grey"],
+                      "context": "Topic: Farbe; Teal: x; Grey: x"}]
     st = json.loads((activity.state_root() / notify.STATE_NAME).read_text())
     assert st["sessions"][ms.session_hash("other-1")]["open"]["id"] == "dnew00001"
     calls.clear()

@@ -60,8 +60,9 @@ def test_install_writes_absolute_and_upgrades_bare_in_place(tmp_path):
     assert rc == 0 and "updated PostToolUse" in msg and "installed" in msg
     cmds = _commands(settings)
     assert cmds["PostToolUse"] == [f"{exe} post-tool-use"]           # rewritten, not duplicated
-    assert cmds["PreToolUse"] == [f"{exe} pre-tool-use || true"]
-    assert cmds["Stop"] == ["other-tool stop", f"{exe} stop || true"]  # foreign hook untouched
+    assert cmds["PreToolUse"] == [f"{exe} pre-tool-use || true", f"{exe} ask-wait || true"]
+    assert cmds["Stop"] == ["other-tool stop", f"{exe} stop || true",   # foreign hook untouched
+                            f"{exe} stop-wait; test $? -eq 3 && exit 2; exit 0"]
     assert json.loads(settings.read_text())["model"] == "x"
     rc, msg = activity.install(settings, exe=exe)
     assert rc == 0 and msg.startswith("already installed")
@@ -90,7 +91,8 @@ def test_doctor_flags_bare_command_and_passes_absolute(tmp_path, monkeypatch):
     activity.install(settings, exe=str(exe))
     rc, lines = activity.doctor(settings)
     assert rc == 0, lines
-    assert all(ln.startswith("ok   ") for ln in lines) and len(lines) == len(activity.HOOK_COMMANDS)
+    assert all(ln.startswith("ok   ") for ln in lines)
+    assert len(lines) == len(activity.HOOK_COMMANDS) + len(activity.EXTRA_HOOKS)
 
 
 def test_doctor_missing_events_and_unreadable(tmp_path):

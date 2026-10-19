@@ -596,6 +596,34 @@ like relay.json: a regular file of ours, 0600, never a symlink, and the dir's
   (instead of the join's own `next`). The helper takes the lines it reads (flock).
 - Both files are deleted on join start and end.
 
+### The session's own questions, answered on the board (0.21.3)
+
+While a call runs, a helper session's own questions show up in the call's decisions
+exactly as the session asked them, with their options, and the board answer goes back:
+
+- **AskUserQuestion:** every question is its own decision (see the table below). An extra
+  `PreToolUse` hook (`voicehook-agent-hook ask-wait`, matcher `AskUserQuestion`, timeout
+  100 s, status line "Question is on the voicehook call board") waits up to 90 s
+  (`VOICEHOOK_ASK_WAIT_S`, `0` = only post) for the answers of ALL questions and answers the
+  tool itself: `permissionDecision: allow` + `updatedInput.answers` {question: chosen label
+  or free text}. Not all answered in time: the dialog shows in the session as before, the
+  decisions stay until it is answered there (then they leave the board).
+- **A reply that ends with a question** (last paragraph ends with `?` or starts with
+  "Soll ich", "Willst du", "Shall I", "Should I", ...; or lists options `A)`/`B)` or
+  `1.`/`2.`, also inline `A) x / B) y`): an extra async `Stop` hook
+  (`voicehook-agent-hook stop-wait`, `async` + `asyncRewake`, timeout 1800 s) posts it once
+  per question (dedupe hash) as yes/no or with the detected options, the paragraph before
+  as hidden context, and waits for the answer: the answer wakes the idle session (the
+  command maps only its own exit 3 to exit 2, so an older binary never wakes a session).
+  The session goes on by itself first (a prompt, a tool): the decision leaves the board,
+  the waiter ends. A late answer comes with the session's next hook event.
+- **Codex:** the same Stop question is posted from `last_assistant_message`; Codex has no
+  rewake, the answer comes with the session's next hook event.
+- **Never:** a question or option with a secret in it (dropped, not redacted), paths
+  (basename), URLs (host); the joining session itself, subagents, a Stop that continues a
+  Stop hook. `VOICEHOOK_AUTO_ASK=0` turns both off. `voicehook-agent hook install` adds the
+  two hooks (re-run it after the upgrade), `voicehook-agent doctor` checks them.
+
 ### Sessions that wait for you: permission prompts and questions (0.18.0)
 
 A Claude Code session that waits for the human (permission dialog, `AskUserQuestion`,
@@ -606,7 +634,7 @@ the call, for the joining session and for every helper session:
 | Hook event | Decision Board | Feed line |
 |---|---|---|
 | `PermissionRequest` | yes/no `Freigabe für Bash: Remove node_modules directory?` (the tool's own description, a file tool's basename, else only the tool name) | `wartet auf Freigabe: Bash` |
-| `PreToolUse` of `AskUserQuestion` | the question itself, its option labels as options (2-3; more: yes/no); `(+N weitere Fragen in der Session)` for more questions | `hat eine Frage` |
+| `PreToolUse` of `AskUserQuestion` | 0.21.3: every question its own decision, as written; its option labels as options (2-3; a 4th is named in the question), descriptions, header and multiSelect as hidden context | `hat eine Frage` |
 | `Notification` `permission_prompt` | yes/no with the notification text (`Claude needs your permission to use Bash`), only when no more specific question is open | `wartet auf Freigabe: Bash` |
 | `Notification` `elicitation_dialog`, `elicitation_url_dialog`, `agent_needs_input` | yes/no with the notification text | `hat eine Frage` |
 | `Notification` `idle_prompt` | nothing | `wartet auf Eingabe` |

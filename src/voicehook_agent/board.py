@@ -588,6 +588,37 @@ DELIVERED_KEEP = 100
 STATE_ENV_OFF = "VOICEHOOK_SESSION_STATE"
 
 
+def note_ask(skey: str, rel: dict, name: str, t: float | None = None) -> None:
+    """0.21.3 (asks.py): this session asked under `name`; its hooks poll for the answer
+    (a late answer arrives as additionalContext / Stop block). Never raises."""
+    if not skey or not name:
+        return
+    t = time.time() if t is None else t
+    try:
+        def step(st: dict):
+            me = _me(st, skey, _room(rel), t)
+            asks = me.get("asks") if isinstance(me.get("asks"), dict) else {}
+            asks[name] = t
+            me["asks"] = asks
+            me["poll_at"] = t
+        _with_state(step)
+    except Exception:  # noqa: BLE001, S110
+        pass
+
+
+def mark_delivered(skey: str, evs: list[dict]) -> None:
+    """These answers reached the session another way (asks.py): never deliver them again."""
+    try:
+        def step(st: dict):
+            me = st["sessions"].setdefault(skey, {})
+            seen = [x for x in (me.get("delivered") or []) if isinstance(x, str)]
+            seen += [_answer_key(e) for e in evs]
+            me["delivered"] = seen[-DELIVERED_KEEP:]
+        _with_state(step)
+    except Exception:  # noqa: BLE001, S110
+        pass
+
+
 def fetch_answers(rel: dict, frm: str) -> list[dict]:
     """Decision events for `frm`: the local inbox (left over by `decide --wait`) first, then
     the relay (remote: GET <relay>/next?from=..&timeout=0; local: the join's answer file).

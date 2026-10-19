@@ -216,7 +216,11 @@ def test_hook_cli_exit_0_and_silent_stdout(home, tmp_path):
 def test_snippet_shape():
     assert activity.snippet() == {"hooks": {
         "PreToolUse": [{"matcher": "*", "hooks": [
-            {"type": "command", "command": "voicehook-agent-hook pre-tool-use || true", "timeout": 5}]}],
+            {"type": "command", "command": "voicehook-agent-hook pre-tool-use || true", "timeout": 5}]},
+            # 0.21.3 AskUserQuestion answered from the Decision Board (asks.py)
+            {"matcher": "AskUserQuestion", "hooks": [
+                {"type": "command", "command": "voicehook-agent-hook ask-wait || true", "timeout": 100,
+                 "statusMessage": "Question is on the voicehook call board (answer there, or here after 90 s)"}]}],
         "PostToolUse": [{"matcher": "*", "hooks": [
             {"type": "command", "command": "voicehook-agent-hook post-tool-use", "timeout": 5}]}],
         # 0.15.0 multi-session relay
@@ -227,7 +231,11 @@ def test_snippet_shape():
             {"type": "command", "command": "voicehook-agent-hook user-prompt-submit || true",
              "timeout": 3}]}],
         "Stop": [{"hooks": [
-            {"type": "command", "command": "voicehook-agent-hook stop || true", "timeout": 3}]}],
+            {"type": "command", "command": "voicehook-agent-hook stop || true", "timeout": 3}]},
+            # 0.21.3 an open question at the end of a reply: async, the answer wakes the session
+            {"hooks": [{"type": "command",
+                        "command": "voicehook-agent-hook stop-wait; test $? -eq 3 && exit 2; exit 0",
+                        "timeout": 1800, "async": True, "asyncRewake": True}]}],
         # 0.18.0 the session waits for the human (notify.py)
         "Notification": [{"matcher": "*", "hooks": [
             {"type": "command", "command": "voicehook-agent-hook notification || true",
@@ -253,7 +261,8 @@ def test_install_idempotent_keeps_other_keys(tmp_path):
     data = json.loads(first)
     assert data["model"] == "opus"
     assert data["hooks"]["Stop"] == [{"hooks": [{"type": "command", "command": "say done"}]},
-                                     activity.hook_entry("Stop")]   # theirs kept, ours added
+                                     activity.hook_entry("Stop"),
+                                     activity.extra_entry("Stop")]  # theirs kept, ours added
     post = data["hooks"]["PostToolUse"]
     assert post[0]["matcher"] == "Edit" and post[1] == activity.hook_entry()
 

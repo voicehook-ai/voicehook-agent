@@ -15,6 +15,8 @@ tool_input, tool_response, prompt, turn_id), plus the older `notify` program
     never the command; PR/deploy detection reads the command locally as for Claude Code.
   - apply_patch: `Edit: <basename of the first file of the patch>`.
   - A failed Bash (`Exit code: N`, N != 0) counts as an error (`Fehler bei Bash`).
+  - Stop (0.21.3, asks.py): a turn that ends with an open question to the human
+    (`last_assistant_message`) posts it once to the call's Decision Board.
   - stdout: only what board.py (0.21.0, when present) answers on PostToolUse,
     UserPromptSubmit, SessionStart and Stop (additionalContext / Stop decision block with
     an answer of the human), the same JSON Codex reads from Claude Code hooks; Stop
@@ -344,6 +346,17 @@ def _board(norm: str) -> str:
     return out if isinstance(out, str) else ""
 
 
+def _stop_question(norm: str) -> None:
+    """0.21.3 (asks.py): an open question at the end of the turn (last_assistant_message)
+    goes to the Decision Board; Codex has no rewake, the answer comes with the session's
+    next hook event (board.py). Never raises."""
+    try:
+        from . import asks
+        asks.stop_ask(norm, wait=False)
+    except Exception:  # noqa: BLE001
+        return
+
+
 def codex_hook(action: str, raw: str) -> str:
     """`voicehook-agent-hook codex <event>`: what to print (Stop: JSON, at least `{}`;
     PermissionRequest and PreToolUse: nothing). Never raises."""
@@ -373,6 +386,7 @@ def codex_hook(action: str, raw: str) -> str:
                     _own_join_line(ev, "Turn fertig")
                     vact.relay_hook(norm)
                     vact.notify_progress(norm)
+                    _stop_question(norm)
                 return _board(norm) or stop
             vact.relay_hook(norm)
             vact.notify_progress(norm)
