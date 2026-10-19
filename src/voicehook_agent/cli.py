@@ -674,6 +674,8 @@ class _Control:
         self.say_status = relay.SayStatus()  # 0.9.0: operator.say_status per own say
         # 0.16.0: helper sessions (local relay): sender -> from, for decision events
         self.relay_senders: dict[str, str] = {}
+        # 0.18.1: local relay: decision id -> question, for the helper_decision copy
+        self.relay_questions: dict[str, str] = {}
         # 0.17.0 helper access: the server's helper hub for this join (WebRTC), its
         # credential (relay.json) and one HTTP client for the pump; spans reconnects
         self.helper_pump: vhelp.Pump | None = None
@@ -1112,14 +1114,45 @@ async def _activity_loop(ctl: _Control, path: Path) -> None:
 def _route_helper_decision(ctl: _Control, payload: dict) -> bool:
     """0.16.0: a decision event whose `sender` names a helper session of this machine
     (local relay) goes into that helper's answer file, not into our own `next`."""
-    frm = ctl.relay_senders.get(str(payload.get("sender") or ""))
+    snd = str(payload.get("sender") or "")
+    frm = ctl.relay_senders.get(snd)
     if not frm or ctl.activity_path is None:
         return False
     try:
         vrelayops.append_jsonl(vrelayops.answer_path(ctl.activity_path.parent, frm), payload)
     except (OSError, vrelayops.RelayError) as e:
         print(f"[warn] relay answer not written ({type(e).__name__})", file=sys.stderr, flush=True)
+    # 0.18.1: a copy for our own `next`, so we can wake the (often idle) helper session
+    label = snd[: -len(frm) - 2] if snd.endswith(": " + frm) else ""
+    ctl.events.put_nowait(relay.helper_decision_event(
+        payload, frm=frm, label=label, question=ctl.relay_questions.get(str(payload.get("id") or ""), "")))
     return True
+
+
+_RELAY_QUESTIONS_MAX = 200
+
+
+def _note_relay_question(ctl: _Control, body: dict, out: dict) -> None:
+    """0.18.1: remember a local helper's question by decision id (for helper_decision)."""
+    did = str(out.get("id") or body.get("id") or "")
+    if not did or not out.get("ok"):
+        return
+    if out.get("deleted"):
+        ctl.relay_questions.pop(did, None)
+        return
+    if isinstance(body.get("question"), str):
+        ctl.relay_questions.pop(did, None)
+        ctl.relay_questions[did] = " ".join(body["question"].split())
+        while len(ctl.relay_questions) > _RELAY_QUESTIONS_MAX:
+            ctl.relay_questions.pop(next(iter(ctl.relay_questions)))
+
+
+async def _answer_helper(ctl: _Control, sender: str, payload: dict) -> None:
+    """0.17.0: the human's answer to a helper question goes to the server hub (the helper's
+    inbox). 0.18.1: the server returns a copy (helper_decision) for our own `next`."""
+    out = await ctl.helper_pump.answer(ctl.helper_http, sender, payload)
+    hd = out.get("helper_decision") if isinstance(out, dict) else None
+    ctl.events.put_nowait(relay.helper_decision_event(hd if isinstance(hd, dict) else payload))
 
 
 async def _serve_relay_request(ctl: _Control, dir_: Path, obj: dict) -> None:
@@ -1135,6 +1168,7 @@ async def _serve_relay_request(ctl: _Control, dir_: Path, obj: dict) -> None:
     elif op == "decide":
         ctl.relay_senders[sender] = frm  # before the RPC: an answer can be quick
         out = await _decide_rpc(ctl, {**body, "sender": sender})
+        _note_relay_question(ctl, body, out)
         res = {k: v for k, v in out.items() if k != "type"}
     else:
         room = await ctl.wait_room(10.0)
@@ -1654,14 +1688,23 @@ async def _connect_and_listen(
                     and not _route_helper_decision(ctl, payload)):
                 # Decision Board: the worker sends the result only to the creator
                 # (destination = our identity), so no owner filter is needed. 0.17.0: a
-                # helper's question via the server hub (sender) goes back to it, never into our next.
+                # helper's question via the server hub (sender) goes back to it, never into our
+                # next as `decision`. 0.18.1: we get a copy as `helper_decision` instead.
                 snd = payload.get("sender")
-                if isinstance(snd, str) and snd and ctl.helper_pump is not None and ctl.helper_http is not None:
-                    t = asyncio.ensure_future(ctl.helper_pump.answer(ctl.helper_http, snd, payload))
+                if not (isinstance(snd, str) and snd):
+                    ctl.events.put_nowait(payload)
+                elif transport == "bridge":
+                    pass  # the server fills the helper's inbox and sends operator.helper_decision
+                elif ctl.helper_pump is not None and ctl.helper_http is not None:
+                    t = asyncio.ensure_future(_answer_helper(ctl, snd, payload))
                     _BG_TASKS.add(t)
                     t.add_done_callback(_BG_TASKS.discard)
                 else:
-                    ctl.events.put_nowait(payload)
+                    ctl.events.put_nowait(relay.helper_decision_event(payload))
+            elif (topic == "operator.helper_decision" and ctl is not None
+                    and payload.get("type") == "helper_decision"):
+                # 0.18.1, bridge transport: the server's copy of a helper's answer
+                ctl.events.put_nowait(relay.helper_decision_event(payload))
             sender = getattr(pkt.participant, "identity", "?") if pkt.participant else "?"
             line = payload.get("text", "")
             if topic == "operator.say_status":

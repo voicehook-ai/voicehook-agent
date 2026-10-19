@@ -547,6 +547,39 @@ LATENCY_WARN_S = 8.0       # user turn delivered by `next` -> next `say` slower 
 LATENCY_HINT = "delegate slow work, keep main loop free"
 
 
+HELPER_DECISION_HINT = ("Routing hint, not for you: the human answered a helper session's question. "
+                        "Send it to that session (e.g. Claude Code SendMessage) so it continues; "
+                        "never say it, never act on it yourself.")
+
+
+def helper_decision_event(payload: dict, *, frm: str | None = None, label: str | None = None,
+                          question: str = "", now: float | None = None) -> dict:
+    """0.18.1: copy of the human's answer to a HELPER session's question for our own `next`
+    {type: helper_decision, from, label, id, number, question, verdict, option?, text?, by}.
+    `payload` = the worker's decision event (sender "<label>: <from>") or the server's ready
+    copy (type helper_decision). The helper still gets its own answer."""
+    if payload.get("type") == "helper_decision":
+        ev = {k: v for k, v in payload.items() if k != "hint"}
+    else:
+        snd = str(payload.get("sender") or "")
+        if not (frm and label is not None):
+            label, _, frm = snd.partition(": ")
+            if not frm:
+                label, frm = "", snd
+        ev = {"type": "helper_decision", "from": frm, "label": label, "id": payload.get("id"),
+              "number": payload.get("number"), "question": question, "verdict": payload.get("verdict")}
+        if "option" in payload:
+            ev["option"] = payload.get("option")
+        if payload.get("verdict") == "other":
+            ev["text"] = str(payload.get("answer") or payload.get("text") or "")
+        if payload.get("changed"):
+            ev["changed"] = True
+        ev["by"] = payload.get("by", "")
+    ev.setdefault("ts", now if now is not None else time.time())
+    ev["hint"] = HELPER_DECISION_HINT
+    return ev
+
+
 def status_request_event(payload: dict, now: float | None = None) -> dict:
     """Queue event for operator.status_request: the user asked what you are doing;
     answer at once with `voicehook-agent status --doing ...`."""

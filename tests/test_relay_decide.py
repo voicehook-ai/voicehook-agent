@@ -360,7 +360,17 @@ def test_local_decide_end_to_end(monkeypatch, capsys):
     # the decision event for that sender goes to the helper, not into our own `next`
     ev = {"type": "decision", "id": "d0a1b2c3d", "number": 1, "verdict": "option", "option": 0,
           "text": "Ja", "by": "Oliver", "sender": "crown: SE Refill"}
-    assert cli._route_helper_decision(ctl, ev) is True and len(ctl.events) == 0
+    ctl.events.arm()
+
+    async def route():
+        return cli._route_helper_decision(ctl, ev)
+    assert asyncio.run(route()) is True
+    # 0.18.1: our own `next` gets only a copy (helper_decision), never the `decision` itself
+    hd = asyncio.run(ctl.events.get(0))
+    assert {k: hd.get(k) for k in ("type", "from", "label", "id", "number", "question", "verdict", "option", "by")} == {
+        "type": "helper_decision", "from": "SE Refill", "label": "crown", "id": "d0a1b2c3d", "number": 1,
+        "question": "Merge?", "verdict": "option", "option": 0, "by": "Oliver"}
+    assert "sender" not in hd and "SendMessage" in hd["hint"] and len(ctl.events) == 0
     assert cli._route_helper_decision(ctl, {"type": "decision", "id": "dOWN"}) is False  # own
     rc, lines, _ = _cli(["relay-next", "--timeout", "0"], capsys)
     assert rc == 0 and lines == [dict(ev, via="relay")]
