@@ -614,7 +614,7 @@ def helper_decision_event(payload: dict, *, frm: str | None = None, label: str |
               "number": payload.get("number"), "question": question, "verdict": payload.get("verdict")}
         if "option" in payload:
             ev["option"] = payload.get("option")
-        if payload.get("verdict") == "other":
+        if payload.get("verdict") in ("other", "unclear"):  # 0.21.0 unclear: why, as text
             ev["text"] = str(payload.get("answer") or payload.get("text") or "")
         if payload.get("changed"):
             ev["changed"] = True
@@ -622,6 +622,35 @@ def helper_decision_event(payload: dict, *, frm: str | None = None, label: str |
     ev.setdefault("ts", now if now is not None else time.time())
     ev["hint"] = HELPER_DECISION_HINT
     return ev
+
+
+# 0.21.0 "Silent Mode": the server sets these attributes on HUMAN participants, "1"/"0"
+HUMAN_ATTR_MIC = "vh.mic_muted"
+HUMAN_ATTR_SPEAKER = "vh.speaker_muted"
+HUMAN_ATTR_AWAY = "vh.away"
+
+
+def _attr_on(v: object) -> bool:
+    return str(v or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def human_state(humans: Iterable[dict]) -> dict:
+    """{mic_muted, speaker_muted, away} over the attributes of all humans in the room: true
+    only when it holds for EVERY human (speaker_muted: speaker off OR away); no humans: all
+    false. Same rule as the server (humanstate.state_of)."""
+    hs = [dict(a or {}) for a in humans]
+    if not hs:
+        return {"mic_muted": False, "speaker_muted": False, "away": False}
+    return {"mic_muted": all(_attr_on(a.get(HUMAN_ATTR_MIC)) for a in hs),
+            "speaker_muted": all(_attr_on(a.get(HUMAN_ATTR_SPEAKER)) or _attr_on(a.get(HUMAN_ATTR_AWAY))
+                                 for a in hs),
+            "away": all(_attr_on(a.get(HUMAN_ATTR_AWAY)) for a in hs)}
+
+
+def human_state_event(state: dict, now: float | None = None) -> dict:
+    """`next` event when the aggregate human state changes (like the server's bridge `next`)."""
+    return {"type": "human_state", "role": "system", **state,
+            "ts": now if now is not None else time.time()}
 
 
 def status_request_event(payload: dict, now: float | None = None) -> dict:

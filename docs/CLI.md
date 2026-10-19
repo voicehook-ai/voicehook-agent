@@ -66,7 +66,8 @@ voicehook-agent leave --say "See you soon."             # clean exit
 | `leave [--say TEXT]` | `{"type":"leaving"}` | 0 |
 | `status` | room, identity, connected, pending events, idle seconds, peers | 0 |
 | `status [TEXT] [--doing T] [--open T]... [--done T]... [-f board.json]` (0.7.0) | `{"type":"board","board":{...}}`: sends your status board | 0 ok, 1 failed |
-| `decide --question T [--option T]... [--recommend N]` (0.14.4) | `{"ok":true,"id":"d...","number":1}`: a question ONLY the human can decide (Decision Board, not the status board); the answer comes back in `next` as `{"type":"decision","verdict":"yes"\|"no"\|"option"\|"other","option":N?,"text":"..."?}` | 0 ok, 1 failed |
+| `decide --question T [--option T]... [--recommend N] [--context T] [--recent T]` (0.14.4) | `{"ok":true,"id":"d...","number":1}`: a question ONLY the human can decide (Decision Board, not the status board); the answer comes back in `next` as `{"type":"decision","verdict":"yes"\|"no"\|"option"\|"other"\|"unclear","option":N?,"text":"..."?}` | 0 ok, 1 failed |
+| `ui open\|close\|min\|medium\|large\|max <window>`, `ui layout <preset>`, `ui move <window> <slot> [--preset P]`, `ui focus <project\|all>` (0.21.0) | one line `ui: window log large`: the humans' call page changes like on their own click (see [Page control](#page-control-ui-0210)) | 0 ok, 1 failed, 2 invalid |
 
 - `next` returns ONE event, oldest first; `pending` says how many more are queued.
 - **Several operators (0.11.0):** a running say is never cut, except by your own
@@ -214,6 +215,65 @@ voicehook-agent leave --say "See you soon."             # clean exit
 > Since 0.2.0, `--keep-alive` is the default: **stdin-EOF no longer quits** and
 > transient room-disconnects auto-reconnect. Run with a closed stdin in the
 > background without the FIFO sleep-holder hack. See [Relay flags](PROTOCOL.md#relay-flags).
+
+### Decision background (0.21.0)
+
+`decide --context "<2-4 plain sentences: what, why, what happens on yes, what on no>"`
+(max 1500 chars) and `--recent "<last turn of the asking session>"` (max 600) go into the
+`vh.decide` RPC / `POST /api/bridge/decide` (and over the relay for helper sessions) as
+`context` / `recent`. The human never sees them; Delta explains the question from them when
+asked "what is meant by number 2?". Whitespace is collapsed; longer: error, nothing sent.
+With `--id` they change an open decision (`--context ''` clears). The CLI does not fill
+`recent` by itself: its hooks never keep the text of a turn. Without any background Delta
+may answer `{"type":"decision","verdict":"unclear","text":"... versteht #2 nicht, bitte
+einfacher neu stellen"}` (the question stays open): delete it (`decide --id ... --delete`)
+and ask again more simply, with `--context`. For a helper session it lands in its inbox
+(`relay-next`) like every answer; the main agent's copy (`helper_decision`) carries `text`.
+
+### Page control: `ui` (0.21.0)
+
+```bash
+voicehook-agent ui large decisions                 # ui: window dec large
+voicehook-agent ui close log                       # ui: window log close
+voicehook-agent ui layout dreiteiler               # ui: layout thirds
+voicehook-agent ui move aktivität links --preset thirds   # ui: move log l thirds
+voicehook-agent ui focus sales engine              # ui: focus salesengine
+```
+
+| Part | Canonical (aliases) |
+|---|---|
+| state | `open` `close` `min` `medium` `large` `max` |
+| window | `log` (activity, aktivitaet, aktivität, feed), `dec` (decisions, entscheidungen), `board` (status, statusboard), `wrap` (transcript, transkript, chat), `cards` (karten) |
+| preset | `halves` (haelften, hälften), `quarters` (viertel), `thirds` (dreiteiler, drittel), `bigmid` (gross-mitte, big), `bar` (leiste) |
+| slot | `l` (left, links), `m` (middle, mitte), `r` (right, rechts), `b` (bottom, unten), `tl` `tr` `bl` `br` `main` `side` |
+| project | `voicehook`, `salesengine` (sales engine, se), `kunden` (customers), `sonstiges` (other), `all` (alles) |
+
+Case and spaces/`-`/`_` do not matter. Unknown value or wrong argument count: exit 2,
+nothing sent. WebRTC: data packet topic `delta.ui`
+`{"v":2,"cmd":"window","win":"log","state":"large","via":"agent"}` (likewise `layout`,
+`move`, `focus`), reliable, only to the humans in the room (not to operator agents, not to
+the voicebot); without a human nothing is sent (`(no human in the call, nothing shown)`).
+Bridge: `POST /api/bridge/ui` with the same body without `v`/`via`; a 422 of the server
+exits 1 with its message.
+
+### Silent Mode: human state (0.21.0)
+
+The server sets `vh.mic_muted`, `vh.speaker_muted`, `vh.away` ("1"/"0") on the human
+participants. Every `next` carries `"human_state": {"mic_muted", "speaker_muted", "away"}`
+(true only when it holds for every human; `speaker_muted` also when away; no human: all
+false), and a change comes as `{"type":"human_state","role":"system","mic_muted":..,
+"speaker_muted":..,"away":..,"ts":..}`. While `speaker_muted` or `away` the human cannot
+hear: says are queued and not spoken, Delta sums up when they come back; put what matters
+on the board, cards or `decide`. `mic_muted` alone: Delta still speaks, but expect no spoken
+answer. Bridge transport: the same, from the participant attributes the bridge streams.
+
+### Project tag (0.21.0)
+
+`status ... --project NAME` and `activity ... --project NAME` (1-40 chars) send the field
+`project` in `operator.status` / `operator.activity` (helper sessions: in the relay body of
+`status`). The server uses it instead of the project it derives from names and paths, for
+the focus filter (`ui focus`). `activity --project` stays on for the later activity packets
+of this join (hook lines too); `status --project` needs a board (TEXT or a flag).
 
 ## How to speak in the call
 
@@ -434,6 +494,7 @@ voicehook-agent status ""                    # all empty: removes the helper's c
 | Routing | `--session` or `VOICEHOOK_NO_RELAY=1`: never the relay. Session that started the join (its hash in relay.json or a live join's session.json): its own join, as before. Any other Claude Code session: the relay. No Claude Code session id: the relay only when no join control socket answers. `status` without flags always asks the join |
 | `--wait` | `decide --wait` alone waits for this answer (up to `--timeout`, default 120 s); `--wait SEC` keeps its old meaning (wait for the join socket). Answers to other questions that arrive meanwhile stay queued for `relay-next` (`~/.voicehook/relay-inbox-<hash>.jsonl`, 0600). With an own join, `--wait` only adds a hint: the answer comes as a `next` event |
 | `--faq` | not sent over the relay (warning on stderr) |
+| `--context`, `--recent`, `--project` (0.21.0) | sent over the relay too (decide body `context`/`recent`, status body `project`) |
 | Errors | `{"ok": false, "status": N, "error": ..., "via": "relay"}`, exit 1 (422/403/409/410/503 as on `/api/bridge/decide`, 504 = the local join did not answer in 20 s). Only 401 marks the token dead |
 | Never | the token in a URL, argv or output; question or board text on stderr |
 
@@ -487,7 +548,8 @@ with `sub` and `state`). Remote relay only; an older server (404) is ignored.
 
 **Remote relay** (relay.json with `url` + `token`; `url` = `<base>/api/activity/relay`),
 Bearer relay token: `POST <url>/decide {from, question?, options?, recommend?, id?,
-delete?}` -> `{ok, id, number}`; `POST <url>/status {from, doing?, open?, done?}` ->
+delete?, context?, recent?}` -> `{ok, id, number}`; `POST <url>/status {from, doing?, open?,
+done?, project?}` ->
 `{ok}`; `GET <url>/next?from=<label>&timeout=<0..25>` -> `{events: [...]}` (longer
 `--timeout` = several calls).
 

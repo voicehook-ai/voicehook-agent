@@ -172,6 +172,26 @@ Helper sessions (0.16.0): a Claude Code session without its own join, while anot
 of this machine is in the call: `decide` and `status --doing/--open/--done` go over the
 relay (via:"relay", sender/sub = its session name); `relay-next [--timeout S]` prints the
 answers; `decide --wait [--timeout S]` waits for this one (docs/CLI.md).
+
+Decision background + page control (0.21.0):
+    decide ... --context TEXT        background for Delta (max 1500 chars, never shown): what,
+                                     why, what happens on yes / on no; --recent TEXT (max 600)
+                                     = the last turn of the asking session. Also with --id and
+                                     over the relay (helper sessions). Longer: error, nothing sent.
+    next                             a decision event may carry verdict "unclear" + text: the
+                                     human does not understand it; delete it, ask more simply.
+    ui open|close|min|medium|large|max <window>   windows log dec board wrap cards
+    ui layout <preset>               halves quarters thirds bigmid bar
+    ui move <window> <slot> [--preset P]          slots l m r b tl tr bl br main side
+    ui focus <project|all>           voicehook salesengine kunden sonstiges all
+                                     WebRTC: topic delta.ui only to the humans in the room;
+                                     bridge: POST /api/bridge/ui. Prints `ui: window log large`.
+    status ... --project NAME        field project (1-40 chars) on operator.status;
+    activity ... --project NAME      on operator.activity (the join keeps it for later packets)
+    next                             Silent Mode: human_state {mic_muted, speaker_muted, away} on
+                                     every output, event type human_state on a change. While
+                                     speaker_muted/away nobody hears: says wait, Delta sums up on
+                                     return; put what matters on board, cards or decide.
 """
 from __future__ import annotations
 
@@ -200,6 +220,7 @@ from . import relayops as vrelayops
 from . import selfupdate as vselfupdate
 from . import session as vsession
 from . import transport as vtransport
+from . import ui as vui
 from . import visual as vvisual
 
 _SLUG_RX = re.compile(r"^[a-z]+-[a-z]+-[a-z]+-[A-Z0-9]{4,8}$")
@@ -711,6 +732,7 @@ class _Control:
         self.activity_path: Path | None = None
         self.stale_s = relay.stale_error_seconds()  # 0.13.0 stale_error threshold
         self.activity_sent: tuple[str, float] | None = None  # 0.13.0 activity_now
+        self.activity_project: str | None = None  # 0.21.0 `activity --project`, kept for later packets
         self.leaving = False
         # 0.10.1: no-human guard. Starts at join (nobody seen yet), stops while a
         # human is in the room, restarts when the last one leaves. Spans reconnects.
@@ -735,6 +757,8 @@ class _Control:
         self.card_seq = 0
         self.api_base = ""
         self.lk_jwt = ""
+        # 0.21.0 Silent Mode: aggregate of the humans' vh.mic_muted/vh.speaker_muted/vh.away
+        self.human_state = relay.human_state([])
 
     def attach(self, room: rtc.Room) -> None:
         self.room = room
@@ -745,13 +769,19 @@ class _Control:
         self.room_ready.clear()
 
     def humans_changed(self, room) -> None:
-        """Recount humans in `room` (see relay.is_human_peer), arm/stop the guard."""
-        n = sum(1 for p in room.remote_participants.values()
-                if relay.is_human_peer(_kind_label(p), dict(getattr(p, "attributes", None) or {})))
-        if n:
+        """Recount humans in `room` (see relay.is_human_peer), arm/stop the guard. 0.21.0: also
+        the human state (Silent Mode); a change is queued for `next` as type human_state."""
+        peers = [(_kind_label(p), dict(getattr(p, "attributes", None) or {}))
+                 for p in room.remote_participants.values()]
+        humans = [attrs for kind, attrs in peers if relay.is_human_peer(kind, attrs)]
+        if humans:
             self.no_human_since = None
         elif self.no_human_since is None:
             self.no_human_since = time.monotonic()
+        st = relay.human_state(humans)
+        if st != self.human_state:
+            self.human_state = st
+            self.events.put_nowait(relay.human_state_event(st))
 
     async def wait_room(self, timeout: float) -> rtc.Room | None:
         if self.room is not None:
@@ -776,6 +806,41 @@ async def _publish_say(room: rtc.Room, text: str, extra: dict,
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     await room.local_participant.publish_data(data, reliable=True, topic="operator.say")
     return {"ok": True, "seq": say.seq}
+
+
+def _human_identities(room) -> list[str]:
+    """The humans in the room (relay.is_human_peer: no operator agent, not the worker)."""
+    return sorted(p.identity for p in room.remote_participants.values()
+                  if relay.is_human_peer(_kind_label(p), dict(getattr(p, "attributes", None) or {})))
+
+
+async def _publish_ui(room, body: dict) -> dict:
+    """0.21.0 page control: bridge -> POST /api/bridge/ui (body without v/via), WebRTC ->
+    topic delta.ui (v2 packet) ONLY to the humans in the room. No human: nothing is sent
+    (an empty destination list would reach everyone)."""
+    send_ui = getattr(room, "send_ui", None)
+    try:
+        if send_ui is not None:
+            out = await send_ui(body)
+            applied = out.get("applied") if isinstance(out.get("applied"), dict) else body
+            res = {"ok": True, "type": "ui", "via": "bridge", "applied": applied}
+            if isinstance(out.get("humans"), int):
+                res["humans"] = out["humans"]
+            return res
+        humans = _human_identities(room)
+        if humans:
+            data = json.dumps(vui.packet(body), ensure_ascii=False).encode("utf-8")
+            await room.local_participant.publish_data(data, reliable=True, topic=vui.TOPIC,
+                                                      destination_identities=humans)
+        return {"ok": True, "type": "ui", "via": "datachannel", "applied": body,
+                "humans": len(humans)}
+    except vtransport.BridgeError as e:
+        detail = (e.body or {}).get("detail") if isinstance(e.body, dict) else None
+        if e.status == 422:
+            return {"ok": False, "type": "invalid", "error": f"server rejected the ui command: {detail or e}"}
+        return {"ok": False, "type": "ui", "status": e.status, "error": f"ui not sent: {e}"}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "type": "ui", "error": f"ui not sent: {type(e).__name__}"}
 
 
 async def _publish_visual(room, body: dict) -> dict:
@@ -937,25 +1002,74 @@ or external references), PNG/JPEG/WebP 1 MB; invalid: exit 2, nothing sent.
 """
 
 
+UI_HELP = f"""\
+Control the call page of the humans in the room (0.21.0), like their own clicks.
+
+  voicehook-agent ui open|close|min|medium|large|max <window>
+  voicehook-agent ui layout <preset>
+  voicehook-agent ui move <window> <slot> [--preset P]
+  voicehook-agent ui focus <project|all>
+
+Windows:  {', '.join(vui.WINDOWS)}  (activity/aktivitaet/feed = log, decisions/entscheidungen
+          = dec, status/statusboard = board, transcript/transkript/chat = wrap, karten = cards)
+Presets:  {', '.join(vui.PRESETS)}  (dreiteiler/drittel = thirds, viertel = quarters,
+          haelften = halves, gross-mitte/big = bigmid, leiste = bar)
+Slots:    {', '.join(vui.SLOTS)}  (left/links, middle/mitte, right/rechts, bottom/unten)
+Projects: {', '.join(vui.PROJECTS)}  (sales engine/se, customers, other, alles)
+
+WebRTC: data packet topic delta.ui (v2) only to the humans; bridge: POST /api/bridge/ui.
+Unknown value: exit 2, nothing sent. Success prints one line, e.g. `ui: window log large`.
+
+Examples:
+  voicehook-agent ui large decisions
+  voicehook-agent ui layout dreiteiler
+  voicehook-agent ui move activity links --preset thirds
+  voicehook-agent ui focus sales engine
+"""
+
+
 # 0.11.0 (multi-operator): append is the default; a running say is never cut (only own
 # operator.interrupt / --urgent). overwrite/revise replace only our OWN not-started says.
 _SAY_MODES = ("append", "overwrite", "revise")
 SAY_DEFAULT_MODE = "append"
 _DECIDE_RPC = "vh.decide"  # decisions.RPC_METHOD on the worker (Decision Board)
+DECIDE_CONTEXT_MAX = 1500  # 0.21.0 decisions.CONTEXT_MAX: background for Delta, never shown
+DECIDE_RECENT_MAX = 600    # 0.21.0 decisions.RECENT_MAX: last turn of the asking session
+
+
+def _decide_text(value: str | None, flag: str, limit: int) -> str | None:
+    """--context / --recent: whitespace collapsed (like the server), over `limit`: ValueError
+    before anything is sent. None = not given."""
+    if value is None:
+        return None
+    t = " ".join(str(value).split())
+    if len(t) > limit:
+        raise ValueError(f"decide {flag}: max {limit} characters (got {len(t)}), nothing sent")
+    return t
 
 
 async def _decide_rpc(ctl: _Control, req: dict) -> dict:
     """vh.decide RPC to the voicebot (own decide, and 0.16.0 helper requests with sender;
-    a helper request never touches the idle watchdog)."""
+    a helper request never touches the idle watchdog). 0.21.0: context/recent ride along;
+    bridge transport: POST /api/bridge/decide instead of the RPC."""
     body = {k: v for k, v in (
         ("question", req.get("question")), ("options", req.get("options") or None),
         ("recommend", req.get("recommend")), ("id", req.get("id")),
-        ("delete", True if req.get("delete") else None)) if v is not None}
+        ("delete", True if req.get("delete") else None),
+        ("context", req.get("context")), ("recent", req.get("recent"))) if v is not None}
     if req.get("sender"):  # 0.16.0: a helper session's question (Vertrag A)
         body["sender"] = str(req["sender"])
     room = await ctl.wait_room(10.0)
     if room is None:
         return {"ok": False, "error": "not connected to the room (yet)"}
+    send_decide = getattr(room, "send_decide", None)
+    if send_decide is not None:  # bridge: the server runs the RPC for us
+        try:
+            out = await send_decide(body)
+        except vtransport.BridgeError as e:
+            detail = (e.body or {}).get("detail") if isinstance(e.body, dict) else None
+            return {"ok": False, "status": e.status or 503, "error": str(detail or e)}
+        return {**out, "type": "decide"} if "type" not in out else out
     worker = next((p.identity for p in room.remote_participants.values()
                    if _kind_label(p) == "agent"), None)
     if worker is None:
@@ -1045,6 +1159,17 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         if room is None:
             return {"ok": False, "error": "not connected to the room (yet)"}
         return await _publish_card(ctl, room, body)
+    if cmd == "ui":
+        # 0.21.0: window/layout/move/focus on the humans' call page (checked again here)
+        ctl.watchdog.touch()
+        try:
+            body = vui.validate(req.get("body"))
+        except vui.UiError as e:
+            return {"ok": False, "type": "invalid", "error": str(e)}
+        room = await ctl.wait_room(10.0)
+        if room is None:
+            return {"ok": False, "error": "not connected to the room (yet)"}
+        return await _publish_ui(room, body)
     if cmd == "board":
         ctl.watchdog.touch()
         board = req.get("board")
@@ -1104,6 +1229,7 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
             if stale:
                 hints["stale_error"] = stale
             hints.update(_now_view(ctl))
+        hints["human_state"] = dict(ctl.human_state)  # 0.21.0 Silent Mode, on every next
         if ev is None:
             return {"ok": True, "type": "timeout", "pending": 0, **hints}
         if ev.get("type") == "user":
@@ -1126,15 +1252,21 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         # 0.13.0: manual line for agents without the hook; the join owns the log
         try:
             line = vactivity.note_line(str(req.get("text") or ""))
+            project = vui.project_field(req.get("project"))
         except ValueError as e:
             return {"ok": False, "error": str(e)}
         if ctl.activity_path is None:
             return {"ok": False, "error": "activity log not available in this join"}
+        if project is not None:  # 0.21.0: field project on this and every later operator.activity
+            ctl.activity_project = project
         try:
             vactivity.append_line(ctl.activity_path.parent, line)
         except OSError as e:
             return {"ok": False, "error": f"activity log not writable: {e!r}"}
-        return {"ok": True, "type": "activity", "line": line}
+        out = {"ok": True, "type": "activity", "line": line}
+        if ctl.activity_project:
+            out["project"] = ctl.activity_project
+        return out
     if cmd == "says":
         return {"ok": True, "type": "says", "says": ctl.say_status.table(),
                 **({"say_hint": h} if (h := ctl.say_status.stuck()) else {})}
@@ -1250,7 +1382,9 @@ async def _publish_activity(ctl: _Control, lines: list[str]) -> bool:
     room = ctl.room
     if room is None:
         return False
-    payload = {"lines": lines, "ts": time.time()}
+    payload: dict = {"lines": lines, "ts": time.time()}
+    if ctl.activity_project:  # 0.21.0 `activity --project`: overrides the derived project tag
+        payload["project"] = ctl.activity_project
     try:
         await room.local_participant.publish_data(
             json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -1925,8 +2059,13 @@ async def _connect_and_listen(
         _voicebot_event(voicebot.left(_kind_label(p), [_kind_label(o) for o in rest], humans,
                                       _room_name(), stop.is_set()))
 
+    def _on_attributes_changed(changed, p) -> None:
+        if ctl is not None:  # 0.21.0 Silent Mode: vh.mic_muted / vh.speaker_muted / vh.away
+            ctl.humans_changed(room)
+
     room.on("participant_connected", _on_participant_connected)
     room.on("participant_disconnected", _on_participant_disconnected)
+    room.on("participant_attributes_changed", _on_attributes_changed)
 
     def _on_active_speakers(spk_list) -> None:
         new_set = {s.identity for s in spk_list}
@@ -2629,35 +2768,54 @@ def _client_request(args) -> dict:
         if text == "-":
             text = sys.stdin.read()
         vactivity.note_line(text)  # ValueError when empty -> exit 1 before connecting
-        return {"cmd": "activity", "text": text.strip()}
+        req = {"cmd": "activity", "text": text.strip()}
+        project = vui.project_field(getattr(args, "project", None))
+        if project is not None:
+            req["project"] = project
+        return req
+    if args.cmd == "ui":
+        return {"cmd": "ui", "body": vui.command(args.action, args.args, args.preset)}
     if args.cmd == "leave":
         return {"cmd": "leave", "say": args.say} if args.say else {"cmd": "leave"}
     if args.cmd == "decide":
+        # 0.21.0: background for Delta; over the limit -> ValueError, nothing sent
+        context = _decide_text(getattr(args, "context", None), "--context", DECIDE_CONTEXT_MAX)
+        recent = _decide_text(getattr(args, "recent", None), "--recent", DECIDE_RECENT_MAX)
         if args.delete or args.id:
             if not args.id:
                 raise ValueError("decide --delete needs --id")
             req = {"cmd": "decide", "id": args.id}
             if args.delete:
                 req["delete"] = True
-            else:  # change an open decision
+            else:  # change an open decision ('' clears context/recent)
                 if args.question is not None:
                     req["question"] = args.question
                 if args.option:
                     req["options"] = args.option
                 if args.recommend is not None:
                     req["recommend"] = args.recommend
+                if context is not None:
+                    req["context"] = context
+                if recent is not None:
+                    req["recent"] = recent
                 if len(req) == 2:
-                    raise ValueError("decide --id: pass --question, --option or --recommend (or --delete)")
+                    raise ValueError("decide --id: pass --question, --option, --recommend, --context "
+                                     "or --recent (or --delete)")
             return req
         if not args.question:
-            raise ValueError("decide needs --question (plus optional --option/--recommend)")
+            raise ValueError("decide needs --question (plus optional --option/--recommend/--context)")
         req = {"cmd": "decide", "question": args.question}
         if args.option:
             req["options"] = args.option
         if args.recommend is not None:
             req["recommend"] = args.recommend
+        if context:
+            req["context"] = context
+        if recent:
+            req["recent"] = recent
         return req
     faq_raw = getattr(args, "faq", None) or []
+    project = vui.project_field(getattr(args, "project", None))  # 0.21.0
     if (args.text is not None or args.doing is not None or args.open or args.done or args.file
             or faq_raw):
         file_obj = None
@@ -2665,8 +2823,12 @@ def _client_request(args) -> dict:
             with open(args.file, encoding="utf-8") as fh:
                 file_obj = json.load(fh)
         faq = relay.parse_faq(faq_raw, warn=lambda m: print(m, file=sys.stderr, flush=True))
-        return {"cmd": "board", "board": relay.build_board(
-            args.text, args.doing, args.open, args.done, file_obj, faq=faq)}
+        board = relay.build_board(args.text, args.doing, args.open, args.done, file_obj, faq=faq)
+        if project is not None:
+            board["project"] = project
+        return {"cmd": "board", "board": board}
+    if project is not None:
+        raise ValueError("status --project goes with a board: TEXT, --doing, --open, --done or -f")
     return {"cmd": "status"}
 
 
@@ -2734,7 +2896,7 @@ def _run_client(args) -> int:
     next timeout), 1 = request failed, 3 = no running join / join ended."""
     try:
         req = _client_request(args)
-    except (vvisual.VisualError, vcards.CardError) as e:  # bad shape/card: nothing sent, exit 2
+    except (vvisual.VisualError, vcards.CardError, vui.UiError) as e:  # bad shape/card/ui: nothing sent, exit 2
         print(json.dumps({"ok": False, "type": "invalid", "error": str(e)}, ensure_ascii=False),
               flush=True)
         print(f"[error] {e}", file=sys.stderr, flush=True)
@@ -2764,6 +2926,11 @@ def _run_client(args) -> int:
         return 3
     if wait_answer and reply.get("ok"):
         reply["hint"] = "own join: the answer comes as a `next` event type decision"
+    if req.get("cmd") == "ui" and reply.get("ok"):  # 0.21.0: one confirmation line
+        line = vui.summary(reply.get("applied") if isinstance(reply.get("applied"), dict) else req["body"])
+        print(line + (" (no human in the call, nothing shown)" if reply.get("humans") == 0 else ""),
+              flush=True)
+        return 0
     print(json.dumps(reply, ensure_ascii=False), flush=True)
     if reply.get("type") == "ended":
         return 3
@@ -3051,6 +3218,10 @@ def main(argv: list[str] | None = None) -> None:
                           "board field faq[{q, a}]; refresh it on every board update.")
     p_status.add_argument("-f", "--file", default=None, metavar="JSON",
                           help="board file {doing, open[], done[]}; flags add to it")
+    p_status.add_argument("--project", default=None, metavar="NAME",
+                          help="0.21.0: your project (1-40 chars, e.g. voicehook, salesengine, kunden, "
+                               "sonstiges), sent as board field project; overrides the project the "
+                               "server derives for the focus filter. Also over the relay (helper)")
     _add_session(p_status)
     p_show = sub.add_parser(
         "show", help="draw a shape in the ring (operator.visual), or 0.21.0 --card: a text, code, "
@@ -3094,6 +3265,18 @@ def main(argv: list[str] | None = None) -> None:
                         help="open the card view big in the middle with this card at full size "
                              "(diagrams; implies --panel cards)")
     _add_session(p_show)
+    # 0.21.0: control the humans' call page (topic delta.ui / POST /api/bridge/ui)
+    p_ui = sub.add_parser(
+        "ui", help="control the call page of the humans: open/close/min/medium/large/max a "
+        "window, pick a layout, move a window into a slot, focus one project",
+        formatter_class=argparse.RawDescriptionHelpFormatter, description=UI_HELP)
+    p_ui.add_argument("action", metavar="ACTION",
+                      help="open close min medium large max | layout | move | focus")
+    p_ui.add_argument("args", nargs="*", metavar="ARG",
+                      help="<window> | <preset> | <window> <slot> | <project|all>")
+    p_ui.add_argument("--preset", default=None, metavar="P",
+                      help="move: the layout preset the slot belongs to")
+    _add_session(p_ui)
     # log-summary: the 2nd micro agent (digests the call log into operator.graph)
     p_sum = sub.add_parser("log-summary", help="watch a call log and emit operator.graph digests")
     p_sum.add_argument("log", help="path to the CLI's --json transcript log (JSONL)")
@@ -3143,6 +3326,9 @@ def main(argv: list[str] | None = None) -> None:
         "line 1:1, 3-8 words")
     p_act.add_argument("text", nargs="+", help="what is happening now ('-' reads it from stdin); "
                        "scrubbed, capped at 120 chars; no paths, secrets or personal data")
+    p_act.add_argument("--project", default=None, metavar="NAME",
+                       help="0.21.0: your project (1-40 chars), sent as field project on this and "
+                            "every later operator.activity of the join (focus filter)")
     _add_session(p_act)
     # Decision Board: a question only the human can decide (yes/no or 2-3 options). The
     # result comes back as a `next` event type "decision". Create, change or delete.
@@ -3159,6 +3345,13 @@ def main(argv: list[str] | None = None) -> None:
                        help="change or delete this decision (d + 8 hex), only while still open")
     p_dec.add_argument("--delete", action="store_true", default=False,
                        help="delete the decision given by --id")
+    p_dec.add_argument("--context", default=None, metavar="TEXT",
+                       help=f"0.21.0, always pass it: background for Delta, never shown to the human "
+                            f"(max {DECIDE_CONTEXT_MAX} chars): 2-4 plain sentences, what it is about, why, "
+                            "what happens on yes, what on no. With --id: change it ('' clears)")
+    p_dec.add_argument("--recent", default=None, metavar="TEXT",
+                       help=f"0.21.0: the last turn of the asking session, one short line (max "
+                            f"{DECIDE_RECENT_MAX} chars)")
     p_dec.add_argument("--timeout", type=float, default=120.0, metavar="SEC",
                        help="0.16.0, with --wait (no SEC): wait up to SEC for the answer (default 120)")
     _add_session(p_dec, answer_wait=True)
@@ -3254,7 +3447,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "helper-import":
         sys.exit(_run_helper_import())
     if args.cmd in ("say", "next", "says", "leave", "status", "activity", "decide", "helper-credential",
-                    "vocab"):
+                    "vocab", "ui"):
         sys.exit(_run_client(args))
     if args.cmd == "show":
         sys.exit(_run_client(args))
