@@ -294,3 +294,18 @@ def test_cycle_stores_token_for_uploads():
     import inspect
     src = inspect.getsource(cli._connect_and_listen)
     assert "ctl.api_base, ctl.lk_jwt = api_base" in src
+
+
+def test_is_svg_head_without_backtracking():
+    assert vc.is_svg(b'  <?xml version="1.0"?>\n<!-- a --><!-- b --><!DOCTYPE svg><svg viewBox="0 0 1 1"/>')
+    assert vc.is_svg(b"<SVG>") and not vc.is_svg(b"<svgx>") and not vc.is_svg(b"<html><svg>")
+    assert not vc.is_svg(b"<!--" + b"--><!--" * 50000)   # CodeQL ReDoS case, returns fast
+
+
+@pytest.mark.parametrize("svg", [
+    b"<svg><rect style=\"fill:url( ' https://evil.example/p' )\"/></svg>",
+    b"<svg><image href=\" https://evil.example/x.png\"/></svg>",
+])
+def test_external_refs_with_spaces_rejected(svg):
+    with pytest.raises(vc.CardError, match="nothing external"):
+        vc.image_kind(svg)

@@ -40,8 +40,29 @@ SVG_MAX = 300 * 1024
 RASTER_MAX = 1024 * 1024
 PACKET_MAX = 14_000
 
-_SVG_HEAD = re.compile(rb"^\s*(<\?xml[^>]*\?>\s*)?(<!--.*?-->\s*)*(<!DOCTYPE[^>]*>\s*)?<svg[\s>]",
-                       re.DOTALL | re.IGNORECASE)
+_SVG_TAG = re.compile(rb"<svg[\s>]", re.IGNORECASE)
+
+
+def is_svg(data: bytes) -> bool:
+    """Starts with an <svg> element (after an optional XML declaration, comments and a
+    DOCTYPE), like the server's check; a plain scan, no backtracking regex."""
+    s = data.lstrip()
+    if s[:5].lower() == b"<?xml":
+        end = s.find(b"?>")
+        if end < 0:
+            return False
+        s = s[end + 2:].lstrip()
+    while s.startswith(b"<!--"):
+        end = s.find(b"-->", 4)
+        if end < 0:
+            return False
+        s = s[end + 3:].lstrip()
+    if s[:9].upper() == b"<!DOCTYPE":
+        end = s.find(b">")
+        if end < 0:
+            return False
+        s = s[end + 1:].lstrip()
+    return bool(_SVG_TAG.match(s))
 
 
 # SVG may draw anything but never run or load anything (server voicehook-v4 cards.check_svg)
@@ -53,7 +74,7 @@ _SVG_BAD = (
     (re.compile(rb"javascript:", re.IGNORECASE), "no javascript:"),
     (re.compile(rb"@import", re.IGNORECASE), "no @import"),
 )
-_SVG_REF = re.compile(rb"""(?:href\s*=\s*["']\s*([^"'\s]*)|url\(\s*["']?\s*([^)"'\s]*))""", re.IGNORECASE)
+_SVG_REF = re.compile(rb"""href\s*=\s*["']([^"']*)|url\(([^)]*)\)""", re.IGNORECASE)
 _SVG_REF_OK = re.compile(rb"^(#|data:image/(png|jpeg|webp|gif)[;,])", re.IGNORECASE)
 
 
@@ -81,7 +102,7 @@ def check_svg(data: bytes) -> None:
         if rx.search(data):
             raise CardError(f"svg must be a plain drawing: {what}")
     for m in _SVG_REF.finditer(data):
-        ref = m.group(1) if m.group(1) is not None else m.group(2)
+        ref = (m.group(1) if m.group(1) is not None else m.group(2)).strip().strip(b"\"'").strip()
         if ref and not _SVG_REF_OK.match(ref):
             raise CardError("svg must be a plain drawing: references only to #ids or data:image, "
                             "nothing external")
@@ -89,7 +110,7 @@ def check_svg(data: bytes) -> None:
 
 def image_kind(data: bytes) -> str:
     """Content type from the magic bytes (never from the file name), else CardError."""
-    if _SVG_HEAD.match(data):
+    if is_svg(data):
         if len(data) > SVG_MAX:
             raise CardError(f"svg max {SVG_MAX // 1024} KB")
         check_svg(data)
