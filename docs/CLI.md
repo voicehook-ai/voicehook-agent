@@ -562,7 +562,13 @@ the `SessionStart` hook (re-run it after the upgrade).
 **Session state from the hooks (0.21.0).** The hook reports each helper session's state,
 never what the agent writes: PreToolUse / PostToolUse / UserPromptSubmit `arbeitet`,
 Notification / PermissionRequest / AskUserQuestion `frage`, Stop `leerlauf`, 3 failed tools
-in a row `problem`. Only on change (same state again at most every 10 min), detached `POST
+in a row `problem`. **0.21.2:** a tool call that only waits is `wartet`: Bash of `vh-helper
+next`, `voicehook-agent next|relay-next`, `sleep`/`wait`, `gh run watch`, `gh pr checks
+--watch`, a relay long poll by curl, or an until/while loop whose other commands only look
+(curl, grep, echo, ...); the tools Monitor, TaskOutput, BashOutput and an MCP `next`. Board
+bookkeeping (`vh-helper status|activity`, `voicehook-agent status|activity`) keeps `wartet`;
+anything else (Edit, Write, build, test, unknown commands) stays `arbeitet`. A server without
+`wartet` (422) gets `leerlauf` instead. Only on change (same state again at most every 10 min), detached `POST
 <url>/state {from, state}`; the server merges it into the helper's card (`operator.status`
 with `sub` and `state`). Remote relay only; an older server (404) is ignored.
 `VOICEHOOK_SESSION_STATE=0` turns it off.
