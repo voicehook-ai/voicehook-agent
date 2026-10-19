@@ -18,7 +18,10 @@ notification. Now the hook brings it into the call:
   (`Freigabe für Bash: Remove node_modules directory?`). The hook prints NOTHING, so the
   permission flow stays exactly as it is: the human still decides in the session.
 * PreToolUse of AskUserQuestion: the question text itself, its 2-3 option labels as
-  options (more than 3: yes/no on the question).
+  options (more than 3: yes/no on the question). 0.21.3 (asks.py): EVERY question of the
+  call gets its own decision, the option descriptions go along as hidden `context`, a 4th
+  option is named in the question (or the context); the `ask-wait` hook can answer the
+  tool directly from the board.
 
 Routing (who asks):
 * The session that owns the running join (owner_session): decide over its own control
@@ -116,28 +119,69 @@ def _tool_desc(event: dict) -> str:
     return vact.describe(event.get("tool_input"), event.get("tool_name"))
 
 
-def _ask_from_tool_input(inp: object) -> tuple[str, list[str]] | None:
-    """(question, options) of an AskUserQuestion tool_input (its first question)."""
-    if not isinstance(inp, dict):
-        return None
-    qs = inp.get("questions")
-    first = qs[0] if isinstance(qs, list) and qs and isinstance(qs[0], dict) else None
-    if first is None:
-        return None
-    q = clean_text(first.get("question"))
-    if not q:
-        return None
-    labels = []
-    for o in first.get("options") or []:
-        lbl = o.get("label") if isinstance(o, dict) else o
-        lbl = clean_text(lbl, OPTION_MAX) if isinstance(lbl, str) else ""
-        if lbl and lbl not in labels:
+CONTEXT_MAX = 1500            # server decisions.CONTEXT_MAX (hidden background for Delta)
+ITEMS_MAX = 4                 # AskUserQuestion: 1-4 questions
+
+
+def _redacted(text: object) -> bool:
+    """A secret was scrubbed out of this text: it never goes to the call (0.21.3)."""
+    s = str(text or "")
+    return vact.REDACTED in vact.scrub(s) and vact.REDACTED not in vact._clean(s)
+
+
+def ask_items(inp: object) -> list[dict]:
+    """0.21.3: every question of an AskUserQuestion tool_input as one decision:
+    {question, options (2-3 labels, else []), labels (the original labels), raw (the
+    original question text, the key of the tool's `answers`), context (descriptions)}.
+    A question with a secret in it (scrubbed) is dropped. Language as written."""
+    if not isinstance(inp, dict) or not isinstance(inp.get("questions"), list):
+        return []
+    out: list[dict] = []
+    for qd in inp["questions"][:ITEMS_MAX]:
+        if not isinstance(qd, dict) or not isinstance(qd.get("question"), str):
+            continue
+        raw = qd["question"]
+        q = clean_text(raw)
+        if not q or _redacted(raw):
+            continue
+        labels: list[str] = []
+        shown: list[str] = []
+        ctx: list[str] = []
+        for o in qd.get("options") or []:
+            lbl = o.get("label") if isinstance(o, dict) else o
+            if not isinstance(lbl, str) or not lbl.strip() or _redacted(lbl):
+                continue
+            short = clean_text(lbl, OPTION_MAX)
+            if short in shown:
+                continue
             labels.append(lbl)
-    more = len(qs) - 1
-    if more > 0:
-        q = _cut(f"{q} (+{more} weitere Frage{'n' if more > 1 else ''} in der Session)",
-                 QUESTION_MAX)
-    return q, labels if 2 <= len(labels) <= 3 else []
+            shown.append(short)
+            desc = o.get("description") if isinstance(o, dict) else ""
+            if isinstance(desc, str) and desc.strip() and not _redacted(desc):
+                ctx.append(f"{short}: {clean_text(desc, 200)}")
+        opts = shown[:3] if len(shown) >= 2 else []
+        if len(shown) > 3:          # the board has 2-3 options: name the rest in the question
+            rest = " / ".join(shown[3:])
+            if len(q) + len(rest) + 3 <= QUESTION_MAX:
+                q = f"{q} ({rest})"
+            ctx.append("More options (answer as free text): " + rest)
+        if qd.get("multiSelect") is True:
+            ctx.append("Several options may be chosen (answer as free text).")
+        header = qd.get("header")
+        if isinstance(header, str) and header.strip() and not _redacted(header):
+            ctx.insert(0, "Topic: " + clean_text(header, 40))
+        out.append({"question": q, "options": opts, "labels": labels[:len(shown)], "raw": raw,
+                    "context": _cut("; ".join(ctx), CONTEXT_MAX) if ctx else ""})
+    return out
+
+
+def _ask_from_tool_input(inp: object) -> tuple[str, list[str], list[dict]] | None:
+    """(question, options, items) of an AskUserQuestion tool_input; question/options are
+    those of its first question (dedupe key), items all of them (ask_items)."""
+    items = ask_items(inp)
+    if not items:
+        return None
+    return items[0]["question"], items[0]["options"], items
 
 
 def classify(event: dict) -> dict | None:
@@ -172,7 +216,7 @@ def classify(event: dict) -> dict | None:
             got = _ask_from_tool_input(event.get("tool_input"))
             if got:
                 return {"kind": "ask", "text": ASK_TEXT, "question": got[0], "options": got[1],
-                        "tool": tool, "prio": PRIO_SPECIFIC}
+                        "items": got[2], "tool": tool, "prio": PRIO_SPECIFIC}
         desc = clean_text(_tool_desc(event), 120).rstrip(" .?!:")
         q = _cut(f"Freigabe für {tool}: {desc}", QUESTION_MAX - 1) + "?" if desc \
             else f"Freigabe für {tool}?"
@@ -182,7 +226,7 @@ def classify(event: dict) -> dict | None:
         got = _ask_from_tool_input(event.get("tool_input"))
         if got:
             return {"kind": "ask", "text": ASK_TEXT, "question": got[0], "options": got[1],
-                    "tool": ASK_TOOL, "prio": PRIO_SPECIFIC}
+                    "items": got[2], "tool": ASK_TOOL, "prio": PRIO_SPECIFIC}
     return None
 
 
@@ -250,10 +294,18 @@ def _state_exists() -> bool:
         return False
 
 
+def group_key(info: dict) -> str:
+    """Dedupe key of one ask: its question, or all questions of an AskUserQuestion."""
+    items = info.get("items") or []
+    if len(items) > 1:
+        return _qkey("\n".join(str(i.get("question") or "") for i in items))
+    return _qkey(str(info.get("question") or ""))
+
+
 def admit_ask(skey: str, info: dict, rt: str, t: float, extra: dict | None = None) -> dict | None:
     """Throttle + dedupe under the lock. {"replace": old id or None} when a new decision
     goes out (the slot is then marked open, id still None), else None."""
-    qk = _qkey(info["question"])
+    qk = group_key(info)
     prio = int(info.get("prio") or 0)
 
     def step(st: dict):
@@ -283,7 +335,8 @@ def admit_ask(skey: str, info: dict, rt: str, t: float, extra: dict | None = Non
                       **(extra or {})}
         me["ask_at"] = t
         asks.append(t)
-        return {"replace": open_.get("id") if open_ else None}
+        return {"replace": open_.get("id") if open_ else None,
+                "replace_ids": list(open_.get("ids") or []) if open_ else []}
     return _with_state(step)
 
 
@@ -303,7 +356,44 @@ def set_id(skey: str, qk: str, dec_id: str) -> bool:
     return bool(_with_state(step))
 
 
-def resolve(skey: str, tool: str | None, t: float) -> dict | None:
+def set_ids(skey: str, qk: str, ids: list[str]) -> bool:
+    """set_id for the decisions of a multi-question ask (0.21.3): True = delete them now."""
+    def step(st: dict):
+        me = st["sessions"].get(skey)
+        open_ = me.get("open") if isinstance(me, dict) and isinstance(me.get("open"), dict) else None
+        if open_ is None or open_.get("q") != qk:
+            return True
+        if open_.get("resolved"):
+            me.pop("open", None)
+            return True
+        open_["ids"] = list(ids)
+        open_["id"] = ids[0] if ids else None
+        return False
+    return bool(_with_state(step))
+
+
+def open_slot(skey: str) -> dict | None:
+    """The open decision slot of this session (a copy), or None."""
+    def step(st: dict):
+        me = st["sessions"].get(skey)
+        open_ = me.get("open") if isinstance(me, dict) and isinstance(me.get("open"), dict) else None
+        return dict(open_) if open_ and not open_.get("resolved") else None
+    return _with_state(step)
+
+
+def forget(skey: str, qk: str) -> bool:
+    """The slot was answered in the call (asks.py): drop it without deleting the decision."""
+    def step(st: dict):
+        me = st["sessions"].get(skey)
+        open_ = me.get("open") if isinstance(me, dict) and isinstance(me.get("open"), dict) else None
+        if open_ is None or open_.get("q") != qk:
+            return False
+        me.pop("open", None)
+        return True
+    return bool(_with_state(step))
+
+
+def resolve(skey: str, tool: str | None, t: float, stop: bool = False) -> dict | None:
     """The session goes on: the open decision slot ({id, route, from?, dir?}) to delete, or
     None. Without an id yet (the child is still asking) the slot is only marked resolved;
     the child deletes the decision as soon as it has the id."""
@@ -314,6 +404,8 @@ def resolve(skey: str, tool: str | None, t: float) -> dict | None:
             return None
         if tool is not None and open_.get("tool") and open_.get("tool") != tool:
             return None
+        if stop and open_.get("kind") == "stop":
+            return None   # 0.21.3: asked at this Stop (asks.py); the next turn resolves it
         me.update(seen=t, done_at=t)
         if not open_.get("id"):
             open_["resolved"] = True
@@ -399,24 +491,60 @@ def post_main(raw: str) -> int:
         job = json.loads(raw or "{}")
         if not isinstance(job, dict):
             return 0
-        old = job.get("replace") or job.get("delete")
-        if isinstance(old, str) and _ID.match(old):
-            _decide(job, {"id": old, "delete": True})
-        q = job.get("question")
-        if job.get("op") != "create" or not isinstance(q, str) or not q:
-            return 0
-        body: dict = {"question": q}
-        opts = [o for o in job.get("options") or [] if isinstance(o, str)]
-        if 2 <= len(opts) <= 3:
-            body["options"] = opts
-        res = _decide(job, body)
-        dec_id = res.get("id") if isinstance(res, dict) and res.get("ok") else None
-        if isinstance(dec_id, str) and _ID.match(dec_id) and \
-                set_id(str(job.get("skey") or ""), _qkey(q), dec_id):
-            _decide(job, {"id": dec_id, "delete": True})
+        create(job)
     except Exception:  # noqa: BLE001, S110
         pass
     return 0
+
+
+def _body(item: dict) -> dict:
+    body: dict = {"question": item["question"]}
+    opts = [o for o in item.get("options") or [] if isinstance(o, str)]
+    if 2 <= len(opts) <= 3:
+        body["options"] = opts
+    ctx = item.get("context")
+    if isinstance(ctx, str) and ctx.strip():
+        body["context"] = ctx[:CONTEXT_MAX]
+    return body
+
+
+def create(job: dict) -> list[str]:
+    """Delete what the job replaces/deletes, create its decision(s) (one per item of a
+    multi-question ask) and store their ids. The ids created (and kept), [] otherwise."""
+    olds = [job.get("replace"), job.get("delete"), *(job.get("replace_ids") or []),
+            *(job.get("delete_ids") or [])]
+    done: set = set()
+    for old in olds:
+        if isinstance(old, str) and _ID.match(old) and old not in done:
+            done.add(old)
+            _decide(job, {"id": old, "delete": True})
+    q = job.get("question")
+    if job.get("op") != "create" or not isinstance(q, str) or not q:
+        return []
+    items = [i for i in job.get("items") or [] if isinstance(i, dict)
+             and isinstance(i.get("question"), str) and i["question"]]
+    if len(items) <= 1:
+        item = items[0] if items else {"question": q, "options": job.get("options") or []}
+        res = _decide(job, _body({**item, "question": q}))
+        dec_id = res.get("id") if isinstance(res, dict) and res.get("ok") else None
+        if isinstance(dec_id, str) and _ID.match(dec_id):
+            if set_id(str(job.get("skey") or ""), str(job.get("qk") or _qkey(q)), dec_id):
+                _decide(job, {"id": dec_id, "delete": True})
+                return []
+            return [dec_id]
+        return []
+    ids: list[str] = []
+    for item in items[:ITEMS_MAX]:
+        res = _decide(job, _body(item))
+        dec_id = res.get("id") if isinstance(res, dict) and res.get("ok") else None
+        if isinstance(dec_id, str) and _ID.match(dec_id):
+            ids.append(dec_id)
+    qk = str(job.get("qk") or _qkey("\n".join(i["question"] for i in items)))
+    if ids and set_ids(str(job.get("skey") or ""), qk, ids):
+        for dec_id in ids:
+            _decide(job, {"id": dec_id, "delete": True})
+        return []
+    return ids
 
 
 # --------------------------------------------------------------------------- #
@@ -465,12 +593,26 @@ def handle(raw: str, now: float | None = None, post=None) -> dict | None:
         adm = admit_ask(skey, info, rt, t, extra)
         if adm is None:
             return None
-        job = {"op": "create", "route": rt, "skey": skey, "question": info["question"],
-               "options": info.get("options") or [], "replace": adm.get("replace"), **extra}
+        job = ask_job(rt, skey, info, adm, extra)
         (post or spawn)(job)
         return job
     except Exception:  # noqa: BLE001 - a hook must never disturb Claude Code
         return None
+
+
+def ask_job(rt: str, skey: str, info: dict, adm: dict, extra: dict) -> dict:
+    """The create job of an admitted ask (handed to the detached child or to create())."""
+    job = {"op": "create", "route": rt, "skey": skey, "question": info["question"],
+           "options": info.get("options") or [], "replace": adm.get("replace"),
+           **{k: v for k, v in extra.items() if k in ("dir", "from")}}
+    items = info.get("items") or []
+    if adm.get("replace_ids"):
+        job["replace_ids"] = adm["replace_ids"]
+    if len(items) > 1 or (items and items[0].get("context")):
+        job["items"] = [{k: i.get(k) or ("" if k != "options" else []) for k in
+                         ("question", "options", "context")} for i in items]
+        job["qk"] = group_key(info)
+    return job
 
 
 def _cached_label(skey: str) -> str:
@@ -483,11 +625,13 @@ def _cached_label(skey: str) -> str:
         return ""
 
 
-def _resolve_job(skey: str, tool: str | None, t: float, post) -> dict | None:
-    got = resolve(skey, tool, t)
+def _resolve_job(skey: str, tool: str | None, t: float, post, stop: bool = False) -> dict | None:
+    got = resolve(skey, tool, t, stop)
     if got is None:
         return None
     job = {"op": "delete", "route": got.get("route") or "", "skey": skey, "delete": got["id"]}
+    if len(got.get("ids") or []) > 1:
+        job["delete_ids"] = [i for i in got["ids"] if i != got["id"]]
     for k in ("dir", "from"):
         if isinstance(got.get(k), str):
             job[k] = got[k]
@@ -511,6 +655,7 @@ def on_progress(raw: str, now: float | None = None, post=None) -> dict | None:
             tool = None
         else:
             return None
-        return _resolve_job(_skey(event), tool, time.time() if now is None else now, post)
+        return _resolve_job(_skey(event), tool, time.time() if now is None else now, post,
+                            stop=name == "Stop")
     except Exception:  # noqa: BLE001
         return None

@@ -102,6 +102,19 @@ HOOK_COMMANDS = {"PreToolUse": HOOK_COMMAND_PRE, "PostToolUse": HOOK_COMMAND,
                  "PermissionRequest": HOOK_COMMAND_PERMISSION,
                  "SessionStart": HOOK_COMMAND_START}
 NO_MATCHER_EVENTS = ("UserPromptSubmit", "Stop", "SessionStart")  # Claude Code ignores matchers there
+# 0.21.3 (asks.py): the session's own questions answered from the call's Decision Board.
+# ask-wait: a SECOND PreToolUse hook only for AskUserQuestion, long timeout, answers the tool
+# (updatedInput.answers). stop-wait: a SECOND Stop hook, async + asyncRewake: its exit 2
+# wakes the idle session with the answer; the shell maps only our own exit 3 to 2, so an
+# older binary (usage error = exit 2) never wakes a session with its usage text.
+HOOK_COMMAND_ASK_WAIT = "voicehook-agent-hook ask-wait || true"
+HOOK_COMMAND_STOP_WAIT = "voicehook-agent-hook stop-wait; test $? -eq 3 && exit 2; exit 0"
+EXTRA_HOOKS = {
+    "PreToolUse": (HOOK_COMMAND_ASK_WAIT, {"matcher": "AskUserQuestion"},
+                   {"timeout": 100, "statusMessage": "Question is on the voicehook call board "
+                                                     "(answer there, or here after 90 s)"}),
+    "Stop": (HOOK_COMMAND_STOP_WAIT, {}, {"timeout": 1800, "async": True, "asyncRewake": True}),
+}
 # Commands that count as "our hook is already installed" (idempotent install).
 _OUR_COMMANDS = (HOOK_COMMAND, "voicehook-agent hook post-tool-use")
 _OUR_COMMANDS_BY_EVENT = {"PreToolUse": (HOOK_COMMAND_PRE, "voicehook-agent-hook pre-tool-use",
@@ -890,8 +903,22 @@ def hook_entry(event: str = "PostToolUse", exe: str = HOOK_BIN) -> dict:
     return {"hooks": hooks} if event in NO_MATCHER_EVENTS else {"matcher": "*", "hooks": hooks}
 
 
+def extra_entry(event: str, exe: str = HOOK_BIN) -> dict:
+    command, outer, inner = EXTRA_HOOKS[event]
+    return {**outer, "hooks": [{"type": "command", "command": _with_bin(command, exe), **inner}]}
+
+
+def _our_extra(entries: list, event: str) -> list[dict]:
+    want = EXTRA_HOOKS[event][0]
+    return [h for e in entries if isinstance(e, dict) for h in (e.get("hooks") or [])
+            if isinstance(h, dict) and normalize_command(h.get("command", "")) == want]
+
+
 def snippet(exe: str = HOOK_BIN) -> dict:
-    return {"hooks": {ev: [hook_entry(ev, exe)] for ev in HOOK_COMMANDS}}
+    hooks = {ev: [hook_entry(ev, exe)] for ev in HOOK_COMMANDS}
+    for ev in EXTRA_HOOKS:
+        hooks[ev].append(extra_entry(ev, exe))
+    return {"hooks": hooks}
 
 
 def default_settings_path() -> Path:
@@ -952,6 +979,20 @@ def install(path: Path, exe: str | None = None) -> tuple[int, str]:
                 h["command"] = want
                 if ev not in updated:
                     updated.append(ev)
+    for ev, (template, _outer, inner) in EXTRA_HOOKS.items():
+        entries = hooks.setdefault(ev, [])
+        mine = _our_extra(entries, ev)
+        label = f"{ev} ({template.split()[1]})"
+        if not mine:
+            entries.append(extra_entry(ev, exe))
+            added.append(label)
+            continue
+        want = _with_bin(template, exe)
+        for h in mine:
+            if h.get("command") != want or any(h.get(k) != v for k, v in inner.items()):
+                h.update(command=want, **inner)
+                if label not in updated:
+                    updated.append(label)
     if not added and not updated:
         return 0, f"already installed in {path} ({exe})"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1008,6 +1049,14 @@ def doctor(path: Path) -> tuple[int, list[str]]:
                 lines.append(f"FAIL {ev}: {word or cmd!r} not found under /bin/sh with "
                              f"PATH={MINIMAL_PATH} (sessions started by a service see no "
                              "~/.local/bin): run voicehook-agent hook install")
+    for ev, (template, _outer, _inner) in EXTRA_HOOKS.items():
+        entries = hooks.get(ev) if isinstance(hooks.get(ev), list) else []
+        name = template.split()[1]
+        if not _our_extra(entries, ev):
+            rc = 1
+            lines.append(f"FAIL {ev} ({name}): not installed (voicehook-agent hook install)")
+        else:
+            lines.append(f"ok   {ev} ({name})")
     return rc, lines
 
 
@@ -1086,6 +1135,9 @@ class _deadline:
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     cmd = args[0] if args else ""
+    if cmd in ("ask-wait", "stop-wait"):  # 0.21.3 (asks.py): answers from the Decision Board
+        from . import asks
+        return asks.main(cmd)
     if cmd in ("pre-tool-use", "post-tool-use", "post-tool-use-failure", "user-prompt-submit",
                "stop", "notification", "permission-request", "session-start"):
         out = None

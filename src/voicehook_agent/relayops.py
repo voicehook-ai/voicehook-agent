@@ -493,10 +493,12 @@ def _is_decision(o: dict) -> bool:
 
 
 def next_events(rel: dict, frm: str, timeout: float, *, match_id: str | None = None,
-                sleep=time.sleep) -> list[dict]:
-    """Decision events for this helper; with match_id only that one (others stay queued).
-    Waits up to `timeout` seconds; [] on timeout."""
-    want = (lambda o: _is_decision(o) and o.get("id") == match_id) if match_id else _is_decision
+                match_ids: set | None = None, sleep=time.sleep) -> list[dict]:
+    """Decision events for this helper; with match_id (or match_ids, 0.21.3) only those
+    (others stay queued). Waits up to `timeout` seconds; [] on timeout."""
+    ids = set(match_ids or ()) | ({match_id} if match_id else set())
+    want = (lambda o: _is_decision(o) and o.get("id") in ids) if ids else _is_decision
+    match_id = match_id or (next(iter(ids)) if ids else None)
     deadline = time.monotonic() + max(0.0, timeout)
     inbox = inbox_path(frm)
     while True:
