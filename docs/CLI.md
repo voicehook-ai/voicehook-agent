@@ -61,7 +61,7 @@ voicehook-agent leave --say "See you soon."             # clean exit
 | Command | Output (one JSON line) | Exit |
 |---|---|---|
 | `say <text> [--mode append\|overwrite\|revise] [--urgent]` | `{"ok":true,"seq":3}` | 0 ok, 1 failed |
-| `next [--timeout SEC]` | `{"type":"user","text":...}`, `{"type":"revise","text":...,"unspoken":[...],"new":...}` (your `--mode revise` replaced own not-started says; if any still matters, send one merged `say --mode overwrite`), `{"type":"timeout"}`, `{"type":"ended"}` | 0, 3 on `ended` |
+| `next [--timeout SEC]` | `{"type":"user","text":...}`, `{"type":"revise","text":...,"unspoken":[...],"new":...}` (your `--mode revise` replaced own not-started says; if any still matters, send one merged `say --mode overwrite`), `{"type":"timeout"}`, `{"type":"ended"}`; 0.19.0 `{"type":"voicebot_left","room","text"}` / `{"type":"voicebot_back","room","seconds","text"}` (the voicebot dropped out, e.g. a server update: tell your user in chat, keep calling `next`, never leave; back: `say` works again. A takeover sends neither; also a JSONL line in `--json` mode) | 0, 3 on `ended` |
 | `says` (0.9.0) | `{"type":"says","says":[{"seq":3,"state":"spoken","spoken_chars":12,"age_s":4.1,"text":"..."}]}`: last state of each own say (`sent` until the voicebot's first receipt) | 0 |
 | `leave [--say TEXT]` | `{"type":"leaving"}` | 0 |
 | `status` | room, identity, connected, pending events, idle seconds, peers | 0 |
@@ -436,6 +436,54 @@ voicehook-agent status ""                    # all empty: removes the helper's c
 | `--faq` | not sent over the relay (warning on stderr) |
 | Errors | `{"ok": false, "status": N, "error": ..., "via": "relay"}`, exit 1 (422/403/409/410/503 as on `/api/bridge/decide`, 504 = the local join did not answer in 20 s). Only 401 marks the token dead |
 | Never | the token in a URL, argv or output; question or board text on stderr |
+
+**Board reminder (0.19.0).** With the hooks installed, a helper session whose own board is
+older than 3 min, or that has none in this call, gets one short line from its hook while it
+works (PostToolUse, UserPromptSubmit), as Claude Code `hookSpecificOutput.additionalContext`
+(never a `decision`: nothing is blocked), at most once per 3 min per session:
+
+```
+voicehook-Call: Dein Board ist 7 Min alt. Jetzt `vh-helper status "SE Gate" "<Schritt + ETA>"` setzen (oder leeren mit `vh-helper status "SE Gate" ""`, wenn du nichts tust). / voicehook call: your status board is 7 min old. ...
+```
+
+- Board age is tracked locally (`~/.voicehook/board-state.json`, 0600: session hash, name,
+  room, timestamps): a Bash call of `vh-helper status "<from>" ...` or `voicehook-agent
+  status TEXT|--doing|--open|--done|-f` that did not fail counts as set (`""` / all empty =
+  cleared). Quoted text and heredocs never count, the command is never sent.
+- Name: the `from` the session already used, else its session label (same as the
+  activity relay and `voicehook-agent status`). The hint names `vh-helper` when it is on
+  PATH (remote relay), else `voicehook-agent status`.
+- Idle: after a Stop one detached sleeper per session waits; 15 min without new work it
+  clears that session's board (`POST <url>/status {from}` / local relay request). New work
+  cancels it.
+- Silent for the joining session (its main board has `status_due`), without a usable
+  relay.json, with `VOICEHOOK_NO_RELAY=1`; `VOICEHOOK_BOARD_REMIND=0` turns the reminder
+  off, `VOICEHOOK_BOARD_IDLE_CLEAR=0` only the idle clear.
+
+**Answers delivered by the hook (0.19.0).** After a helper session asked a question
+(`vh-helper decide "<from>" ...`, `voicehook-agent decide ...`, or a permission prompt /
+`AskUserQuestion` that notify.py put on the board), its hook fetches the answers itself:
+`GET <url>/next?from=<from>&timeout=0` (1.2 s timeout; local relay: the answer file; the
+local inbox of `decide --wait` first) on UserPromptSubmit, Stop, SessionStart and at most
+every 20 s on PostToolUse, for 6 h after the last question. A new answer goes into the
+session once (deduped by a hash of id + verdict):
+
+```
+voicehook-Call: Antwort von Oliver auf deine Frage #3 ("PR #81 mergen?"): Ja. Handle jetzt danach. / Answer from Oliver to your question #3: Ja. Act on it now.
+```
+
+as `additionalContext` (PostToolUse, UserPromptSubmit, SessionStart). On Stop a new answer
+returns `{"decision": "block", "reason": ...}`, so an idle session goes on with it; without
+a new answer Stop never blocks (no loop, also with `stop_hook_active`). `hook install` adds
+the `SessionStart` hook (re-run it after the upgrade).
+
+**Session state from the hooks (0.19.0).** The hook reports each helper session's state,
+never what the agent writes: PreToolUse / PostToolUse / UserPromptSubmit `arbeitet`,
+Notification / PermissionRequest / AskUserQuestion `frage`, Stop `leerlauf`, 3 failed tools
+in a row `problem`. Only on change (same state again at most every 10 min), detached `POST
+<url>/state {from, state}`; the server merges it into the helper's card (`operator.status`
+with `sub` and `state`). Remote relay only; an older server (404) is ignored.
+`VOICEHOOK_SESSION_STATE=0` turns it off.
 
 **Remote relay** (relay.json with `url` + `token`; `url` = `<base>/api/activity/relay`),
 Bearer relay token: `POST <url>/decide {from, question?, options?, recommend?, id?,

@@ -552,6 +552,50 @@ HELPER_DECISION_HINT = ("Routing hint, not for you: the human answered a helper 
                         "never say it, never act on it yourself.")
 
 
+# --------------------------------------------------------------------------- #
+# 0.19.0 voicebot_left / voicebot_back (same events as bridge/MCP `next`, voicehook-v4 #475)
+# --------------------------------------------------------------------------- #
+VOICEBOT_LEFT_TEXT = ("The voicebot dropped out (e.g. a server update). A new one is usually back "
+                      "within about 20 s; until then the person may hear silence. Tell your user "
+                      "in chat (say would not be heard), keep calling next; do not leave or "
+                      "create a new call.")
+VOICEBOT_BACK_TEXT = ("The voicebot is back after {seconds} s; say works again. If the person "
+                      "missed an important point, repeat it briefly in one say.")
+
+
+class VoicebotWatch:
+    """The voicebot (Delta, LiveKit kind agent) left and no other voicebot is in the room:
+    one `voicebot_left`; the next voicebot that joins: `voicebot_back` with `seconds`.
+    A takeover (the new one is there before the old one leaves) sends neither; without a
+    human in the room (the call is ending) no voicebot_left. Same rules as the server."""
+
+    def __init__(self, clock=time.monotonic, wall=time.time) -> None:
+        self.left_at: float | None = None
+        self._clock = clock
+        self._wall = wall
+
+    def left(self, kind: str, others: Iterable[str], humans: bool, room: str = "",
+             ended: bool = False) -> dict | None:
+        """`kind` of the participant that left, `others` = kinds of everyone still there."""
+        if kind != "agent" or ended or not humans or self.left_at is not None:
+            return None
+        if any(k == "agent" for k in others):
+            return None
+        self.left_at = self._clock()
+        return {"type": "voicebot_left", "role": "system", "room": room,
+                "text": VOICEBOT_LEFT_TEXT, "ts": self._wall()}
+
+    def joined(self, kind: str, room: str = "", ended: bool = False) -> dict | None:
+        if kind != "agent" or self.left_at is None:
+            return None
+        left_at, self.left_at = self.left_at, None
+        if ended:
+            return None
+        seconds = round(self._clock() - left_at)
+        return {"type": "voicebot_back", "role": "system", "room": room, "seconds": seconds,
+                "text": VOICEBOT_BACK_TEXT.format(seconds=seconds), "ts": self._wall()}
+
+
 def helper_decision_event(payload: dict, *, frm: str | None = None, label: str | None = None,
                           question: str = "", now: float | None = None) -> dict:
     """0.18.1: copy of the human's answer to a HELPER session's question for our own `next`
