@@ -1713,10 +1713,24 @@ async def _connect_and_listen(
 
     room.on("data_received", _on_data)
 
+    voicebot = relay.VoicebotWatch()  # 0.19.0: voicebot_left / voicebot_back
+
+    def _voicebot_event(ev: dict | None) -> None:
+        if ev is None:
+            return
+        if ctl is not None:
+            ctl.events.put_nowait(ev)
+        _print_event(json_mode, "system", ev["text"], **{k: v for k, v in ev.items()
+                                                         if k not in ("role", "text")})
+
+    def _room_name() -> str:
+        return str(getattr(room, "name", "") or "")
+
     def _on_participant_connected(p) -> None:
         _emit_meta(f"peer-joined: {p.identity} ({_kind_label(p)})")
         if ctl is not None:
             ctl.humans_changed(room)
+        _voicebot_event(voicebot.joined(_kind_label(p), _room_name(), stop.is_set()))
 
     def _on_participant_disconnected(p) -> None:
         ident_ = p.identity
@@ -1725,6 +1739,12 @@ async def _connect_and_listen(
         _emit_meta(f"peer-left: {ident_} ({_kind_label(p)})")
         if ctl is not None:
             ctl.humans_changed(room)
+        rest = [o for o in room.remote_participants.values()
+                if o is not p and getattr(o, "identity", None) != ident_]
+        humans = any(relay.is_human_peer(_kind_label(o), dict(getattr(o, "attributes", None) or {}))
+                     for o in rest)
+        _voicebot_event(voicebot.left(_kind_label(p), [_kind_label(o) for o in rest], humans,
+                                      _room_name(), stop.is_set()))
 
     room.on("participant_connected", _on_participant_connected)
     room.on("participant_disconnected", _on_participant_disconnected)

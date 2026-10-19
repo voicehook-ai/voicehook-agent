@@ -61,7 +61,7 @@ voicehook-agent leave --say "See you soon."             # clean exit
 | Command | Output (one JSON line) | Exit |
 |---|---|---|
 | `say <text> [--mode append\|overwrite\|revise] [--urgent]` | `{"ok":true,"seq":3}` | 0 ok, 1 failed |
-| `next [--timeout SEC]` | `{"type":"user","text":...}`, `{"type":"revise","text":...,"unspoken":[...],"new":...}` (your `--mode revise` replaced own not-started says; if any still matters, send one merged `say --mode overwrite`), `{"type":"timeout"}`, `{"type":"ended"}` | 0, 3 on `ended` |
+| `next [--timeout SEC]` | `{"type":"user","text":...}`, `{"type":"revise","text":...,"unspoken":[...],"new":...}` (your `--mode revise` replaced own not-started says; if any still matters, send one merged `say --mode overwrite`), `{"type":"timeout"}`, `{"type":"ended"}`; 0.19.0 `{"type":"voicebot_left","room","text"}` / `{"type":"voicebot_back","room","seconds","text"}` (the voicebot dropped out, e.g. a server update: tell your user in chat, keep calling `next`, never leave; back: `say` works again. A takeover sends neither; also a JSONL line in `--json` mode) | 0, 3 on `ended` |
 | `says` (0.9.0) | `{"type":"says","says":[{"seq":3,"state":"spoken","spoken_chars":12,"age_s":4.1,"text":"..."}]}`: last state of each own say (`sent` until the voicebot's first receipt) | 0 |
 | `leave [--say TEXT]` | `{"type":"leaving"}` | 0 |
 | `status` | room, identity, connected, pending events, idle seconds, peers | 0 |
