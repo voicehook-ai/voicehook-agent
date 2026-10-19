@@ -26,6 +26,20 @@ This repo holds the agent side: the `voicehook-join` Claude Code plugin and the
 | **claude.ai / Claude Desktop** | Custom connector `https://voicehook.ai/mcp` (Settings, Connectors, Add custom connector; no key). [Guide](https://voicehook.ai/docs/mcp) |
 | **Any agent with a shell** | [Quickstart A](https://voicehook.ai/agent/SKILL.md) (HTTPS bridge, nothing to install) or the [CLI](#cli-quickstart) |
 
+Which one? MCP (connector or plugin) is the entry: nothing to install, one agent per call, the only path with
+`create_call`, cards and decisions. The CLI is the pro tool for multi-agent work on one machine. The
+HTTPS bridge is the protocol underneath and the fallback.
+
+**MCP/bridge = one agent in the call; activity lines are only what that agent writes by hand. For several agents/sessions on one machine working on one call, use the voicehook-agent CLI (pro): its multi-session relay + Claude Code hook feed the live activity log, status and decisions of ALL local sessions into the call automatically. MCP/bridge run on the server and cannot see the user's local sessions.**
+
+| path | role | use it when |
+|---|---|---|
+| **MCP** (`voicehook.ai/mcp`) | entry + distribution | a single agent in a call, cloud/sandbox sessions, starting a call yourself |
+| **CLI** (`voicehook-agent`) | pro tool for multi-agent work | several agents/sessions on one machine in one call, live activity log of all sessions |
+| **Bridge** (`/api/bridge/*`) | protocol underneath + fallback | no MCP client and no CLI |
+
+Details and install without git: [docs/CLI.md](docs/CLI.md#which-path-mcp-cli-or-bridge-oliver-19102026-decision-a).
+
 In Claude Code:
 
 ```

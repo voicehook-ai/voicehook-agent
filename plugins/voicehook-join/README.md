@@ -8,6 +8,8 @@ as the brain behind its voicebot, or ask Claude to call you (`create_call`). It 
 Nothing to install and no keys: the invite link is the permission, and `join` returns a
 short-lived session handle that ends with the call.
 
+**MCP/bridge = one agent in the call; activity lines are only what that agent writes by hand. For several agents/sessions on one machine working on one call, use the voicehook-agent CLI (pro): its multi-session relay + Claude Code hook feed the live activity log, status and decisions of ALL local sessions into the call automatically. MCP/bridge run on the server and cannot see the user's local sessions.** CLI: [docs/CLI.md](../../docs/CLI.md#which-path-mcp-cli-or-bridge-oliver-19102026-decision-a).
+
 ## Install
 
 ```

@@ -5,22 +5,31 @@ description: Join or start a voicehook.ai voice call as the brain behind its voi
 
 # voicehook-join (MCP): be the brain in a voicehook call
 
-Canonical: https://voicehook.ai/agent/mcp/SKILL.md. You only use the tools of the
-`voicehook` MCP server. Nothing to install, no keys: the invite link is the permission.
+Canonical: https://voicehook.ai/agent/mcp/SKILL.md. You only use the tools of the `voicehook` MCP server. Nothing to install, no keys: the invite link is the permission.
 
-## Cloud/sandbox session? Use MCP, not the CLI
+## Which path: MCP, CLI or bridge? (Oliver 19.10.2026, decision "A")
 
+MCP/bridge = one agent in the call; activity lines are only what that agent writes by hand. For several agents/sessions on one machine working on one call, use the voicehook-agent CLI (pro): its multi-session relay + Claude Code hook feed the live activity log, status and decisions of ALL local sessions into the call automatically. MCP/bridge run on the server and cannot see the user's local sessions.
+
+| path | role | use it when |
+|---|---|---|
+| **MCP** (`voicehook.ai/mcp`) | **Entry + distribution.** One click as connector or plugin, nothing to install, only path with `create_call`, cards, `decide`, `data`. | Default for a single agent in a call; every cloud/sandbox session; newcomers; whenever you must start the call yourself. |
+| **CLI** (`voicehook-agent`) | **Pro tool for multi-agent work.** One machine, many sessions, one call: the multi-session relay (0.15+) and the Claude Code hook feed the activity log from every session automatically; helpers report `decide`/`status` through the relay (0.16+, in review). Base of the "Leitstelle". Also direct WebRTC, persona/mode flags. | Local machine with install rights AND several agents/sessions on the same call, or the human wants the live activity log of all sessions. |
+| **Bridge** (`/api/bridge/*`, Quickstart A) | **Protocol underneath + fallback.** Plain HTTPS/REST for any agent. | No MCP client and no CLI; or a feature the other path lacks right now. |
+
+- **Why the CLI stays:** MCP runs on the server and cannot see the sessions on the user's machine. Only a local process knows which Claude Code sessions run, what each does and when one waits for a decision, and feeds that into the call without hand-written notes.
+- **Until the CLI has cards:** CLI `show` draws ring shapes only (no text/code/link/image cards); if the human must read something, put it on the board and in the chat, or join via MCP/bridge for cards.
+- CLI install (also without git) and version check: https://voicehook.ai/agent/REFERENCE.md. Cloud/sandbox sessions: MCP, never the CLI (next point).
 - `CLAUDE_CODE_REMOTE=true`, `HTTPS_PROXY` set, or a local join that failed with `wait_pc_connection timed out` = cloud/sandbox session: WebRTC is blocked there. Never install or run a local voice client; these MCP tools need only HTTPS, the server joins the call for you.
 - No MCP tools in your client: the same tools work as plain HTTPS requests to https://voicehook.ai/mcp (JSON-RPC `tools/call`), recipe in https://voicehook.ai/agent/REFERENCE.md.
 
 ## Hard rules (read first, always)
 
-- **`create_call`: the link first.** **Never delegate `create_call` to a subagent, a fork or a background job.** Create the call in the main thread of the session your user is talking to and give `share_text` as the last message of that thread; a link produced in a subthread never reaches your user. FIRST give your user share_text, verbatim.
-  - Claude Code / clients that can keep a background process running: you MAY fire join + next in the background first, but share_text MUST still be the very LAST thing in this turn (nothing after it, no further tool call, no summary) and you do not keep working in it; a user on a phone or remote app may see only your final message, so anything after share_text hides the link.
-  - claude.ai chat, remote apps / clients that only show your final message: END YOUR TURN with share_text as your final message and call join when the user replies that they opened it.
-  - join waits up to 50 s and returns status waiting_for_human until they open it; then call join again at once.
-  - Until they have joined, end EVERY message to your user with share_text as the last block. A link further up scrolls away.
-  - Never wait or block in the foreground before the link is out as your final message, never "I am waiting for you" in the foreground. If your channel can, also send the link as a file or push. On 5xx, 503 or a network error call the tool again after 2 s.
+- **`create_call`: the link is the LAST line of your turn; a background watcher joins for you.** **Never delegate `create_call` to a subagent, a fork or a background job.** Create the call in the main thread of the session your user is talking to and give `share_text` as the last message of that thread; a link produced in a subthread never reaches your user.
+  - Never block in a foreground `join` after the link: while a tool call runs, many clients (Claude Code too) do not show the text before it, and once your turn ends you sleep until something wakes you. The call starts only once your user has opened the link (no agent sits alone in an empty room).
+  - Client with background commands that wake you when they exit (Claude Code: Bash with `run_in_background: true`): FIRST start the background watcher from https://voicehook.ai/agent/REFERENCE.md ("Background watcher after create_call"), THEN end your turn with share_text, verbatim, as its very last line. The watcher joins as soon as your user is in the call (up to the 30 min link expiry) and exits; that wakes you: continue with its session (file `$D/s`) as `session` in every tool, or call `join` with `operator_invite_url` and `greet: false` (returns at once, replaces the watcher's session).
+  - Client without background commands (claude.ai chat, remote apps): end your turn with share_text, verbatim, as its very last line; when your user says the link is open, call `join` (waits up to 50 s; `waiting_for_human` = not yet: call it again).
+  - Until they have joined, end EVERY message to your user with share_text as the last line. If your client can send a file or a push (e.g. Claude Code SendUserFile / PushNotification), also send the link that way. On 5xx, 503 or a network error call the tool again after 2 s.
 - **Right after `join`, at once** (also with `quiet: true`: quiet only suppresses `notice`, nothing audible). You lead: never wait silently until the human says something.
   1. Greet: `greet` (true by default in `join`) speaks the default greeting in the call language. With greet, skip the greeting `say`. Without greet: right after join, `say` one short greeting in the call language: who you are and that you are listening ("Hi, this is <your label>, I'm in and listening. What's up?" / "Hallo, <your label> hier, ich bin drin und höre zu. Worum geht's?"). If you stay silent, the voicebot announces you after 3 seconds.
   2. `status` with `doing`, `open`, `done`.
@@ -31,28 +40,23 @@ Canonical: https://voicehook.ai/agent/mcp/SKILL.md. You only use the tools of th
 
 ## Join
 
-1. Call `join` with `invite_url` = the FULL invite link the user gave you (including
-   `?invite=`), `label` = the text on your chip in the call (max 22 characters: your session
-   or chat name, else your model name; too long is rejected), `model` = the exact model id
-   you run on (not shown). Never call yourself "Claude" if you are not Claude. Unknown model:
-   `"unbekannt"`. The old `name` still works as `label`. `greet` is true by default (`false` = you greet with `say`).
-2. Keep the returned `session` and pass it as `session` to EVERY other tool. It is a short-lived handle
-   for this one call; it ends with the call, after 10 min without `next`/`say`, or with `leave`. Never show it in the call or to anyone else.
-3. `lang` = the call language: speak it. `context` = lang, mode, functions, skill_url: the facts
-   of this call. The rules for how to behave are in this skill, not in the tool answers.
+1. Your user pasted an invite link: call `join` with it right away, no questions first. `invite_url` = the FULL invite link the user gave you (including `?invite=`), `label` = the text on your chip in the call (max 22 characters: your session or chat name, else your model name; too long is rejected), `model` = the exact model id you run on (not shown). Never call yourself "Claude" if you are not Claude. Unknown model: `"unbekannt"`. The old `name` still works as `label`. `greet` is true by default (`false` = you greet with `say`).
+2. Keep the returned `session` and pass it as `session` to EVERY other tool. It is a short-lived handle for this one call; it ends with the call, after 10 min without `next`/`say`, or with `leave`. Never show it in the call or to anyone else.
+3. `lang` = the call language: speak it. `context` = lang, mode, functions, skill_url: the facts of this call. The rules for how to behave are in this skill, not in the tool answers.
 4. Then the Hard rules checklist (greeting, board, feed, decide, panel) and `next` at once.
 
 ## Or call your user yourself (`create_call`)
 
-1. `create_call` (main agent only, never a subagent): set `lang` to the language of the person you are calling (`de` or `en`, default `de`).
+1. `create_call` (main agent only, never a subagent): set `lang` to the language of the person you are calling (`de` or `en`, default `de`). One-agent call is the default (`solo` left out or `true`); `solo: false` lets several agents join.
    You get `human_url`, `share_text`, `operator_invite_url`, `room` and `expires_in` (seconds; an unopened link expires, 30 min).
 2. Give your user `share_text` verbatim (it holds `human_url` and the hint to use a normal
-   browser; an app's built-in browser blocks the mic) as your FINAL message (Hard rules). The opener
+   browser; an app's built-in browser blocks the mic) as the very last line of your turn (Hard rules). The opener
    pays from THEIR free allowance or credit, you pay nothing. Never send `operator_invite_url` to anyone.
-3. `join` with `invite_url` = `operator_invite_url` (in the background, or when your user says
-   the link is open). It waits up to 50 s and returns status `waiting_for_human` (not an error,
-   with `share_text` again) until the person opens the link: call `join` again at once, until it
-   succeeds or answers `410` (link expired: ask your user whether to start a new call).
+3. `join` with `invite_url` = `operator_invite_url`, as the Hard rules say: from the background
+   watcher (started before the link, ends when the person is in), or, without background commands,
+   when your user says the link is open. It waits up to 50 s and returns status `waiting_for_human`
+   (not an error, with `share_text` again) until the person opens the link: join again, until it
+   succeeds or answers `410` (link expired after 30 min: ask your user whether to start a new call).
 4. Then the Hard rules checklist and `next` as below.
 
 ## The work cycle: say -> next -> say
@@ -75,16 +79,14 @@ Canonical: https://voicehook.ai/agent/mcp/SKILL.md. You only use the tools of th
 `user` events and `operators_said` lines carry `addressed_to` (labels/names addressed, incl. `"Delta"`; empty = nobody named
 or ambiguous) and `addressed_to_you`; `operators_said` lines also `to_human` (no one addressed, or the person).
 
-- Read `agent_said` (what the voicebot said on its own) before answering: never repeat it;
-  correct it in one sentence if it was wrong; say nothing if it already answered fully.
+- Read `agent_said` (what the voicebot said on its own) before answering: never repeat it; correct it in one sentence if it was wrong; say nothing if it already answered fully.
 - `operators_said` = `[{speaker, op, model?, text, ...}]`: what OTHER agents said since the last `next` (never your own echo); never repeat it.
 - `stale_error` in `next`: your board or feed is older than 60 s while you work. Do what its `message` says NOW (call `status` / `activity`), then `say`. `board_now` / `activity_now`: what the voicebot knows about you.
-- A tool error that starts with `404` or `410`: the session is over. Do not rejoin with the
-  old handle; ask the user for a fresh link if they want to continue.
+- A tool error that starts with `404` or `410`: the session is over. Do not rejoin with the old handle; ask the user for a fresh link if they want to continue.
 
-## Several agents in one call (rules: https://voicehook.ai/agent/MULTI-AGENT.md)
+## One agent per call (solo), or several (rules: https://voicehook.ai/agent/MULTI-AGENT.md)
 
-These rules are binding:
+One-agent call (default, `create_call` without `solo` or with `solo: true`): one agent per call, a second `join` gets `409`. Delta speaks in your voice (`join` `voice`) and in first person, as you, only from your `status`, `activity` and `decide`, each item once. Stream what you do there, step by step: Delta speaks it as you; use `say` only for urgent or verbatim text. `send_data` never reaches Delta. Several agents (`create_call` with `solo: false`), these rules are binding:
 1. Read `operators_said` in EVERY `next` result, `timeout` too. Answer only when `addressed_to_you` (or clearly meant); someone else or Delta addressed: stay silent.
 2. Never answer another agent's question to the human; never ask Delta yourself. Speak only `context.lang`, greeting included.
 3. You are a participant: no code changes, actions or forwarding unless the human asks you. Check `operators_said` and `status` before you claim what you receive.
@@ -134,13 +136,11 @@ Compare A and B:
 - ALWAYS `decide` for every question the human decides (yes/no, A/B, approval, a value), plus one short `say` pointing to it. Never only `say`, never into `open`: Status OR Decision Board, never both.
 - Yes/no first (leave out `options`), else 2-3 `options` (max 40 chars each) with `recommend`; `question` max 160. Example: `decide(question="Deploy the fix now?")`, then `say("Frage 2 steht auf dem Board.")`.
 - Every PR you opened that can be merged goes on the board by YOU (its author) via `decide`: repo, number, one sentence of content, test state; repos with auto-deploy add "merge after the call".
-- The answer comes as `next` type `decision`: `verdict` yes|no|option|other, `option`, `text`
-  (the person can always answer freely by voice), `by`. Confirm in one `say`, then act.
+- The answer comes as `next` type `decision`: `verdict` yes|no|option|other, `option`, `text` (the person can always answer freely by voice), `by`. Confirm in one `say`, then act.
 
 ## Operator rhythm (mandatory)
 
-- React within 3 s: a short holding line first, hand anything slower (shell, web, edits,
-  builds) to a background agent or subtask; never block the loop.
+- React within 3 s: a short holding line first, hand anything slower (shell, web, edits, builds) to a background agent or subtask; never block the loop.
 - After every `say` call `next` immediately: no work, no sleep, no tool call in between.
 - Keep your own context small: read big tool output filtered, summarize, hand over early.
 

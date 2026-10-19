@@ -1,4 +1,7 @@
-"""voicehook-agent CLI.
+"""voicehook-agent CLI: the pro tool for several agents or Claude Code sessions on one machine in one
+voicehook.ai call; its multi-session relay and hook feed the activity log, status and decisions of all
+local sessions into the call, which MCP and bridge cannot do: they run on the server and cannot see the
+user's local sessions.
 
 Usage:
     voicehook-agent join <invite-url> --name N --model M          # interactive mode
