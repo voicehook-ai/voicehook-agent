@@ -234,6 +234,10 @@ def test_snippet_shape():
              "timeout": 3}]}],
         "PermissionRequest": [{"matcher": "*", "hooks": [
             {"type": "command", "command": "voicehook-agent-hook permission-request || true",
+             "timeout": 3}]}],
+        # 0.19.0 answers to the session's questions at (re)start (board.py)
+        "SessionStart": [{"hooks": [
+            {"type": "command", "command": "voicehook-agent-hook session-start || true",
              "timeout": 3}]}]}}
 
 
