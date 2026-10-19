@@ -570,7 +570,7 @@ def helper_decision_event(payload: dict, *, frm: str | None = None, label: str |
               "number": payload.get("number"), "question": question, "verdict": payload.get("verdict")}
         if "option" in payload:
             ev["option"] = payload.get("option")
-        if payload.get("verdict") == "other":
+        if payload.get("verdict") in ("other", "unclear"):  # 0.19.0 unclear: why, as text
             ev["text"] = str(payload.get("answer") or payload.get("text") or "")
         if payload.get("changed"):
             ev["changed"] = True

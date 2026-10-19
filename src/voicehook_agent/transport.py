@@ -347,7 +347,21 @@ class BridgeRoom:
         retry as _send. Over WebRTC the CLI publishes topic operator.visual instead."""
         await self._post_retry("/api/bridge/visual", body, "visual")
 
-    async def _post_retry(self, path: str, body: dict, topic: str) -> None:
+    async def send_ui(self, body: dict) -> dict:
+        """0.19.0: POST /api/bridge/ui {cmd, win?, state?, preset?, slot?, project?} (no v/via):
+        the server sends delta.ui to the humans in the room. {ok, applied} or BridgeError
+        (422 = invalid). Over WebRTC the CLI publishes topic delta.ui itself."""
+        r = await self._post_retry("/api/bridge/ui", body, "ui")
+        return _json(r)
+
+    async def send_decide(self, body: dict) -> dict:
+        """0.19.0: POST /api/bridge/decide {question, options?, recommend?, context?, recent?}
+        | {id, ...changes} | {id, delete: true} -> {ok, id, number}; BridgeError with the
+        status otherwise (403/404/409/422/503). Over WebRTC: the vh.decide RPC."""
+        r = await self._post_retry("/api/bridge/decide", body, "decide")
+        return _json(r)
+
+    async def _post_retry(self, path: str, body: dict, topic: str) -> httpx.Response:
         if self._http is None or not self._session or self._closed:
             raise BridgeError("bridge not connected")
         loop = asyncio.get_running_loop()
@@ -370,8 +384,10 @@ class BridgeRoom:
             await asyncio.sleep(min(delay, max(0.0, deadline - now)))
             delay = min(delay * 2, RETRY_BACKOFF_MAX_S)
         if r.status_code != 200:
-            raise BridgeError(f"bridge send {topic} failed: HTTP {r.status_code} {_detail(r)}",
-                              status=r.status_code)
+            detail = _detail(r)
+            raise BridgeError(f"bridge send {topic} failed: HTTP {r.status_code} {detail}",
+                              status=r.status_code, body={"detail": detail})
+        return r
 
     def _fire_disconnected(self, reason: str) -> None:
         if self._fired_disconnect:
@@ -492,3 +508,11 @@ def _detail(r: httpx.Response) -> str:
         return str(r.json().get("detail", ""))[:300]
     except Exception:  # noqa: BLE001
         return (r.text or "")[:300]
+
+
+def _json(r: httpx.Response) -> dict:
+    try:
+        out = r.json()
+    except Exception:  # noqa: BLE001
+        return {"ok": True}
+    return out if isinstance(out, dict) else {"ok": True}
