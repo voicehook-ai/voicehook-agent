@@ -25,6 +25,11 @@ The hook (`voicehook-agent-hook post-tool-use|user-prompt-submit|stop|...`) now:
 * delivers the human's answers to the session's own questions (fetch_answers / deliver):
   additionalContext, or on Stop `decision: block` + reason, exactly once per answer.
 
+Subagents (Agent tool, 0.21.1): their hook events carry the parent's session_id plus
+agent_id; each subagent is its own helper (key session + agent_id hash), also inside the
+joining session: own board name (the `from` it used, else `<agent_type> <4 hex>`), reminder
+only after 3 min of work without a board, state only once it has a board.
+
 Name: the `from` this session already used for its board, else the hook's session label
 (multisession.session_label: $VOICEHOOK_SESSION_LABEL > /rename title > ai-title > cwd
 basename + 4 hex), the same `from` the activity relay and `voicehook-agent status` use.
@@ -276,6 +281,12 @@ def _session_key(event: dict) -> str:
     return vmulti.session_hash(event.get("session_id")) or vmulti.own_session_hash()
 
 
+def _agent_label(event: dict, skey: str) -> str:
+    """Name of a subagent without its own `from` yet: `<agent_type> <4 hex>` (max 40)."""
+    kind = vmulti._clean_label(event.get("agent_type") or "Subagent")[:30] or "Subagent"
+    return f"{kind} {vmulti._h(str(event.get('agent_id') or ''), 'vh-agent-label')[:4]}"
+
+
 def _label(event: dict, skey: str) -> str:
     from . import relayops
     return vmulti.session_label(event, relayops._cached_label(skey))[:vmulti.SESSION_LABEL_MAX]
@@ -349,8 +360,11 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
         if rel is None:
             return None
         skey = _session_key(event)
-        if not skey or skey == str(rel.get("owner_session") or ""):
+        agent = str(event.get("agent_id") or "").strip()
+        if not skey or (skey == str(rel.get("owner_session") or "") and not agent):
             return None  # the joining session: own board (status_due), own `next`
+        if agent:  # 0.21.1: a subagent (Agent tool) has its own board, name, state, answers
+            skey = f"{skey}-a{vmulti._h(agent, 'vh-agent')[:8]}"
         t = time.time() if now is None else now
         room = _room(rel)
         local = vmulti._is_local(rel)
@@ -365,7 +379,7 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
                                            and str(event.get("tool_name") or "") == "AskUserQuestion")
         need = name_ev in NAME_EVENTS or got is not None or asked is not None or is_ask \
             or not _known_name(skey)
-        label = _label(event, skey) if need else ""
+        label = (_agent_label(event, skey) if agent else _label(event, skey)) if need else ""
 
         def step(st: dict):
             me = _me(st, skey, room, t)
@@ -389,6 +403,8 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
             if name_ev in WORK_EVENTS:
                 me["work_at"] = t
             state = next_state(event, me)
+            if agent and not me.get("from"):
+                state = None     # a subagent's state goes out once it has its own board
             if state and not local and not _off(STATE_ENV_OFF) and (
                     state != me.get("state") or t - _float(me.get("state_at")) >= STATE_RESEND_S):
                 me.update(state=state, state_at=t)
@@ -402,10 +418,14 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
                 if _float(me.get("sleeper_until")) < t and me.get("at") and not me.get("cleared"):
                     me["sleeper_until"] = t + IDLE_CLEAR_S
                     out["spawn"] = True
+            me.setdefault("first_at", t)
             if got is None and name_ev in REMIND_EVENTS:
                 at = _float(me.get("at"))
                 age = None if not at else t - at
-                if (age is None or age >= REMIND_AFTER_S) and \
+                # a subagent without a board is reminded only once it works for 3 min (a
+                # short Explore/Read subagent never gets the line)
+                young = agent and at == 0 and t - _float(me.get("first_at")) < REMIND_AFTER_S
+                if not young and (age is None or age >= REMIND_AFTER_S) and \
                         t - _float(me.get("reminded_at")) >= REMIND_GAP_S:
                     me["reminded_at"] = t
                     out["remind"] = reminder_text(name, None if me.get("cleared") else age, local)

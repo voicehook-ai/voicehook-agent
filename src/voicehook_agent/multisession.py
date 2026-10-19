@@ -251,6 +251,13 @@ def load_relay(now: float | None = None) -> dict | None:
     if d is None:
         return None
     t = time.time() if now is None else now
+    if "expires_at" not in d and d.get("expires_in") is not None:
+        # 0.21.1: a raw `helper-credential` answer copied into relay.json by hand (instead
+        # of `helper-import`): valid for expires_in from the file's mtime, no owner
+        try:
+            d = {**d, "expires_at": os.lstat(relay_path()).st_mtime + float(d["expires_in"])}
+        except (OSError, TypeError, ValueError):
+            return None
     try:
         if float(d.get("expires_at") or 0) <= t:
             return None
