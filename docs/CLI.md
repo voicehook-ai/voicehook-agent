@@ -532,6 +532,10 @@ voicehook-Call: Dein Board ist 7 Min alt. Jetzt `vh-helper status "SE Gate" "<Sc
   relay.json, with `VOICEHOOK_NO_RELAY=1`; `VOICEHOOK_BOARD_REMIND=0` turns the reminder
   off, `VOICEHOOK_BOARD_IDLE_CLEAR=0` only the idle clear.
 
+**Raw credential in relay.json (0.21.1).** A `helper-credential` answer copied into
+`relay.json` by hand (instead of piping it into `helper-import`) made every hook silent (no
+`expires_at`). It now counts for `expires_in` from the file's mtime, without an owner.
+
 **Subagents (0.21.1).** Hook events of a subagent (Agent tool) carry the parent's
 session_id plus `agent_id`. Each subagent counts as its own helper, also inside the joining
 session: own board name (the `from` it used with `vh-helper status`, else `<agent_type> <4

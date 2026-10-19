@@ -433,3 +433,16 @@ def test_subagent_state_only_with_board_and_separate_from_parent():
     board.handle(bash('vh-helper status "Scout" "x"', **sub), now=T0 + 2)
     board.handle(ev("PreToolUse", tool_name="Read", tool_input={}, **sub), now=T0 + 3)
     assert POSTS[-1] == {"op": "state", "from": "Scout", "state": "arbeitet"}
+
+
+def test_raw_helper_credential_in_relay_json_is_usable(monkeypatch):
+    """0.21.1: `helper-credential > relay.json` by hand (crown + Mac, 19.10.2026) made every
+    hook silent; the raw answer now counts for expires_in from the file's mtime."""
+    activity._private_dir(activity.state_root())
+    activity._write_private(ms.relay_path(), json.dumps(
+        {"ok": True, "type": "helper_credential", "token": TOKEN, "url": URL,
+         "expires_in": 43200, "label": "mac"}))
+    rel = ms.load_relay()
+    assert rel is not None and rel["url"] == URL
+    assert ms.load_relay(now=os.lstat(ms.relay_path()).st_mtime + 43201) is None
+    assert board.handle(ev(), now=None) is not None
