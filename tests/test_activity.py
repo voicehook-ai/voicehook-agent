@@ -235,7 +235,7 @@ def test_snippet_shape():
         "PermissionRequest": [{"matcher": "*", "hooks": [
             {"type": "command", "command": "voicehook-agent-hook permission-request || true",
              "timeout": 3}]}],
-        # 0.19.0 answers to the session's questions at (re)start (board.py)
+        # 0.21.0 answers to the session's questions at (re)start (board.py)
         "SessionStart": [{"hooks": [
             {"type": "command", "command": "voicehook-agent-hook session-start || true",
              "timeout": 3}]}]}}

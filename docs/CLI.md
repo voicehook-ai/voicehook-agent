@@ -61,7 +61,7 @@ voicehook-agent leave --say "See you soon."             # clean exit
 | Command | Output (one JSON line) | Exit |
 |---|---|---|
 | `say <text> [--mode append\|overwrite\|revise] [--urgent]` | `{"ok":true,"seq":3}` | 0 ok, 1 failed |
-| `next [--timeout SEC]` | `{"type":"user","text":...}`, `{"type":"revise","text":...,"unspoken":[...],"new":...}` (your `--mode revise` replaced own not-started says; if any still matters, send one merged `say --mode overwrite`), `{"type":"timeout"}`, `{"type":"ended"}`; 0.19.0 `{"type":"voicebot_left","room","text"}` / `{"type":"voicebot_back","room","seconds","text"}` (the voicebot dropped out, e.g. a server update: tell your user in chat, keep calling `next`, never leave; back: `say` works again. A takeover sends neither; also a JSONL line in `--json` mode) | 0, 3 on `ended` |
+| `next [--timeout SEC]` | `{"type":"user","text":...}`, `{"type":"revise","text":...,"unspoken":[...],"new":...}` (your `--mode revise` replaced own not-started says; if any still matters, send one merged `say --mode overwrite`), `{"type":"timeout"}`, `{"type":"ended"}`; 0.21.0 `{"type":"voicebot_left","room","text"}` / `{"type":"voicebot_back","room","seconds","text"}` (the voicebot dropped out, e.g. a server update: tell your user in chat, keep calling `next`, never leave; back: `say` works again. A takeover sends neither; also a JSONL line in `--json` mode) | 0, 3 on `ended` |
 | `says` (0.9.0) | `{"type":"says","says":[{"seq":3,"state":"spoken","spoken_chars":12,"age_s":4.1,"text":"..."}]}`: last state of each own say (`sent` until the voicebot's first receipt) | 0 |
 | `leave [--say TEXT]` | `{"type":"leaving"}` | 0 |
 | `status` | room, identity, connected, pending events, idle seconds, peers | 0 |
@@ -437,7 +437,7 @@ voicehook-agent status ""                    # all empty: removes the helper's c
 | Errors | `{"ok": false, "status": N, "error": ..., "via": "relay"}`, exit 1 (422/403/409/410/503 as on `/api/bridge/decide`, 504 = the local join did not answer in 20 s). Only 401 marks the token dead |
 | Never | the token in a URL, argv or output; question or board text on stderr |
 
-**Board reminder (0.19.0).** With the hooks installed, a helper session whose own board is
+**Board reminder (0.21.0).** With the hooks installed, a helper session whose own board is
 older than 3 min, or that has none in this call, gets one short line from its hook while it
 works (PostToolUse, UserPromptSubmit), as Claude Code `hookSpecificOutput.additionalContext`
 (never a `decision`: nothing is blocked), at most once per 3 min per session:
@@ -460,7 +460,7 @@ voicehook-Call: Dein Board ist 7 Min alt. Jetzt `vh-helper status "SE Gate" "<Sc
   relay.json, with `VOICEHOOK_NO_RELAY=1`; `VOICEHOOK_BOARD_REMIND=0` turns the reminder
   off, `VOICEHOOK_BOARD_IDLE_CLEAR=0` only the idle clear.
 
-**Answers delivered by the hook (0.19.0).** After a helper session asked a question
+**Answers delivered by the hook (0.21.0).** After a helper session asked a question
 (`vh-helper decide "<from>" ...`, `voicehook-agent decide ...`, or a permission prompt /
 `AskUserQuestion` that notify.py put on the board), its hook fetches the answers itself:
 `GET <url>/next?from=<from>&timeout=0` (1.2 s timeout; local relay: the answer file; the
@@ -477,7 +477,7 @@ returns `{"decision": "block", "reason": ...}`, so an idle session goes on with 
 a new answer Stop never blocks (no loop, also with `stop_hook_active`). `hook install` adds
 the `SessionStart` hook (re-run it after the upgrade).
 
-**Session state from the hooks (0.19.0).** The hook reports each helper session's state,
+**Session state from the hooks (0.21.0).** The hook reports each helper session's state,
 never what the agent writes: PreToolUse / PostToolUse / UserPromptSubmit `arbeitet`,
 Notification / PermissionRequest / AskUserQuestion `frage`, Stop `leerlauf`, 3 failed tools
 in a row `problem`. Only on change (same state again at most every 10 min), detached `POST
@@ -772,7 +772,7 @@ What works in Codex:
 - Permission prompt -> a decision on the Decision Board (`Freigabe für Bash: <Codex's
   reason>?`); the hook never answers it, you still decide in Codex.
 - board.py features (session state, board reminder, answers delivered into the session,
-  0.19.0) run in the Codex adapter as well when this CLI has them; their JSON is what Codex
+  0.21.0) run in the Codex adapter as well when this CLI has them; their JSON is what Codex
   reads (`additionalContext`, Stop `decision: block`).
 - Not available in Codex: questions (`request_user_input`) have no hook event, there is no
   error event besides a failed tool.

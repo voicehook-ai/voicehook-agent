@@ -1,4 +1,4 @@
-"""0.19.0: voicebot_left / voicebot_back in the CLI's own `next` (WebRTC and bridge transport),
+"""0.21.0: voicebot_left / voicebot_back in the CLI's own `next` (WebRTC and bridge transport),
 the same events bridge/MCP `next` carry since voicehook-v4 #475."""
 from __future__ import annotations
 

@@ -655,7 +655,7 @@ def test_local_relay_through_real_hook_process(tmp_path, monkeypatch):
     d = _owned_join(tmp_path, monkeypatch, ms.session_hash("JOINER"))
     ms.write_local_relay(d, "room-a", label="mac", owner_session=ms.session_hash("JOINER"))
     env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path), ms.LABEL_ENV: "Doku",
-           "VOICEHOOK_BOARD_REMIND": "0"}  # 0.19.0 board reminder has its own tests
+           "VOICEHOOK_BOARD_REMIND": "0"}  # 0.21.0 board reminder has its own tests
     r = subprocess.run([sys.executable, "-m", "voicehook_agent.activity", "post-tool-use"],
                        input=_bash("gh pr create --fill", out="https://github.com/o/r/pull/77",
                                    sid="other-2"),

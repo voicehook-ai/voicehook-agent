@@ -1,4 +1,4 @@
-"""Helper sessions in the call, fed by their own hooks (0.19.0): board reminder, session
+"""Helper sessions in the call, fed by their own hooks (0.21.0): board reminder, session
 state, answers to their questions, idle clear.
 
 A helper session (a Claude Code session of this machine that is not itself in the call,

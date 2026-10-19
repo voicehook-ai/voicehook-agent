@@ -15,7 +15,7 @@ tool_input, tool_response, prompt, turn_id), plus the older `notify` program
     never the command; PR/deploy detection reads the command locally as for Claude Code.
   - apply_patch: `Edit: <basename of the first file of the patch>`.
   - A failed Bash (`Exit code: N`, N != 0) counts as an error (`Fehler bei Bash`).
-  - stdout: only what board.py (0.19.0, when present) answers on PostToolUse,
+  - stdout: only what board.py (0.21.0, when present) answers on PostToolUse,
     UserPromptSubmit, SessionStart and Stop (additionalContext / Stop decision block with
     an answer of the human), the same JSON Codex reads from Claude Code hooks; Stop
     always JSON (`{}`), Codex wants JSON there. PermissionRequest prints nothing: no
@@ -332,7 +332,7 @@ def _own_join_line(event: dict, text: str) -> None:
 
 
 def _board(norm: str) -> str:
-    """board.py (0.19.0 session state, board reminder, answers to the session's own
+    """board.py (0.21.0 session state, board reminder, answers to the session's own
     questions) when this CLI has it: its JSON answer (additionalContext, or on Stop a
     decision block with the answer as reason; Codex reads both like Claude Code)."""
     hook = getattr(vact, "board_hook", None)

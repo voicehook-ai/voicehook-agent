@@ -43,7 +43,7 @@ Code session of this machine to the call's activity relay (see multisession.py).
 session that waits for the human into the call: a decision on the Decision Board plus a
 feed line (see notify.py). Never an automatic approval.
 
-0.19.0: a helper session whose own status board is older than 3 min (or missing) while it
+0.21.0: a helper session whose own status board is older than 3 min (or missing) while it
 works gets a short reminder as `hookSpecificOutput.additionalContext` on PostToolUse /
 UserPromptSubmit (at most one per 3 min); after 15 min idle following a Stop its board is
 cleared (see board.py). The only stdout of the hook, never a decision.
@@ -93,7 +93,7 @@ HOOK_COMMAND_STOP = "voicehook-agent-hook stop || true"
 # events; the hook never prints, so a PermissionRequest stays the human's decision.
 HOOK_COMMAND_NOTIFY = "voicehook-agent-hook notification || true"
 HOOK_COMMAND_PERMISSION = "voicehook-agent-hook permission-request || true"
-# 0.19.0 (board.py): answers to the session's questions right at (re)start
+# 0.21.0 (board.py): answers to the session's questions right at (re)start
 HOOK_COMMAND_START = "voicehook-agent-hook session-start || true"
 HOOK_COMMANDS = {"PreToolUse": HOOK_COMMAND_PRE, "PostToolUse": HOOK_COMMAND,
                  "PostToolUseFailure": HOOK_COMMAND_FAIL,
@@ -925,7 +925,7 @@ PRINT_COMMANDS = ("post-tool-use", "user-prompt-submit", "session-start", "stop"
 
 
 def board_hook(raw: str) -> dict | None:
-    """0.19.0: session state, board reminder, answers, idle clear (board.py). Never raises."""
+    """0.21.0: session state, board reminder, answers, idle clear (board.py). Never raises."""
     try:
         from . import board
         return board.handle(raw)
@@ -997,11 +997,11 @@ def main(argv: list[str] | None = None) -> int:
                     post_tool_use(raw)
                 relay_hook(raw)  # 0.15.0: other sessions -> relay of the running call
                 notify_progress(raw)  # 0.18.0: the session goes on, its question leaves
-            # 0.19.0 (board.py): session state, board reminder, answers to own questions
+            # 0.21.0 (board.py): session state, board reminder, answers to own questions
             out = board_hook(raw)
         if out and cmd in PRINT_COMMANDS:
             print(json.dumps(out, ensure_ascii=False), flush=True)
-        # always 0. stdout: only 0.19.0 additionalContext (Post/Prompt/SessionStart) or, on
+        # always 0. stdout: only 0.21.0 additionalContext (Post/Prompt/SessionStart) or, on
         # Stop with a new answer to one of the session's questions, decision block + reason
         return 0
     if cmd in ("codex", "codex-notify"):  # 0.20.0: Codex CLI hooks + notify (agents.py)
@@ -1010,10 +1010,10 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "mcp":  # 0.20.0: local MCP server (status/decide/next/activity), stdio
         from . import mcpserver
         return mcpserver.main(args[1:])
-    if cmd == "board-idle":  # 0.19.0: detached sleeper of the Stop hook
+    if cmd == "board-idle":  # 0.21.0: detached sleeper of the Stop hook
         from . import board
         return board.idle_main(args[1] if len(args) > 1 else "")
-    if cmd == "board-post":  # 0.19.0: detached child of the hook (session state), job on stdin
+    if cmd == "board-post":  # 0.21.0: detached child of the hook (session state), job on stdin
         from . import board
         try:
             raw = sys.stdin.read()

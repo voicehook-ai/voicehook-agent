@@ -1713,7 +1713,7 @@ async def _connect_and_listen(
 
     room.on("data_received", _on_data)
 
-    voicebot = relay.VoicebotWatch()  # 0.19.0: voicebot_left / voicebot_back
+    voicebot = relay.VoicebotWatch()  # 0.21.0: voicebot_left / voicebot_back
 
     def _voicebot_event(ev: dict | None) -> None:
         if ev is None:

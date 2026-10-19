@@ -553,7 +553,7 @@ HELPER_DECISION_HINT = ("Routing hint, not for you: the human answered a helper 
 
 
 # --------------------------------------------------------------------------- #
-# 0.19.0 voicebot_left / voicebot_back (same events as bridge/MCP `next`, voicehook-v4 #475)
+# 0.21.0 voicebot_left / voicebot_back (same events as bridge/MCP `next`, voicehook-v4 #475)
 # --------------------------------------------------------------------------- #
 VOICEBOT_LEFT_TEXT = ("The voicebot dropped out (e.g. a server update). A new one is usually back "
                       "within about 20 s; until then the person may hear silence. Tell your user "

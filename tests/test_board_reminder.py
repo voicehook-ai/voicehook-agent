@@ -1,4 +1,4 @@
-"""0.19.0 board reminder: a helper session with a stale (or no) status board gets one short
+"""0.21.0 board reminder: a helper session with a stale (or no) status board gets one short
 additionalContext line from its hook while it works; idle after Stop clears the board."""
 from __future__ import annotations
 
@@ -405,3 +405,12 @@ def test_fetch_answers_remote_and_inbox(monkeypatch):
 def test_answer_text_scrubs():
     t = board.answer_text({"verdict": "other", "text": "nimm token=fakefakefakefake", "by": "Oliver"})
     assert "fakefakefakefake" not in t and "Antwort von Oliver auf deine Frage:" in t
+
+
+def test_subagent_tool_calls_get_the_reminder_too():
+    """Agent tool: the subagent's hooks carry the parent's session_id plus agent_id; it is
+    reminded like the main agent (same board, same name)."""
+    _relay()
+    board.handle(bash('vh-helper status "SE Gate" "x"'), now=T0)
+    out = board.handle(ev(agent_id="a1b2", agent_type="general-purpose"), now=T0 + 400)
+    assert 'vh-helper status "SE Gate"' in ctx(out)["additionalContext"]
