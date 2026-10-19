@@ -581,6 +581,54 @@ async def _publish_relay(room, tok: dict | None, slug: str, json_mode: bool,
         await _run_helper_pump(room, ctl, stop)
 
 
+VOCAB_PATH = "/api/bridge/vocab"
+VOCAB_TERM_MAX = 50
+
+
+def vocab_request(term: str, wrongs: list[str] | None) -> dict:
+    """`vocab add TERM [--wrong W ...]` -> control request; ValueError on bad input."""
+    t = " ".join(str(term or "").split())
+    ws = [" ".join(str(w or "").split()) for w in (wrongs or [])]
+    if not t or any(not w for w in ws):
+        raise ValueError("vocab add: empty word")
+    if len(t) > VOCAB_TERM_MAX or any(len(w) > VOCAB_TERM_MAX for w in ws):
+        raise ValueError(f"vocab add: at most {VOCAB_TERM_MAX} characters per word")
+    if any(w.casefold() == t.casefold() for w in ws):
+        raise ValueError("vocab add: --wrong equals the word")
+    if ws:
+        return {"cmd": "vocab", "fixes": [{"wrong": w, "right": t} for w in ws]}
+    return {"cmd": "vocab", "terms": [t]}
+
+
+async def _vocab_add(ctl: _Control, body: dict) -> dict:
+    """POST /api/bridge/vocab with this join's operator credential (bridge: its session,
+    WebRTC: its LiveKit token). One JSON answer, never the token."""
+    room = ctl.room
+    if room is not None and hasattr(room, "post_vocab"):
+        status, data = await room.post_vocab(body)
+    elif ctl.op_jwt and ctl.api_base:
+        try:
+            async with httpx.AsyncClient(timeout=10.0, headers={"user-agent": _USER_AGENT,
+                                                                "x-vh-cli": _VERSION}) as http:
+                r = await http.post(ctl.api_base.rstrip("/") + VOCAB_PATH, json=body,
+                                    headers={"authorization": f"Bearer {ctl.op_jwt}"})
+            status = r.status_code
+            try:
+                data = r.json()
+            except ValueError:
+                data = {}
+        except httpx.HTTPError as e:
+            return {"ok": False, "type": "vocab", "error": f"request failed ({type(e).__name__})"}
+    else:
+        return {"ok": False, "type": "vocab", "error": "not connected to the call (yet)"}
+    if status == 200 and isinstance(data, dict):
+        return {**data, "ok": True, "type": "vocab"}
+    detail = data.get("detail") if isinstance(data, dict) else None
+    if status in (404, 405) and not detail:
+        detail = "server has no vocabulary endpoint (too old)"
+    return {"ok": False, "type": "vocab", "status": status, "error": str(detail or f"HTTP {status}")}
+
+
 async def _helper_hub(ctl: _Control, api_base: str, jwt: str) -> dict | None:
     """0.17.0, WebRTC join: helper credential + pump token from the server (Bearer = our
     LiveKit token), once per join; reconnects reuse it. None: older server (local relay)."""
@@ -681,6 +729,10 @@ class _Control:
         self.helper_pump: vhelp.Pump | None = None
         self.helper_rel: dict | None = None
         self.helper_http = None
+        # 0.19.0 vocab: the operator credential of this join for /api/bridge/vocab (WebRTC:
+        # the LiveKit token of the current cycle; bridge: BridgeRoom carries its session)
+        self.api_base = ""
+        self.op_jwt = ""
 
     def attach(self, room: rtc.Room) -> None:
         self.room = room
@@ -890,6 +942,10 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         # bridge; the result arrives later as a `next` event type "decision".
         ctl.watchdog.touch()
         return await _decide_rpc(ctl, req)
+    if cmd == "vocab":
+        # 0.19.0: teach the call's speech recognition (server adds to the payer's account)
+        ctl.watchdog.touch()
+        return await _vocab_add(ctl, {"terms": req.get("terms") or [], "fixes": req.get("fixes") or []})
     if cmd == "helper_credential":
         # 0.17.0: a helper credential for another machine (pipe it into ssh, never print it
         # into a chat): WebRTC via the server's helper hub, bridge via the bridge session
@@ -1608,6 +1664,8 @@ async def _connect_and_listen(
                 tok, lambda m: _print_event(json_mode, "system", m, topic="_meta"),
                 check=update_check):
             return 0, "SELF_UPDATE"  # never connected: nothing to leave
+        if ctl is not None and isinstance(tok, dict):
+            ctl.api_base, ctl.op_jwt = api_base, str(tok.get("token") or "")
         room = rtc.Room()
     stop = asyncio.Event()
     turn_event = asyncio.Event()  # set on finalized user-turn → graph re-sync
@@ -2411,6 +2469,8 @@ def _client_request(args) -> dict:
         return {"cmd": "next", "timeout": args.timeout}
     if args.cmd == "helper-credential":
         return {"cmd": "helper_credential", "label": args.label, "rotate": bool(args.rotate)}
+    if args.cmd == "vocab":
+        return vocab_request(args.term, args.wrong)
     if args.cmd == "says":
         return {"cmd": "says"}
     if args.cmd == "activity":
@@ -2937,6 +2997,16 @@ def main(argv: list[str] | None = None) -> None:
     p_hc.add_argument("--rotate", action="store_true", default=False,
                       help="invalidate every earlier helper credential of this call (WebRTC join)")
     _add_session(p_hc)
+    # 0.19.0: speech recognition vocabulary of the call's payer (add only)
+    p_vo = sub.add_parser(
+        "vocab", help="0.19.0 teach the call's speech recognition a word it mishears: "
+        "`vocab add \"Trello\" --wrong \"Erzähli\"`; adds to the vocabulary of the account that "
+        "pays for the call (add only, the user manages it on /konto); max 20 per request, 100 per call")
+    p_vo.add_argument("action", choices=["add"], help="add (the only action: agents never delete)")
+    p_vo.add_argument("term", help="the correct word or short phrase, max 50 chars")
+    p_vo.add_argument("--wrong", action="append", default=[], metavar="TEXT",
+                      help="a known mishearing of TERM (repeatable); corrected in every transcript")
+    _add_session(p_vo)
     sub.add_parser("helper-import", help="read a helper credential (JSON) from stdin and write "
                    "~/.voicehook/relay.json (0600): then `decide`, `status` and `relay-next` "
                    "and the Claude Code hooks of this machine feed the call")
@@ -2997,7 +3067,8 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(rc)
     if args.cmd == "helper-import":
         sys.exit(_run_helper_import())
-    if args.cmd in ("say", "next", "says", "leave", "status", "activity", "decide", "helper-credential"):
+    if args.cmd in ("say", "next", "says", "leave", "status", "activity", "decide", "helper-credential",
+                    "vocab"):
         sys.exit(_run_client(args))
     if args.cmd == "show":
         sys.exit(_run_client(args))
