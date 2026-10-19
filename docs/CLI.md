@@ -326,20 +326,23 @@ needs nothing on the server.
 |---|---|---|
 | UserPromptSubmit | `neuer Auftrag` plus up to 3 category words of a fixed list (PR, Deploy, Tests, Bugfix, Review, Doku, Refactoring, Merge, Release, UI) | any word of the prompt itself |
 | PostToolUse Bash `gh pr create` | `PR #N geöffnet` (number from the PR URL in the output) | command, output |
-| PostToolUse Bash `gh pr merge` | `PR #N gemergt` (number from the command or output) | command, output |
-| PostToolUse Bash deploy | `Deploy gelaufen` (wrangler/vercel/fly/netlify/firebase/supabase ... deploy, `npm run deploy`, `make deploy`, `*deploy*.sh`, kubectl apply, helm upgrade, `gh workflow run *deploy*`; segments starting with grep/cat/git/echo/... do not count) | command, output |
+| PostToolUse Bash `gh pr merge` | `PR #N gemergt` (number from the command or output, else just `PR gemergt`); with `--auto` `PR #N Auto-Merge an`; `--disable-auto` is skipped | command, output |
+| PostToolUse Bash deploy | `Deploy gelaufen` (wrangler/vercel/fly/netlify/firebase/supabase ... deploy, `npm run deploy`, `make deploy`, `*deploy*.sh`, kubectl apply, helm upgrade); `gh workflow run *deploy*` says `Deploy angestoßen`. Segments starting with grep/cat/git/echo/shellcheck/... do not count, nor `--dry-run` or `bash -n` | command, output |
 | GitHub MCP create/merge pull request | `PR #N geöffnet` / `PR #N gemergt` | tool input/output |
-| PostToolUseFailure, `is_error` | `Fehler bei <Tool>` (+ the tool's own description), `Deploy fehlgeschlagen`, `PR #N Merge fehlgeschlagen`; Esc (is_interrupt) is skipped | the error text |
+| PostToolUseFailure, `is_error` | `Fehler bei <Tool>`, `Deploy fehlgeschlagen`, `PR #N Merge fehlgeschlagen`; Esc (is_interrupt) is skipped | the error text, the tool's description |
 | Stop | `Turn fertig` | |
 
-Other tool calls are not relayed (the joining session's own feed has them).
+Other tool calls are not relayed (the joining session's own feed has them). Heredoc
+bodies and anything in quotes are removed before matching, so a commit message such as
+`fix: run ./deploy.sh only via CI` never reads as a deploy.
 
-**Session name** (label in front of the text): `$VOICEHOOK_SESSION_LABEL`, else the
-Claude Code session name (`session_title` of the hook event, else the last
-`custom-title` of the transcript, the name set with `/rename`), else the label seen
-before for this session, else the basename of `cwd`. Scrubbed, `|` and `:` removed, max
-30 chars. The session title can be Claude Code's generated title, which is derived from
-the conversation: rename the session or set `VOICEHOOK_SESSION_LABEL` if that is too much.
+**Session name** (label in front of the text): `$VOICEHOOK_SESSION_LABEL`, else the last
+`custom-title` of the transcript (the name set with `/rename`), else its last `ai-title`
+(the name Claude Code generates), else the label seen before for this session, else the
+basename of `cwd` plus 4 hex chars of a hash of the session id (`oliver 3f2a`), so two
+sessions in the same folder stay apart. Scrubbed, `|` and `:` removed, max 40 chars.
+The `ai-title` is generated from the conversation and lands in the call feed: rename the
+session or set `VOICEHOOK_SESSION_LABEL` if that says too much.
 
 **Throttle:** the same line of one session at most once per 120 s; turn and stop lines
 at most one per 5 s per session; all sessions together at most 8 lines per 10 s (PR,

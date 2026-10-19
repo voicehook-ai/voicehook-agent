@@ -19,6 +19,7 @@ from voicehook_agent import multisession as ms
 
 URL = "https://voicehook.ai/api/activity/relay"
 TOKEN = "fake.relay.test.only"  # fake, low entropy (gitleaks)
+V4 = "voicehook-v4 " + ms.label_suffix("other-1")  # cwd fallback label of sid other-1
 
 
 @pytest.fixture(autouse=True)
@@ -139,7 +140,7 @@ def test_joining_session_does_not_report_twice():
     _write()
     assert _run(_bash("gh pr create", "https://github.com/o/r/pull/7", sid="JOINER")) is None
     assert _run(_bash("gh pr create", "https://github.com/o/r/pull/7", sid="other")) \
-        == "voicehook-v4: PR #7 geöffnet"  # positive control
+        == "voicehook-v4 " + ms.label_suffix("other") + ": PR #7 geöffnet"  # positive control
 
 
 def test_garbage_is_silent():
@@ -153,15 +154,97 @@ def test_pr_create_merge_deploy_lines():
     _write()
     assert _run(_bash("gh pr create --title x --body y",
                       "https://github.com/voicehook-ai/voicehook-v4/pull/414\n")) \
-        == "voicehook-v4: PR #414 geöffnet"
+        == V4 + ": PR #414 geöffnet"
     assert _run(_bash("gh pr merge 414 --squash", "✓ Squashed and merged")) \
-        == "voicehook-v4: PR #414 gemergt"
+        == V4 + ": PR #414 gemergt"
     assert _run(_bash("gh pr merge https://github.com/o/r/pull/12 --squash", "")) \
-        == "voicehook-v4: PR #12 gemergt"
+        == V4 + ": PR #12 gemergt"
     assert ms._merge_arg("gh pr merge --squash -R o/r2 31 && echo 5") == "31"
     assert ms._merge_arg("gh pr merge --auto && echo 5") == ""
     assert _run(_bash("cd web && p2ai run -e T='X' -- npx wrangler pages deploy dist", "ok")) \
-        == "voicehook-v4: Deploy gelaufen"
+        == V4 + ": Deploy gelaufen"
+
+
+def test_heredoc_and_quoted_text_is_not_a_command():
+    _write()
+    heredoc = "git commit -m \"$(cat <<'EOF'\nfix: run ./deploy.sh only via CI\nEOF\n)\""
+    assert not ms._is_deploy(heredoc)
+    assert _run(_bash(heredoc, "[main 1a2b3c] fix")) is None
+    assert not ms._is_deploy("cat > notes.md <<EOF\nnpm run deploy\ngh pr merge 3\nEOF")
+    assert not ms._is_deploy("cat <<-X\n\tmake deploy\n\tX\necho ok")
+    assert not ms._is_deploy('git commit -m "x" && python -c "import os; os.system(\'make deploy\')"')
+    assert _run(_bash('gh pr create --title "fix: gh pr merge 3"', "/pull/8")) \
+        == V4 + ": PR #8 geöffnet"
+    # still a deploy after the heredoc ends (positive control)
+    assert ms._is_deploy("cat <<EOF > x\nhi\nEOF\nnpm run deploy")
+    assert ms._is_deploy("p2ai run -e T='X' -- npx wrangler pages deploy dist")
+
+
+def test_auto_merge_dry_run_and_workflow_trigger():
+    _write()
+    assert _run(_bash("gh pr merge 41 --auto --squash", "")) == V4 + ": PR #41 Auto-Merge an"
+    assert _run(_bash("gh pr merge 41 --disable-auto", "")) is None
+    assert _run(_bash("gh pr merge 42 --squash", "")) == V4 + ": PR #42 gemergt"  # control
+    assert not ms._is_deploy("wrangler deploy --dry-run")
+    assert not ms._is_deploy("kubectl apply -f k.yaml --dry-run=client")
+    assert not ms._is_deploy("bash -n scripts/deploy.sh")
+    assert not ms._is_deploy("shellcheck scripts/deploy.sh")
+    assert ms._is_deploy("bash -e scripts/deploy.sh")  # control: -e runs it
+    assert _run(_bash("gh workflow run deploy.yml -f ref=main", "")) == V4 + ": Deploy angestoßen"
+    assert _run(_bash("npm run deploy", "ok")) == V4 + ": Deploy gelaufen"
+
+
+def test_merge_without_number_takes_it_from_output_or_omits_it():
+    _write()
+    assert _run(_bash("gh pr merge --squash", "✓ Squashed and merged pull request o/r#77 (t)")) \
+        == V4 + ": PR #77 gemergt"
+    assert _run(_bash("gh pr merge --rebase", "done", sid="other-x")) \
+        == "voicehook-v4 " + ms.label_suffix("other-x") + ": PR gemergt"
+
+
+def test_error_line_never_carries_description():
+    _write()
+    line = _run(_bash("x", failed=True, desc="Kunde Mueller Daten loeschen"))
+    assert line == V4 + ": Fehler bei Bash" and "Mueller" not in line
+
+
+def test_relay_url_https_only_http_for_localhost():
+    for bad in ("http://evil.example/api/activity/relay", "http://localhost.evil.com/x",
+                "http://127.0.0.1.nip.io/x", "ftp://x/y"):
+        with pytest.raises(ValueError):
+            ms.write_relay(bad, TOKEN, "r", 60)
+    for ok in ("https://voicehook.ai/api/activity/relay", "http://localhost:8787/x",
+               "http://127.0.0.1:9/x"):
+        assert ms.write_relay(ok, TOKEN, "r", 60)
+    # a file with plain http to another host (old version) is ignored by readers
+    ms.write_relay(URL, TOKEN, "r", 60)
+    p = ms.relay_path()
+    d = json.loads(p.read_text())
+    d["url"] = "http://evil.example/x"
+    activity._write_private(p, json.dumps(d))
+    assert ms.load_relay() is None
+
+
+def test_write_private_excl_mode_and_stale_tmp(tmp_path):
+    target = tmp_path / "f.json"
+    tmp = target.with_name(target.name + f".{os.getpid()}.tmp")
+    tmp.write_text("stale")
+    os.chmod(tmp, 0o644)
+    activity._write_private(target, "new")
+    assert target.read_text() == "new" and not tmp.exists()
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o600
+    # a symlink planted at the tmp name is removed, never followed
+    victim = tmp_path / "victim"
+    victim.write_text("keep")
+    tmp.symlink_to(victim)
+    activity._write_private(target, "again")
+    assert victim.read_text() == "keep" and target.read_text() == "again"
+    old = os.umask(0)
+    try:
+        activity._write_private(target, "u")
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(os.stat(target).st_mode) == 0o600
 
 
 def test_deploy_detection_ignores_reading_commands():
@@ -183,21 +266,21 @@ def test_other_bash_and_tools_are_not_reported():
 def test_errors_short_without_error_text():
     _write()
     line = _run(_bash("pytest -q", failed=True, desc="Tests laufen lassen"))
-    assert line == "voicehook-v4: Fehler bei Bash: Tests laufen lassen"
+    assert line == V4 + ": Fehler bei Bash"
     assert "secret" not in line and "Exit" not in line
-    assert _run(_bash("gh pr merge 9", failed=True)) == "voicehook-v4: PR #9 Merge fehlgeschlagen"
-    assert _run(_bash("./deploy.sh", failed=True)) == "voicehook-v4: Deploy fehlgeschlagen"
+    assert _run(_bash("gh pr merge 9", failed=True)) == V4 + ": PR #9 Merge fehlgeschlagen"
+    assert _run(_bash("./deploy.sh", failed=True)) == V4 + ": Deploy fehlgeschlagen"
     assert _run(_ev("PostToolUseFailure", tool_name="Bash", tool_input={"command": "x"},
                     is_interrupt=True)) is None  # Esc by the user
     assert _run(_ev(tool_name="Read", tool_input={"file_path": "/secret/path.txt"},
-                    tool_response={"is_error": True})) == "voicehook-v4: Fehler bei Read"
+                    tool_response={"is_error": True})) == V4 + ": Fehler bei Read"
 
 
 def test_turn_goal_never_leaks_prompt_words():
     _write()
     line = _run(_ev("UserPromptSubmit", prompt="Bitte fix den Bug bei Kunde Müller, dann PR "
                                                "aufmachen und deployen. Passwort hunter2"))
-    assert line == "voicehook-v4: neuer Auftrag: PR, Deploy, Bugfix"
+    assert line == V4 + ": neuer Auftrag: PR, Deploy, Bugfix"
     for w in ("Müller", "hunter2", "Kunde", "Bitte"):
         assert w not in line
     assert ms.prompt_goal("hallo") == "neuer Auftrag"
@@ -206,23 +289,53 @@ def test_turn_goal_never_leaks_prompt_words():
 
 def test_stop_line():
     _write()
-    assert _run(_ev("Stop")) == "voicehook-v4: Turn fertig"
+    assert _run(_ev("Stop")) == V4 + ": Turn fertig"
 
 
 def test_label_sources(monkeypatch, tmp_path):
     _write()
     tr = tmp_path / "t.jsonl"
     tr.write_text(json.dumps({"type": "user"}) + "\n"
-                  + json.dumps({"type": "custom-title", "customTitle": "crown|Team: Delta"}) + "\n")
+                  + json.dumps({"type": "custom-title", "customTitle": "crown|Team: Delta"}) + "\n"
+                  + json.dumps({"type": "ai-title", "aiTitle": "Generated later"}) + "\n")
     assert _run(_ev("Stop", sid="a", transcript_path=str(tr))) == "crown Team Delta: Turn fertig"
-    assert _run(_ev("Stop", sid="b", session_title="Multi Agent CLI")) == \
-        "Multi Agent CLI: Turn fertig"
     monkeypatch.setenv(ms.LABEL_ENV, "Mac 2")
-    assert _run(_ev("Stop", sid="c", session_title="ignored")) == "Mac 2: Turn fertig"
+    assert _run(_ev("Stop", sid="c", transcript_path=str(tr))) == "Mac 2: Turn fertig"
     monkeypatch.delenv(ms.LABEL_ENV)
-    # title seen on UserPromptSubmit sticks for later events without it
-    assert _run(_ev("UserPromptSubmit", sid="d", session_title="Gedaechtnis", prompt="x"))
-    assert _run(_bash("gh pr create", "/pull/5", sid="d")) == "Gedaechtnis: PR #5 geöffnet"
+
+
+def test_label_ai_title_when_not_renamed(tmp_path):
+    """Claude Code writes its generated session name as {"type":"ai-title","aiTitle":...}."""
+    _write()
+    tr = tmp_path / "t.jsonl"
+    tr.write_text(json.dumps({"type": "ai-title", "aiTitle": "Enrichment Profil Problem",
+                              "sessionId": "x"}) + "\n")
+    assert _run(_ev("Stop", sid="a", transcript_path=str(tr))) == \
+        "Enrichment Profil Problem: Turn fertig"
+    # the label sticks for later events whose transcript is unreadable
+    assert _run(_bash("gh pr create", "/pull/5", sid="a")) == "Enrichment Profil Problem: PR #5 geöffnet"
+
+
+def test_label_ignores_nonexistent_session_title_field():
+    _write()
+    assert _run(_ev("Stop", sid="b", session_title="Multi Agent CLI")) == \
+        "voicehook-v4 " + ms.label_suffix("b") + ": Turn fertig"
+
+
+def test_label_cwd_fallback_tells_sessions_apart_and_is_capped(tmp_path):
+    _write()
+    a = _run(_ev("Stop", sid="s-1", cwd="/home/oliver"))
+    b = _run(_ev("Stop", sid="s-2", cwd="/home/oliver"))
+    assert a != b and a.startswith("oliver ") and b.startswith("oliver ")
+    suffix = a.split(":")[0].split()[-1]
+    assert len(suffix) == 4 and "s-1" not in a
+    tr = tmp_path / "t.jsonl"
+    tr.write_text(json.dumps({"type": "ai-title", "aiTitle": "Lange Sitzung " * 8}) + "\n")
+    lbl = _run(_ev("Stop", sid="s-3", transcript_path=str(tr))).split(":")[0]
+    assert lbl == ("Lange Sitzung " * 8)[:40].strip()
+    long_cwd = "/x/" + "d" * 80
+    lbl = _run(_ev("Stop", sid="s-4", cwd=long_cwd)).split(":")[0]
+    assert len(lbl) <= 40 and lbl.endswith(" " + ms.label_suffix("s-4"))
 
 
 # ----- throttle ---------------------------------------------------------------------
@@ -268,9 +381,9 @@ def test_post_line_fields(monkeypatch):
                     auth=req.get_header("Authorization"), body=json.loads(req.data))
         return _Resp(200)
     monkeypatch.setattr("urllib.request.urlopen", fake)
-    assert ms.post_line("voicehook-v4: PR #7 geöffnet") == 200
+    assert ms.post_line(V4 + ": PR #7 geöffnet") == 200
     assert seen == {"url": URL, "method": "POST", "timeout": ms.POST_TIMEOUT_S,
-                    "auth": f"Bearer {TOKEN}", "body": {"text": "voicehook-v4: PR #7 geöffnet"}}
+                    "auth": f"Bearer {TOKEN}", "body": {"text": V4 + ": PR #7 geöffnet"}}
     assert "?" not in seen["url"]  # token never in the URL
 
 
@@ -302,7 +415,7 @@ def test_hook_main_spawns_detached_post(monkeypatch):
     monkeypatch.setattr(ms, "_spawn_post", spawned.append)
     monkeypatch.setattr(sys, "stdin", io.StringIO(_bash("gh pr create", "/pull/77")))
     assert activity.main(["post-tool-use"]) == 0
-    assert spawned == ["voicehook-v4: PR #77 geöffnet"]
+    assert spawned == [V4 + ": PR #77 geöffnet"]
 
 
 def test_relay_post_child_reads_text_from_stdin(monkeypatch):

@@ -273,9 +273,17 @@ def _private_dir(d: Path) -> Path:
 def _write_private(path: Path, text: str) -> None:
     """Write `text` atomically, mode 0600, never following a symlink."""
     tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
-        os.write(fd, text.encode("utf-8"))
+        tmp.unlink()  # a stale tmp (or a planted symlink) of an earlier run
+    except OSError:
+        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)  # umask or a pre-existing mode never widens it
+        data = text.encode("utf-8")
+        while data:
+            data = data[os.write(fd, data):]
     finally:
         os.close(fd)
     os.replace(tmp, path)
