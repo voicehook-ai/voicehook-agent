@@ -39,6 +39,10 @@ UserPromptSubmit and Stop and, when `~/.voicehook/relay.json` (written by the jo
 session) exists, reports turn goal, PR opened/merged, deploy and errors of EVERY Claude
 Code session of this machine to the call's activity relay (see multisession.py).
 
+0.18.0: Notification and PermissionRequest (and PreToolUse of AskUserQuestion) bring a
+session that waits for the human into the call: a decision on the Decision Board plus a
+feed line (see notify.py). Never an automatic approval.
+
 This module stays stdlib-only (no livekit/httpx) so the hook starts fast.
 """
 from __future__ import annotations
@@ -80,9 +84,15 @@ HOOK_COMMAND_PRE = "voicehook-agent-hook pre-tool-use || true"
 HOOK_COMMAND_PROMPT = "voicehook-agent-hook user-prompt-submit || true"
 HOOK_COMMAND_FAIL = "voicehook-agent-hook post-tool-use-failure || true"
 HOOK_COMMAND_STOP = "voicehook-agent-hook stop || true"
+# 0.18.0 (notify.py): the session waits for the human. Exit codes are ignored on both
+# events; the hook never prints, so a PermissionRequest stays the human's decision.
+HOOK_COMMAND_NOTIFY = "voicehook-agent-hook notification || true"
+HOOK_COMMAND_PERMISSION = "voicehook-agent-hook permission-request || true"
 HOOK_COMMANDS = {"PreToolUse": HOOK_COMMAND_PRE, "PostToolUse": HOOK_COMMAND,
                  "PostToolUseFailure": HOOK_COMMAND_FAIL,
-                 "UserPromptSubmit": HOOK_COMMAND_PROMPT, "Stop": HOOK_COMMAND_STOP}
+                 "UserPromptSubmit": HOOK_COMMAND_PROMPT, "Stop": HOOK_COMMAND_STOP,
+                 "Notification": HOOK_COMMAND_NOTIFY,
+                 "PermissionRequest": HOOK_COMMAND_PERMISSION}
 NO_MATCHER_EVENTS = ("UserPromptSubmit", "Stop")  # Claude Code ignores matchers there
 # Commands that count as "our hook is already installed" (idempotent install).
 _OUR_COMMANDS = (HOOK_COMMAND, "voicehook-agent hook post-tool-use")
@@ -97,7 +107,12 @@ _OUR_COMMANDS_BY_EVENT = {"PreToolUse": (HOOK_COMMAND_PRE, "voicehook-agent-hook
                                                "voicehook-agent-hook user-prompt-submit",
                                                "voicehook-agent hook user-prompt-submit"),
                           "Stop": (HOOK_COMMAND_STOP, "voicehook-agent-hook stop",
-                                   "voicehook-agent hook stop")}
+                                   "voicehook-agent hook stop"),
+                          "Notification": (HOOK_COMMAND_NOTIFY, "voicehook-agent-hook notification",
+                                           "voicehook-agent hook notification"),
+                          "PermissionRequest": (HOOK_COMMAND_PERMISSION,
+                                                "voicehook-agent-hook permission-request",
+                                                "voicehook-agent hook permission-request")}
 HOOK_TIMEOUT = 5
 RELAY_HOOK_TIMEOUT = 3     # 0.15.0 relay events: settings timeout + internal alarm (s)
 
@@ -847,7 +862,7 @@ def _installed(entries: list, event: str = "PostToolUse") -> bool:
 
 def install(path: Path) -> tuple[int, str]:
     """Merge our hooks (Pre/PostToolUse; 0.15.0 also PostToolUseFailure, UserPromptSubmit,
-    Stop for the multi-session relay) into settings.json. Idempotent (an older install
+    Stop for the multi-session relay; 0.18.0 Notification, PermissionRequest) into settings.json. Idempotent (an older install
     gets the missing ones added); refuses to touch a file that is not a JSON object."""
     data: dict = {}
     if path.exists():
@@ -883,6 +898,23 @@ def relay_hook(raw: str) -> None:
     try:
         from . import multisession
         multisession.handle_event(raw)
+    except Exception:  # noqa: BLE001
+        return
+
+
+def notify_hook(raw: str) -> None:
+    """0.18.0: Notification / PermissionRequest / AskUserQuestion (notify.py). Never raises."""
+    try:
+        from . import notify
+        notify.handle(raw)
+    except Exception:  # noqa: BLE001
+        return
+
+
+def notify_progress(raw: str) -> None:
+    try:
+        from . import notify
+        notify.on_progress(raw)
     except Exception:  # noqa: BLE001
         return
 
@@ -925,19 +957,32 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     cmd = args[0] if args else ""
     if cmd in ("pre-tool-use", "post-tool-use", "post-tool-use-failure", "user-prompt-submit",
-               "stop"):
+               "stop", "notification", "permission-request"):
         with _deadline(RELAY_HOOK_TIMEOUT):
             try:
                 raw = sys.stdin.read()
             except Exception:  # noqa: BLE001
                 raw = ""
+            if cmd in ("notification", "permission-request"):
+                notify_hook(raw)  # 0.18.0: question/permission -> Decision Board + feed
+                return 0
             if cmd == "pre-tool-use":
                 pre_tool_use(raw)
+                if '"AskUserQuestion"' in raw:
+                    notify_hook(raw)
             elif cmd == "post-tool-use":
                 post_tool_use(raw)
             if cmd != "pre-tool-use":  # 0.15.0: other sessions -> relay of the running call
                 relay_hook(raw)
+                notify_progress(raw)  # 0.18.0: the session goes on, its question leaves
         return 0  # always 0, nothing on stdout (PreToolUse: no output = allow)
+    if cmd == "notify-post":  # 0.18.0: detached child of the hook, job on stdin
+        from . import notify
+        try:
+            raw = sys.stdin.read()
+        except Exception:  # noqa: BLE001
+            raw = ""
+        return notify.post_main(raw)
     if cmd == "relay-post":  # 0.15.0: detached child of the hook, text on stdin
         from . import multisession
         try:
@@ -969,7 +1014,8 @@ def main(argv: list[str] | None = None) -> int:
         print(msg, file=sys.stderr if rc else sys.stdout)
         return rc
     print("usage: voicehook-agent hook {pre-tool-use|post-tool-use|post-tool-use-failure|"
-          "user-prompt-submit|stop|print|install [--settings PATH]}", file=sys.stderr)
+          "user-prompt-submit|stop|notification|permission-request|print|"
+          "install [--settings PATH]}", file=sys.stderr)
     return 2
 
 

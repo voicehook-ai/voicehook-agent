@@ -267,12 +267,18 @@ voicehook-agent hook print                # the snippet, to paste by hand
   "UserPromptSubmit": [{"hooks": [
     {"type": "command", "command": "voicehook-agent-hook user-prompt-submit || true", "timeout": 3}]}],
   "Stop": [{"hooks": [
-    {"type": "command", "command": "voicehook-agent-hook stop || true", "timeout": 3}]}]}}
+    {"type": "command", "command": "voicehook-agent-hook stop || true", "timeout": 3}]}],
+  "Notification": [{"matcher": "*", "hooks": [
+    {"type": "command", "command": "voicehook-agent-hook notification || true", "timeout": 3}]}],
+  "PermissionRequest": [{"matcher": "*", "hooks": [
+    {"type": "command", "command": "voicehook-agent-hook permission-request || true", "timeout": 3}]}]}}
 ```
 
 PostToolUseFailure, UserPromptSubmit and Stop (0.15.0) only feed the multi-session relay
-below; without `~/.voicehook/relay.json` they do nothing. `hook install` adds them to an
-older install, idempotently.
+below; without `~/.voicehook/relay.json` they do nothing. Notification and
+PermissionRequest (0.18.0) bring a session that waits for the human into the call (see
+"Sessions that wait for you" below). `hook install` adds them to an older install,
+idempotently.
 
 `voicehook-agent-hook` is a light console script (no livekit import, starts fast);
 `voicehook-agent hook pre-tool-use|post-tool-use` does the same. The hook always exits 0
@@ -445,6 +451,56 @@ like relay.json: a regular file of ours, 0600, never a symlink, and the dir's
   request, and every later `operator.decision` event whose `sender` is that helper's
   (instead of the join's own `next`). The helper takes the lines it reads (flock).
 - Both files are deleted on join start and end.
+
+### Sessions that wait for you: permission prompts and questions (0.18.0)
+
+A Claude Code session that waits for the human (permission dialog, `AskUserQuestion`,
+MCP elicitation, idle at the prompt) used to show that only as a desktop push. With the
+hooks installed (`voicehook-agent hook install`, re-run it after the upgrade) it lands in
+the call, for the joining session and for every helper session:
+
+| Hook event | Decision Board | Feed line |
+|---|---|---|
+| `PermissionRequest` | yes/no `Freigabe für Bash: Remove node_modules directory?` (the tool's own description, a file tool's basename, else only the tool name) | `wartet auf Freigabe: Bash` |
+| `PreToolUse` of `AskUserQuestion` | the question itself, its option labels as options (2-3; more: yes/no); `(+N weitere Fragen in der Session)` for more questions | `hat eine Frage` |
+| `Notification` `permission_prompt` | yes/no with the notification text (`Claude needs your permission to use Bash`), only when no more specific question is open | `wartet auf Freigabe: Bash` |
+| `Notification` `elicitation_dialog`, `elicitation_url_dialog`, `agent_needs_input` | yes/no with the notification text | `hat eine Frage` |
+| `Notification` `idle_prompt` | nothing | `wartet auf Eingabe` |
+| `Notification` `elicitation_complete`, `elicitation_response` | removes the open question | |
+| others (`auth_success`, `agent_completed`, `quota_*`) | nothing | nothing |
+
+Without `notification_type` (older Claude Code) the message decides: a permission text
+asks, a "waiting for your input" text is a feed line.
+
+- **Who asks:** the session that started the join asks over its own control socket (the
+  answer arrives in its `next` as a `decision` event; feed line `HH:MM:SS Notification: ...`
+  in its own log). Every other session asks as a helper over `relay.json` with `from` =
+  its session name (same rule as the relay); the answer goes to that helper's inbox
+  (`voicehook-agent relay-next`) and, on servers with `helper_decision`, as a copy to the
+  main agent.
+- **Never automatic:** the hook prints nothing, so Claude Code's permission flow stays
+  exactly as it was; the human still approves in the session. An answer in the call is
+  information for the agents, not an approval.
+- **No spam:** one open question per session; the same question again while it is open,
+  or a generic push while a specific question is open, is dropped; a generic push within
+  15 s after the session went on is stale. At most one new question per 10 s per session
+  and 6 per minute for all sessions together.
+- **The question leaves the board** when the session goes on: `PostToolUse` /
+  `PostToolUseFailure` of the tool that asked (any tool for a generic push),
+  `UserPromptSubmit`, `Stop`. A delete before the decide answer came is done by the
+  child as soon as it has the id.
+- **Never sent:** paths (only the basename), URLs beyond the host, secrets (same
+  scrubber), command text. Max 160 chars per question, 40 per option.
+- State: `~/.voicehook/notify-state.json` (0600, flock): per session hash the open
+  question's id, a hash of its text and the session name, never the question text or a
+  session id. The decide runs
+  in a detached child (`python -I`, cwd `~/.voicehook`, job on stdin); the hook never
+  waits, always exits 0, gives up after 3 s.
+
+Follow-up (not built): answering a permission prompt FROM the call (a PermissionRequest
+hook that waits for the call's answer and returns `allow`/`deny`). It needs an explicit
+design first: who may approve which tool, timeouts, and that a wrong voice answer never
+runs a destructive command.
 
 ### Activity log: keep it filled (activity_due, 0.13.0)
 
