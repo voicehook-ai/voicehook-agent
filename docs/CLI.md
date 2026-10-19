@@ -607,6 +607,25 @@ expired: the helper pump token; no new credential, max 10 per minute), the answe
 an older server without `/api/card/image` answers image cards with a clear error (text, code
 and link still work).
 
+## Speech recognition vocabulary (`vocab add`, 0.19.0)
+
+The call keeps mishearing a word (a product, a name, jargon)? Teach it:
+
+```sh
+voicehook-agent vocab add "Trello" --wrong "Erzähli"   # --wrong is repeatable
+voicehook-agent vocab add "Zapmail"                    # plain word, no known mishearing
+```
+
+The running join POSTs `/api/bridge/vocab` (server voicehook-v4) with its own operator
+credential (WebRTC: its LiveKit token, bridge transport: its session), never as the user.
+The server adds to the vocabulary of the account that pays for the call: add only, the
+agent can neither read nor delete the list (the user manages it on https://voicehook.ai/konto).
+Max 20 entries per request, 100 per call, 50 characters each. Output: one JSON line
+`{"ok": true, "type": "vocab", "added": {"terms", "fixes"}, "total", "call_left", "reloaded"}`;
+errors `{"ok": false, "type": "vocab", "status", "error"}` (409 = guest call without an
+account, 429 = limit, 410 = call ended). Corrections apply right away; in normal mode the
+word list reaches the speech recognition at the next pause, in live mode from the next call.
+
 ## Shapes in the ring (`show`)
 
 `voicehook-agent show` without `--card` draws a shape into the ring (the MCP tool `show`
