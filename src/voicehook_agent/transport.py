@@ -339,6 +339,22 @@ class BridgeRoom:
             data = {}
         return r.status_code, data if isinstance(data, dict) else {}
 
+    async def post_phone(self, kind: str, body: dict, timeout: float) -> tuple[int, dict]:
+        """POST /api/bridge/notify_me|call_me {reason, message?} with this bridge session ->
+        (status, json). Never raises (status 0 on a network error)."""
+        if self._http is None or not self._session or self._closed:
+            return 0, {"detail": "bridge session not connected"}
+        try:
+            r = await self._http.post(f"{self.api_base}/api/bridge/{kind}", headers=self._auth(),
+                                      json=body, timeout=timeout)
+        except Exception as e:  # noqa: BLE001
+            return 0, {"detail": f"request failed ({type(e).__name__})"}
+        try:
+            data = r.json()
+        except ValueError:
+            data = {}
+        return r.status_code, data if isinstance(data, dict) else {}
+
     # ---- internals ---------------------------------------------------------- #
     def _auth(self) -> dict:
         return {"authorization": f"Bearer {self._session}"}
