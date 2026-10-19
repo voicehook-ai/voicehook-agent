@@ -38,7 +38,7 @@ MCP/bridge = one agent in the call; activity lines are only what that agent writ
 | **Bridge** (`/api/bridge/*`, Quickstart A) | **Protocol underneath + fallback.** Plain HTTPS/REST for any agent. | No MCP client and no CLI; or a feature the other path lacks right now. |
 
 - **Why the CLI stays:** MCP runs on the server and cannot see the sessions on the user's machine. Only a local process knows which Claude Code sessions run, what each does and when one waits for a decision, and feeds that into the call without hand-written notes.
-- **Until the CLI has cards:** CLI `show` draws ring shapes only (no text/code/link/image cards); if the human must read something, put it on the board and in the chat, or join via MCP/bridge for cards.
+- **Cards from the CLI (0.21.0+):** `cli show --card text|code|link|image` puts the same cards on the call page as bridge/MCP `show` ("Cards on the call page" below); older CLIs only draw ring shapes.
 - **CLI install without git** (git blocked, e.g. Xcode license on macOS; PyPI lags), pinned to the reviewed commit, only with the user's OK: `uv tool install --force https://github.com/voicehook-ai/voicehook-agent/archive/75a29390504df7dad491af42b6cb68826b5c6c0f.zip`. Check `voicehook-agent --version` before every call.
 
 ## Agent loop without polling (0.5.0)
@@ -569,11 +569,48 @@ happening right now". An empty or old log means Delta has nothing to say.
   (non `--json`) join output prints `!! stale: <message>` after every user turn.
   `status_due`/`activity_due` stay unchanged.
 
+## Cards on the call page (`show --card`, 0.21.0)
+
+`voicehook-agent show --card text|code|link|image` puts the same card on the call page as
+bridge `POST /api/bridge/show` and MCP `show`: never spoken, a new card shows up as a small
+preview top left. Same session resolution as `say`.
+
+```bash
+voicehook-agent show --card code --title "Fix" --text "git push origin main"
+voicehook-agent show --card text --file notes.md --panel cards
+voicehook-agent show --card link --text https://voicehook.ai
+voicehook-agent show --card image --title "Ablauf" --file swimlane.svg --large
+voicehook-agent show --panel board          # only open a panel
+```
+
+| Flag | Meaning |
+|------|---------|
+| `--card KIND` | `text` (default look), `code` (monospace, copy button), `link` (exactly one http(s) URL), `image` |
+| `--title T` | card heading, max 80 chars |
+| `--text T` / `--file PATH` | the content (`-` = stdin); text/code/link: UTF-8 text max 4000 chars; image: svg (max 300 KB), png, jpeg or webp (max 1 MB), type from the magic bytes |
+| `--panel P` | open on the humans' page: `cards` (card view), `board`, `log`, `decisions`; `none` closes all |
+| `--large` | open the card view big in the middle with this card at full size (implies `--panel cards`); for diagrams such as swimlanes with many steps, arrows and labels |
+
+SVG may draw anything, but never run or load anything: no `<script>`, `<foreignObject>`,
+`on*` attributes, entities or external references (only `#id` and `data:image`). Invalid
+input: exit 2, nothing sent, never cut. Not combinable with the shape flags below.
+
+Transport: WebRTC join -> the CLI publishes topic `operator.card`
+`{id, seq, kind, title, text, at, url?, mime?}` itself (the page takes cards from every agent
+participant; the voicebot keeps the last 20 for a reload) and the panel as `delta.ui`
+`{panel, open, via: "agent", large?, id?}` only to the humans. An image goes to the server
+first: `POST /api/card/image {image}` with the join's own LiveKit token as Bearer (after it
+expired: the helper pump token; no new credential, max 10 per minute), the answer
+`{id, url, mime}` (signed, room-bound URL) goes into the card. Bridge join ->
+`POST /api/bridge/show` with the same body. Answer:
+`{"ok":true,"type":"card","via":"datachannel"|"bridge","id","seq","kind","panel"?,"large"?}`;
+an older server without `/api/card/image` answers image cards with a clear error (text, code
+and link still work).
+
 ## Shapes in the ring (`show`)
 
-CLI only: `voicehook-agent show` draws a shape into the ring. It is not the MCP tool
-`show`, which puts a card (text, code, link or image) on the call page; see
-[/docs/mcp](https://voicehook.ai/docs/mcp).
+`voicehook-agent show` without `--card` draws a shape into the ring (the MCP tool `show`
+puts cards, like `--card` above; see [/docs/mcp](https://voicehook.ai/docs/mcp)).
 
 An agent can draw into the ring of the call UI while it explains something
 by voice. Same session resolution as `say`; WebRTC join -> data-channel topic

@@ -18,7 +18,7 @@ MCP/bridge = one agent in the call; activity lines are only what that agent writ
 | **Bridge** (`/api/bridge/*`, Quickstart A) | **Protocol underneath + fallback.** Plain HTTPS/REST for any agent. | No MCP client and no CLI; or a feature the other path lacks right now. |
 
 - **Why the CLI stays:** MCP runs on the server and cannot see the sessions on the user's machine. Only a local process knows which Claude Code sessions run, what each does and when one waits for a decision, and feeds that into the call without hand-written notes.
-- **Until the CLI has cards:** CLI `show` draws ring shapes only (no text/code/link/image cards); if the human must read something, put it on the board and in the chat, or join via MCP/bridge for cards.
+- **Cards from the CLI (0.21.0+):** `cli show --card text|code|link|image` puts the same cards on the call page as bridge/MCP `show` (REFERENCE.md "Cards on the call page (CLI)"); older CLIs only draw ring shapes.
 - CLI install (also without git) and version check: https://voicehook.ai/agent/REFERENCE.md. Cloud/sandbox sessions: MCP, never the CLI (next point).
 - `CLAUDE_CODE_REMOTE=true`, `HTTPS_PROXY` set, or a local join that failed with `wait_pc_connection timed out` = cloud/sandbox session: WebRTC is blocked there. Never install or run a local voice client; these MCP tools need only HTTPS, the server joins the call for you.
 - No MCP tools in your client: the same tools work as plain HTTPS requests to https://voicehook.ai/mcp (JSON-RPC `tools/call`), recipe in https://voicehook.ai/agent/REFERENCE.md.
@@ -87,7 +87,7 @@ or ambiguous) and `addressed_to_you`; `operators_said` lines also `to_human` (no
 ## One agent per call (solo), or several (rules: https://voicehook.ai/agent/MULTI-AGENT.md)
 
 One-agent call (default, `create_call` without `solo` or with `solo: true`): one agent per call, a second `join` gets `409`. Delta speaks in your voice (`join` `voice`) and in first person, as you, only from your `status`, `activity` and `decide`, each item once. Stream what you do there, step by step: Delta speaks it as you; use `say` only for urgent or verbatim text. `send_data` never reaches Delta. Several agents (`create_call` with `solo: false`), these rules are binding:
-1. Read `operators_said` in EVERY `next` result, `timeout` too. Answer only when `addressed_to_you` (or clearly meant); someone else or Delta addressed: stay silent.
+1. Read `operators_said` in EVERY `next` result, `timeout` too. Answer only when `addressed_to_you` (or clearly meant); someone else or Delta addressed: stay silent (except `routed_by_delta`: Delta handed you the request, do it).
 2. Never answer another agent's question to the human; never ask Delta yourself. Speak only `context.lang`, greeting included.
 3. You are a participant: no code changes, actions or forwarding unless the human asks you. Check `operators_said` and `status` before you claim what you receive.
 4. Short, only when needed; else stay silent and show your work on board and feed.
@@ -106,17 +106,17 @@ Helper sessions (data only, no voice, no join, never a second agent): `helper_cr
 
 - `show` puts a card on the user's call page. It is never spoken. Use it whenever something should be read or seen rather than heard: code, links, lists, numbers, an explanatory image. Then say ONE short sentence that points to it (e.g. "I put the link on your screen"), never read the card out.
 - `kind`: `text` (default), `code` (monospace with a copy button), `link` (exactly one http(s) URL; use it for every link you want the user to open, the card is a tappable link), `image` (`image` = SVG text, or base64 PNG/JPEG/WebP). `title` is optional.
-- The newest card appears as a small preview top left on the user's screen; the user taps it to enlarge. `panel: "cards"` opens the large view for the user, `board` or `log` open those panels, `none` closes them.
-- Limits: text 4000 characters, title 80, SVG 100 KB, PNG/JPEG/WebP 1 MB. More is rejected (422), never cut. The last 20 cards survive a reload of the page.
+- The newest card appears as a small preview top left on the user's screen; the user taps it to enlarge. `panel: "cards"` opens the card view for the user, `board` or `log` open those panels, `none` closes them. `large: true` opens the card view big in the middle with this card at full size: use it for diagrams the user should read now.
+- Limits: text 4000 characters, title 80, SVG 300 KB, PNG/JPEG/WebP 1 MB. More is rejected (422), never cut. The last 20 cards survive a reload of the page.
 
 ### Good explanatory images, fast
 
 - **Image or text?** An image when it shows a relation, a flow, a comparison or a layout: what takes three sentences to say and one look to see. Lists, code and plain facts stay text or code.
 - **Build SVG**, not pixels: small, sharp on every screen, quick to write.
   - `viewBox` only (no fixed width/height): `0 0 800 800` square or `0 0 800 1000` portrait, both read well on a phone.
-  - Few clear shapes: at most about 7 boxes or terms, one idea per image. Big type: `font-size` 24 or more at an 800 wide viewBox; labels of 1 to 3 words.
+  - Small card (seen as preview or on a phone): few clear shapes, about 7 boxes or terms, one idea per image. Big type: `font-size` 24 or more at an 800 wide viewBox; labels of 1 to 3 words. Big diagram (swimlanes, process with many steps, arrows and labels): draw everything it needs, wide `viewBox` (e.g. `0 0 1800 800`), `font-size` 24+ at that width, and `show` it with `large: true`.
   - High contrast and your own background `<rect>` (the page can be light or dark). Arrows with a `<marker>` (see below), lines 4 to 6 wide.
-  - `font-family="system-ui, sans-serif"`. No external fonts, no images, no links, no scripts in the SVG (scripts never run anyway).
+  - `font-family="system-ui, sans-serif"`. No external fonts, images or links, no scripts, no `<foreignObject>`, no `on*` attributes (rejected with 422); references only to `#id` inside the SVG.
 - In the call: `show` the image, then say in one sentence what to look at ("left is today, right is after the change").
 
 Box, arrow, box:
