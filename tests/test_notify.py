@@ -6,6 +6,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -118,7 +119,8 @@ def test_question_has_no_paths_urls_or_secrets_and_is_capped():
            "siehe https://intern.example.com/a/b?c=d " + "lang " * 60)
     q = notify.clean_text(raw)
     assert "/Users" not in q and "kunden" not in q and "backup" not in q and "hunter2" not in q
-    assert ".env" in q and "x.tar" in q and "intern.example.com" in q and "/a/b" not in q
+    assert ".env" in q and "x.tar" in q and "/a/b" not in q
+    assert re.search(r"siehe intern\.example\.com lang", q)      # the URL keeps only its host
     assert len(q) <= notify.QUESTION_MAX
 
 
