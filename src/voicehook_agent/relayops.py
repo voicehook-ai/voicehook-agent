@@ -105,7 +105,7 @@ def _cached_label(skey: str) -> str:
 def session_label() -> str:
     """`from` of this session, the hook's logic: $VOICEHOOK_SESSION_LABEL > custom-title >
     ai-title of the transcript > the label the hook saw before > `<cwd> <4 hex>`."""
-    sid = os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
+    sid = vmulti.own_session_id()
     try:
         cwd = os.getcwd()
     except OSError:

@@ -89,6 +89,11 @@ Since 0.16.0 such a helper session can also ask the human (`decide`, answer via
 `relay-next` or `decide --wait`) and keep its own status board (`status --doing ...`)
 ([helper sessions](docs/CLI.md#helper-sessions-decision-board-and-own-status-board-0160)).
 
+OpenAI Codex CLI (0.20.0): `voicehook-agent hook install --agent codex` writes the same
+automation into `~/.codex` (hooks.json, `notify`, a local MCP server with `status`,
+`decide`, `next`, `activity`; backup first), then trust the hooks once with `/hooks` in
+Codex ([other coding agents](docs/CLI.md#other-coding-agents-0200)).
+
 ## Pricing
 
 About 10 minutes free every day. Prepaid from 10 EUR, no subscription.
