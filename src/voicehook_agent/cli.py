@@ -218,6 +218,7 @@ from . import activity as vactivity
 from . import boardlist as vboardlist
 from . import cards as vcards
 from . import helperaccess as vhelp
+from . import localsessions as vlocal
 from . import multisession as vmulti
 from . import relayops as vrelayops
 from . import selfupdate as vselfupdate
@@ -416,6 +417,23 @@ def _emit_share_hint(json_mode: bool) -> None:
         print(json.dumps(obj, ensure_ascii=False), flush=True)
     else:
         print(f"{SHARE_TEXT} · {SHARE_URL}", file=sys.stderr, flush=True)
+
+
+async def _emit_sessions_hint(json_mode: bool, detect=None) -> dict | None:
+    """0.21.4: which other Claude Code / Codex sessions run on this machine, with the
+    question for the human and the setup commands (localsessions.py). --json: one `_meta`
+    event `sessions` on stdout; plain: one line on stderr. For the operator, never spoken."""
+    try:
+        got = await asyncio.to_thread(detect or vlocal.detect)
+    except Exception:  # noqa: BLE001
+        return None
+    if not got:
+        return None
+    if json_mode:
+        print(json.dumps(got, ensure_ascii=False), flush=True)
+    else:
+        print(f"[sessions] {got['text']}", file=sys.stderr, flush=True)
+    return got
 
 
 def _emit_version_notice(json_mode: bool, kind: str, text: str, **extra) -> None:
@@ -2308,6 +2326,11 @@ async def _connect_and_listen(
     if share_hint is not None and not share_hint.get("shown"):
         share_hint["shown"] = True  # once per join: never again on a reconnect cycle
         _emit_share_hint(json_mode)
+    if share_hint is not None and not share_hint.get("sessions"):
+        share_hint["sessions"] = True  # 0.21.4: the other agent sessions of this machine, once
+        st = asyncio.create_task(_emit_sessions_hint(json_mode))
+        _BG_TASKS.add(st)
+        st.add_done_callback(_BG_TASKS.discard)
     for p in room.remote_participants.values():
         for pub in p.track_publications.values():
             if int(getattr(pub, "kind", 0)) == 1 and getattr(pub, "subscribed", False):
@@ -2566,7 +2589,7 @@ async def _join(
     notifier = relay.TurnNotifier(wake_only_user=wake_only_user)
     echo = relay.EchoSuppressor(enabled=suppress_echo)
     # 0.14.0: the join hint, shared by all reconnect cycles -> at most once per join.
-    share_hint = {"shown": quiet or _quiet_from_env()}
+    share_hint = {"shown": quiet or _quiet_from_env(), "sessions": False}
     say_tracker = relay.SayTracker(ttl=say_ttl)
 
     # Live-context holder — seeded once from --graph (if any), then fed live

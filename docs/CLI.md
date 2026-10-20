@@ -464,6 +464,35 @@ needs nothing on the server.
   expired file and one whose `owner_pid` is gone. 401/403/410 from the relay marks the
   token dead (`relay.dead`, a hash of the token); a reader never deletes the file.
 
+### Other sessions of this machine, right after `join` (0.21.4)
+
+Once per join, after the connect, `join` looks which other Claude Code / Codex sessions run
+on this machine (running `claude` / Claude Code `cli.js` / `codex` processes, without the
+joining session itself; per session only the basename of its working directory) and whether
+the hook is installed (Claude Code `~/.claude/settings.json`, Codex `hooks.json`). `--json`:
+one `_meta` event on stdout, plain mode: one `[sessions] ...` line on stderr:
+
+```json
+{"role":"system","topic":"_meta","_meta":"sessions","count":2,
+ "sessions":[{"agent":"claude","name":"salesengine"},{"agent":"codex","name":"infra"}],
+ "hooks":{"claude":false,"codex":false},
+ "ask":"Soll ich die anderen 2 Sessions hier einbinden, damit sie ihren Status in den Call bringen?",
+ "setup":["voicehook-agent hook install","voicehook-agent hook install --agent codex"],
+ "reporting":["salesengine 1a2b"], "text":"..."}
+```
+
+Ask the human exactly `ask`; on yes run the `setup` commands (Codex: then trust the hooks
+once with `/hooks`). Running Claude Code sessions take a new hook after `/hooks` or a
+restart; from then on they report turn goal, PR, deploy, errors, questions and their status
+board through the multi-session relay. With the hook already installed there is no `ask`:
+they report by themselves. `reporting` = sessions whose hook reported in the last 2 h.
+Never spoken, never sent into the call. `VOICEHOOK_SESSIONS_HINT=0` turns it off.
+
+**Agents on MCP or the bridge (no CLI):** they cannot see the machine's sessions. Say that it
+works in principle, but needs the voicehook-agent CLI on this machine, in one line:
+`uv tool install voicehook-agent && voicehook-agent hook install` (or `pipx install
+voicehook-agent`).
+
 ### Helper access for every main agent (0.17.0)
 
 The server issues the helper credential (`POST /api/helper/credential`) however the main

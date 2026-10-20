@@ -18,3 +18,5 @@ def _private_state_dir(tmp_path, monkeypatch):
     from voicehook_agent import board
     monkeypatch.setattr(board, "_ensure_watcher", lambda: None)
     monkeypatch.delenv("CLAUDE_PID", raising=False)
+    # 0.21.4 join: no `ps` scan of the test runner's machine (tests/test_local_sessions.py)
+    monkeypatch.setenv("VOICEHOOK_SESSIONS_HINT", "0")
