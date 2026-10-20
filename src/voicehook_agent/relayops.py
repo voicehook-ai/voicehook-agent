@@ -310,7 +310,8 @@ def clear_dir(dir_: Path) -> None:
 # --------------------------------------------------------------------------- #
 # request bodies (both relay kinds)
 # --------------------------------------------------------------------------- #
-DECIDE_KEYS = ("question", "options", "recommend", "id", "delete", "context", "recent")  # 0.21.0
+DECIDE_KEYS = ("question", "options", "recommend", "id", "delete", "context", "recent",  # 0.21.0
+               "faq")  # 0.21.4: hidden follow-up questions for the voicebot
 STATUS_KEYS = ("doing", "open", "done", "project")
 
 
@@ -330,6 +331,11 @@ def status_body(board: dict) -> dict:
             out[k] = [str(x) for x in v if isinstance(x, str)]
     if isinstance(board.get("project"), str) and board["project"]:
         out["project"] = board["project"]
+    if board.get("meta"):  # 0.21.4: per item {context, faq}; a server without it ignores it
+        from . import relay as vrelay
+        meta = vrelay.clean_board_meta(board["meta"], out)
+        if meta:
+            out["meta"] = meta
     return out
 
 
@@ -352,6 +358,13 @@ def _valid_decide(body: object) -> dict | None:
         if not isinstance(opts, list) or len(opts) > 3 or not all(isinstance(o, str) for o in opts):
             return None
         out["options"] = opts
+    if body.get("faq") is not None:  # 0.21.4
+        from . import relay as vrelay
+        m = vrelay.clean_meta({"faq": body["faq"]})
+        if m is None:
+            return None
+        if m.get("faq"):
+            out["faq"] = m["faq"]
     return out if out.get("question") or out.get("id") else None
 
 
@@ -382,6 +395,13 @@ def _valid_status(body: object) -> dict | None:
         if not isinstance(p, str) or not 1 <= len(p) <= 40:
             return None
         out["project"] = p
+    if body.get("meta") is not None:  # 0.21.4 per item {context, faq}
+        from . import relay as vrelay
+        meta = vrelay.clean_board_meta(body["meta"], out)
+        if meta is None:
+            return None
+        if meta:
+            out["meta"] = meta
     return out
 
 

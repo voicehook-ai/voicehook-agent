@@ -178,7 +178,8 @@ def test_decide_via_remote_relay(monkeypatch, server, capsys):
     assert c["auth"] == f"Bearer {TOKEN}" and TOKEN not in c["raw_path"]
     assert c["body"] == {"from": "SE Refill", "question": "Deploy jetzt?",
                          "options": ["Ja", "Nein"], "recommend": 0}
-    assert err == ""  # nothing on stderr: no token, no question
+    # nothing on stderr but the 0.21.4 context/faq hint: no token, no question
+    assert err.replace(relay.MANDATORY_HINT + "\n", "") == ""
 
 
 def test_decide_update_and_delete_via_relay(monkeypatch, server, capsys):
@@ -214,11 +215,13 @@ def test_status_via_remote_relay(monkeypatch, server, capsys):
     rc, lines, err = _cli(["status", "--doing", "Tests fixen", "--open", "PR", "--done", "Repro",
                            "--faq", "Wann?::gleich"], capsys)
     assert rc == 0
+    meta = {"done": [{"faq": [{"q": "Wann?", "a": "gleich"}]}]}  # 0.21.4: per item, over the relay too
     assert lines == [{"ok": True, "type": "board", "via": "relay",
-                      "board": {"doing": "Tests fixen", "open": ["PR"], "done": ["Repro"]}}]
+                      "board": {"doing": "Tests fixen", "open": ["PR"], "done": ["Repro"],
+                                "meta": meta}}]
     assert server.calls[-1]["path"] == "/api/activity/relay/status"
     assert server.calls[-1]["body"] == {"from": "SE Refill", "doing": "Tests fixen",
-                                        "open": ["PR"], "done": ["Repro"]}
+                                        "open": ["PR"], "done": ["Repro"], "meta": meta}
     assert "faq" in err and "Wann" not in err  # warned, content never on stderr
     _cli(["status", ""], capsys)  # '' = finished: all empty removes the card
     assert server.calls[-1]["body"] == {"from": "SE Refill", "doing": "", "open": [], "done": []}
@@ -350,7 +353,7 @@ def test_local_decide_end_to_end(monkeypatch, capsys):
     _helper(monkeypatch)
     rc, lines, err = _with_join(ctl, d, lambda: _cli(
         ["decide", "--question", "Merge?", "--option", "Ja", "--option", "Nein"], capsys))
-    assert rc == 0 and err == ""
+    assert rc == 0 and err == relay.MANDATORY_HINT + "\n"   # 0.21.4: no context/faq: hint only
     assert lines == [{"ok": True, "id": "d0a1b2c3d", "number": 1, "type": "decide", "via": "relay"}]
     assert local.rpcs[0]["method"] == "vh.decide"
     assert local.rpcs[0]["payload"] == {"question": "Merge?", "options": ["Ja", "Nein"],

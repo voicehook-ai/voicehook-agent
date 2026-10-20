@@ -800,6 +800,7 @@ class _Control:
         self.stale_s = relay.stale_error_seconds()  # 0.13.0 stale_error threshold
         self.activity_sent: tuple[str, float] | None = None  # 0.13.0 activity_now
         self.activity_project: str | None = None  # 0.21.0 `activity --project`, kept for later packets
+        self.activity_meta: dict[str, dict] = {}  # 0.21.4 line -> {context, faq}
         self.leaving = False
         # 0.10.1: no-human guard. Starts at join (nobody seen yet), stops while a
         # human is in the room, restarts when the last one leaves. Spans reconnects.
@@ -1129,7 +1130,8 @@ async def _decide_rpc(ctl: _Control, req: dict) -> dict:
         ("question", req.get("question")), ("options", req.get("options") or None),
         ("recommend", req.get("recommend")), ("id", req.get("id")),
         ("delete", True if req.get("delete") else None),
-        ("context", req.get("context")), ("recent", req.get("recent"))) if v is not None}
+        ("context", req.get("context")), ("recent", req.get("recent")),
+        ("faq", req.get("faq") or None)) if v is not None}  # 0.21.4 faq: hidden, for Delta
     if req.get("sender"):  # 0.16.0: a helper session's question (Vertrag A)
         body["sender"] = str(req["sender"])
     room = await ctl.wait_room(10.0)
@@ -1354,6 +1356,11 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
             vactivity.append_line(ctl.activity_path.parent, line)
         except OSError as e:
             return {"ok": False, "error": f"activity log not writable: {e!r}"}
+        meta = vrelay_meta(req)
+        if meta:  # 0.21.4: hidden {context, faq} of this line, sent with operator.activity
+            ctl.activity_meta[line] = meta
+            while len(ctl.activity_meta) > ACTIVITY_META_KEEP:
+                ctl.activity_meta.pop(next(iter(ctl.activity_meta)))
         out = {"ok": True, "type": "activity", "line": line}
         if ctl.activity_project:
             out["project"] = ctl.activity_project
@@ -1486,6 +1493,9 @@ async def _publish_activity(ctl: _Control, lines: list[str]) -> bool:
     if room is None:
         return False
     payload: dict = {"lines": lines, "ts": time.time()}
+    meta = [ctl.activity_meta.get(ln) or {} for ln in lines]
+    if any(meta):  # 0.21.4: per line {context, faq}, aligned with lines
+        payload["meta"] = meta
     if ctl.activity_project:  # 0.21.0 `activity --project`: overrides the derived project tag
         payload["project"] = ctl.activity_project
     try:
@@ -2839,6 +2849,60 @@ async def _run_log_summary(args) -> int:
     return 0
 
 
+class _SeqAction(argparse.Action):
+    """0.21.4 `status`: keeps the order of --doing/--open/--done/--context/--faq, so
+    --context and --faq attach to the item they follow (item_seq). --doing/--context keep
+    the last value, --open/--done/--faq collect like action=append."""
+
+    def __call__(self, parser, ns, values, option_string=None):
+        ns.item_seq = list(getattr(ns, "item_seq", None) or []) + [(self.dest, values)]
+        if self.dest in ("doing", "context"):
+            setattr(ns, self.dest, values)
+        else:
+            setattr(ns, self.dest, list(getattr(ns, self.dest, None) or []) + [values])
+
+
+def status_meta(seq: list, board: dict, n_open: int, n_done: int, warn=None) -> dict:
+    """Board field meta {doing: {context, faq}, open: [..], done: [..]} from the flag order:
+    --context/--faq belong to the --doing/--open/--done before them (none yet: the doing
+    item, TEXT). open/done lists are aligned with the board's (a -f file's items first).
+    ValueError when a context is too long."""
+    entries: dict = {}
+    cur = ("doing", 0)
+    count = {"open": 0, "done": 0}
+    for dest, val in seq:
+        if dest == "doing":
+            cur = ("doing", 0)
+        elif dest in ("open", "done"):
+            cur = (dest, count[dest])
+            count[dest] += 1
+        elif dest in ("context", "faq"):
+            e = entries.setdefault(cur, {"context": None, "faq": []})
+            if dest == "context":
+                e["context"] = val
+            else:
+                e["faq"].append(val)
+    meta: dict = {}
+    offset = {"open": len(board.get("open") or []) - n_open,
+              "done": len(board.get("done") or []) - n_done}
+    for (kind, i), e in entries.items():
+        m = relay.item_meta(e["context"], e["faq"], warn=warn)
+        if not m:
+            continue
+        if kind == "doing":
+            meta["doing"] = m
+            continue
+        lst = meta.setdefault(kind, [{} for _ in board.get(kind) or []])
+        lst[offset[kind] + i] = m
+    return meta
+
+
+def _decide_faq(args) -> list[dict]:
+    return relay.parse_faq(getattr(args, "faq", None) or [],
+                           warn=lambda m: print(m, file=sys.stderr, flush=True),
+                           limit=relay.ITEM_FAQ_MAX)
+
+
 def _client_request(args) -> dict:
     if args.cmd == "say":
         text = " ".join(args.text)
@@ -2883,6 +2947,9 @@ def _client_request(args) -> dict:
             text = sys.stdin.read()
         vactivity.note_line(text)  # ValueError when empty -> exit 1 before connecting
         req = {"cmd": "activity", "text": text.strip()}
+        meta = relay.item_meta(getattr(args, "context", None), getattr(args, "faq", None),
+                               warn=lambda m: print(m, file=sys.stderr, flush=True))
+        req.update(meta)  # 0.21.4: hidden {context, faq} of this line
         project = vui.project_field(getattr(args, "project", None))
         if project is not None:
             req["project"] = project
@@ -2912,6 +2979,9 @@ def _client_request(args) -> dict:
                     req["context"] = context
                 if recent is not None:
                     req["recent"] = recent
+                faq = _decide_faq(args)
+                if faq:
+                    req["faq"] = faq
                 if len(req) == 2:
                     raise ValueError("decide --id: pass --question, --option, --recommend, --context "
                                      "or --recent (or --delete)")
@@ -2919,6 +2989,11 @@ def _client_request(args) -> dict:
         if not args.question:
             raise ValueError("decide needs --question (plus optional --option/--recommend/--context)")
         req = {"cmd": "decide", "question": args.question}
+        faq = _decide_faq(args)
+        if faq:
+            req["faq"] = faq
+        if not context or len(faq) < relay.ITEM_FAQ_MAX:  # 0.21.4 mandatory: warn, never refuse
+            print(relay.MANDATORY_HINT, file=sys.stderr, flush=True)
         if args.option:
             req["options"] = args.option
         if args.recommend is not None:
@@ -2936,8 +3011,17 @@ def _client_request(args) -> dict:
         if args.file:
             with open(args.file, encoding="utf-8") as fh:
                 file_obj = json.load(fh)
-        faq = relay.parse_faq(faq_raw, warn=lambda m: print(m, file=sys.stderr, flush=True))
+        def warn(m: str) -> None:
+            print(m, file=sys.stderr, flush=True)
+        faq = relay.parse_faq(faq_raw, warn=warn)
         board = relay.build_board(args.text, args.doing, args.open, args.done, file_obj, faq=faq)
+        meta = status_meta(getattr(args, "item_seq", None) or [], board,
+                           len(args.open or []), len(args.done or []), warn)
+        if meta:  # 0.21.4: per item {context, faq}, hidden, for the voicebot
+            board["meta"] = meta
+        missing = relay.missing_meta(board)
+        if missing:  # 0.21.4 mandatory, but never refused during a live call
+            warn(f"{relay.MANDATORY_HINT} Fehlt bei: " + "; ".join(missing[:5]))
         if project is not None:
             board["project"] = project
         return {"cmd": "board", "board": board}
@@ -3051,6 +3135,13 @@ def _run_client(args) -> int:
     return 0 if reply.get("ok") else 1
 
 
+def vrelay_meta(req: dict) -> dict:
+    """The valid hidden {context, faq} of a request ({} = none or invalid)."""
+    m = relay.clean_meta({k: req.get(k) for k in ("context", "faq")})
+    return m or {}
+
+
+ACTIVITY_META_KEEP = 50  # 0.21.4: lines with a hidden {context, faq} kept for operator.activity
 WAIT_ANSWER = -1.0  # `decide --wait` without SEC: wait for the answer (helper sessions)
 
 # 0.21.4 `listen`: the gapless `next` loop. It prints and exits on the first event that needs
@@ -3377,13 +3468,20 @@ def main(argv: list[str] | None = None) -> None:
         "your status board (operator.status, replaces the last one, never spoken)")
     p_status.add_argument("text", nargs="?", default=None,
                           help="what you are doing right now, one sentence ('' = finished, clears)")
-    p_status.add_argument("--doing", default=None, help="current task (same as TEXT)")
-    p_status.add_argument("--open", action="append", default=[], metavar="TASK", help="open task (repeatable)")
-    p_status.add_argument("--done", action="append", default=[], metavar="TASK", help="finished task (repeatable)")
-    p_status.add_argument("--faq", action="append", default=[], metavar="'FRAGE::ANTWORT'",
+    p_status.add_argument("--doing", default=None, action=_SeqAction, help="current task (same as TEXT)")
+    p_status.add_argument("--open", action=_SeqAction, default=[], metavar="TASK", help="open task (repeatable)")
+    p_status.add_argument("--done", action=_SeqAction, default=[], metavar="TASK", help="finished task (repeatable)")
+    p_status.add_argument("--faq", action=_SeqAction, default=[], metavar="'FRAGE::ANTWORT'",
                           help="0.10.0: a question the user will likely ask next + your answer, "
                           "split on the first '::' (repeatable, max 6, 200 chars each). Sent as "
-                          "board field faq[{q, a}]; refresh it on every board update.")
+                          "board field faq[{q, a}]; refresh it on every board update. 0.21.4: also "
+                          "attached to the item it follows (--doing/--open/--done, else TEXT), max "
+                          f"{relay.ITEM_FAQ_MAX} per item, in board field meta")
+    p_status.add_argument("--context", default=None, action=_SeqAction, metavar="TEXT",
+                          help=f"0.21.4: hidden background of the item it follows (--doing/--open/"
+                               f"--done, else TEXT), max {relay.ITEM_CONTEXT_MAX} chars: never shown, "
+                               "the voicebot reads it. Board field meta {doing, open[], done[]} = "
+                               "{context, faq[{q, a}]} per item")
     p_status.add_argument("-f", "--file", default=None, metavar="JSON",
                           help="board file {doing, open[], done[]}; flags add to it")
     p_status.add_argument("--project", default=None, metavar="NAME",
@@ -3504,6 +3602,12 @@ def main(argv: list[str] | None = None) -> None:
     p_act.add_argument("--project", default=None, metavar="NAME",
                        help="0.21.0: your project (1-40 chars), sent as field project on this and "
                             "every later operator.activity of the join (focus filter)")
+    p_act.add_argument("--context", default=None, metavar="TEXT",
+                       help=f"0.21.4: hidden background of this line (max {relay.ITEM_CONTEXT_MAX} "
+                            "chars), never shown, the voicebot reads it")
+    p_act.add_argument("--faq", action="append", default=[], metavar="'FRAGE::ANTWORT'",
+                       help=f"0.21.4: a likely follow-up question + prepared answer for this line "
+                            f"(repeatable, max {relay.ITEM_FAQ_MAX})")
     _add_session(p_act)
     # Decision Board: a question only the human can decide (yes/no or 2-3 options). The
     # result comes back as a `next` event type "decision". Create, change or delete.
@@ -3527,6 +3631,9 @@ def main(argv: list[str] | None = None) -> None:
                        help=f"0.21.0, always pass it: background for Delta, never shown to the human "
                             f"(max {DECIDE_CONTEXT_MAX} chars): 2-4 plain sentences, what it is about, why, "
                             "what happens on yes, what on no. With --id: change it ('' clears)")
+    p_dec.add_argument("--faq", action="append", default=[], metavar="'FRAGE::ANTWORT'",
+                       help=f"0.21.4: a likely follow-up question of the human + prepared answer "
+                            f"(repeatable, max {relay.ITEM_FAQ_MAX}), hidden, for the voicebot")
     p_dec.add_argument("--recent", default=None, metavar="TEXT",
                        help=f"0.21.0: the last turn of the asking session, one short line (max "
                             f"{DECIDE_RECENT_MAX} chars)")

@@ -230,6 +230,25 @@ the join), subagents, a leaving join, a join older than 0.21.4 (no `listening` f
   "When is it live?", "a": "in about 2 minutes"}]}`. Without `--faq` the field is
   omitted. Every `status_due` hint now also asks which 3 questions the user will
   probably ask next, to be answered in advance with `--faq`.
+- **Hidden context + FAQ per item (0.21.4), mandatory:** every decision and every status
+  entry carries `--context "<what, why, state, numbers>"` (max 2000 chars) and 3
+  `--faq "Frage::Antwort"`: the 3 questions the user will most likely ask about THAT item,
+  with prepared answers (activity lines: optional). No answer yet: the answer says so,
+  with who works on it and an ETA (`"Wann ist es live?::In Arbeit bei Scout, Ergebnis ca.
+  10 Min"`); never leave the voicebot without material. Never shown to the human; the
+  voicebot answers from it without asking you. `decide` / `status` without them print a
+  `[hint]` on stderr (sent anyway, never refused during a call); the board reminder of the
+  hook and the `status_due` hint say the same. On `status` they attach to the item they follow (`--doing` / `--open` /
+  `--done`, else TEXT):
+  `voicehook-agent status "Deploy Worker, ETA 2 min" --context "PR #99, CI grün" --faq
+  "Wann live?::in 2 Minuten" --open "Smoke-Test" --context "prüft /health und einen Call"`.
+  `activity "Tests laufen" --context "900 Tests, ~2 min" --faq "Grün?::bisher ja"`;
+  `decide --question "PR #99 mergen?" --context "..." --faq "Risiko?::gering, nur Hooks"`.
+  Wire: board field `meta` `{doing: {context, faq}, open: [{..}], done: [{..}]}` (aligned
+  with `open`/`done`, `{}` = nothing for that item; every faq also stays in the board's
+  `faq`), `operator.activity` field `meta` aligned with `lines`, decide field `faq`. Over
+  the relay (helper sessions, `vh-helper` too) the same fields go along. A server without
+  them ignores them.
 - **Board items stand alone:** every `--open`/`--done` item says WHAT concretely (thing
   and place), readable without context. Decisions waiting for the user come FIRST in
   `--open`, as a question with options and your recommendation. One item per thing, never

@@ -452,7 +452,40 @@ STATUS_DUE_ENV = "VOICEHOOK_STATUS_DUE"
 STATUS_CMD = 'voicehook-agent status --doing "<Zwischenstand, ETA>" --open "<offen>" --done "<erledigt>"'
 # 0.10.0: every status_due hint also asks for the FAQ (predicted next questions).
 FAQ_HINT = ("Welche 3 Fragen stellt der Nutzer wahrscheinlich als Nächstes? "
-            'Beantworte sie vorab per --faq "Frage::Antwort"')
+            'Beantworte sie vorab per --faq "Frage::Antwort"; 0.21.4 Pflicht je Eintrag: '
+            '--context "<was, warum, Stand>" + 3 --faq. Noch keine Antwort: sag es mit Bearbeiter '
+            'und ETA ("In Arbeit bei <Name>, Ergebnis ca. 10 Min")')
+# 0.21.4 (Oliver 20.10.2026): context + the 3 expected follow-up questions are mandatory for
+# every decision and every status entry. The CLI warns (never refuses, a call is live).
+MANDATORY_HINT = ("[hint] Pflicht: zu jeder Entscheidung und jedem Status-Eintrag --context "
+                  '"<was, warum, Stand>" und die 3 wahrscheinlichsten Rückfragen mit Antwort '
+                  '(--faq "Frage::Antwort", 3x). Ohne Antwort bisher: sag es mit Bearbeiter und '
+                  'ETA ("In Arbeit bei <Name>, Ergebnis ca. 10 Min"). Der Voicebot braucht immer '
+                  "Material. / Mandatory: context + the 3 likely follow-up questions with answers "
+                  "(unknown yet: who works on it + ETA).")
+
+
+def missing_meta(board: dict) -> list[str]:
+    """0.21.4: the board items without --context or with fewer than ITEM_FAQ_MAX --faq
+    (short labels for the hint); [] for a cleared board."""
+    meta = board.get("meta") if isinstance(board.get("meta"), dict) else {}
+    out: list[str] = []
+
+    def short(t: str) -> str:
+        t = " ".join(str(t).split())
+        return t if len(t) <= 30 else t[:29] + "…"
+
+    def bad(m: object) -> bool:
+        m = m if isinstance(m, dict) else {}
+        return not m.get("context") or len(m.get("faq") or []) < ITEM_FAQ_MAX
+    if board.get("doing") and bad(meta.get("doing")):
+        out.append(short(board["doing"]))
+    for k in ("open", "done"):
+        ms = meta.get(k) if isinstance(meta.get(k), list) else []
+        for i, item in enumerate(board.get(k) or []):
+            if bad(ms[i] if i < len(ms) else None):
+                out.append(short(item))
+    return out
 STATUS_HINTS = {
     "status_request": "Nutzer fragt nach Stand: Board jetzt aktualisieren: " + STATUS_CMD + ". " + FAQ_HINT,
     "empty": "Board leer, Delta weiss nichts: jetzt setzen: " + STATUS_CMD + ". " + FAQ_HINT,
@@ -662,10 +695,10 @@ def status_request_event(payload: dict, now: float | None = None) -> dict:
             "hint": STATUS_HINTS["status_request"]}
 
 
-def parse_faq(items: list[str] | None, warn=None) -> list[dict]:
+def parse_faq(items: list[str] | None, warn=None, limit: int = FAQ_MAX) -> list[dict]:
     """`--faq "Frage::Antwort"` values -> [{"q", "a"}]: split on the FIRST "::",
     both halves stripped, an item with an empty half (or no "::") is skipped with
-    a warning, at most FAQ_MAX pairs, q and a capped to FAQ_CHARS each."""
+    a warning, at most `limit` (FAQ_MAX) pairs, q and a capped to FAQ_CHARS each."""
     out: list[dict] = []
     for raw in items or []:
         q, sep, a = str(raw).partition("::")
@@ -674,11 +707,84 @@ def parse_faq(items: list[str] | None, warn=None) -> list[dict]:
             if warn is not None:
                 warn(f"[warn] --faq {raw!r} skipped: expected \"Frage::Antwort\" with both halves")
             continue
-        if len(out) >= FAQ_MAX:
+        if len(out) >= limit:
             if warn is not None:
-                warn(f"[warn] --faq: more than {FAQ_MAX} pairs, the rest is dropped")
+                warn(f"[warn] --faq: more than {limit} pairs, the rest is dropped")
             break
         out.append({"q": q[:FAQ_CHARS], "a": a[:FAQ_CHARS]})
+    return out
+
+
+# 0.21.4 per-item background for the voicebot, never shown to the human: every status item
+# (doing / open / done), activity line and decision may carry {context, faq[{q, a}]}.
+ITEM_CONTEXT_MAX = 2000
+ITEM_FAQ_MAX = 3
+META_KINDS = ("doing", "open", "done")
+
+
+def item_meta(context: str | None, faq_raw: list[str] | None, warn=None) -> dict:
+    """{context?, faq?} of one item from the CLI flags; ValueError when context is too
+    long (nothing is sent then); {} when neither is given."""
+    out: dict = {}
+    ctx = " ".join(str(context or "").split())
+    if ctx:
+        if len(ctx) > ITEM_CONTEXT_MAX:
+            raise ValueError(f"--context is {len(ctx)} chars, max {ITEM_CONTEXT_MAX}")
+        out["context"] = ctx
+    faq = parse_faq(faq_raw, warn=warn, limit=ITEM_FAQ_MAX)
+    if faq:
+        out["faq"] = faq
+    return out
+
+
+def clean_meta(obj: object) -> dict | None:
+    """One item's {context, faq} from outside (relay request): None = invalid."""
+    if not isinstance(obj, dict):
+        return None
+    out: dict = {}
+    ctx = obj.get("context")
+    if ctx is not None:
+        if not isinstance(ctx, str) or len(ctx) > ITEM_CONTEXT_MAX:
+            return None
+        if ctx.strip():
+            out["context"] = ctx
+    faq = obj.get("faq")
+    if faq is not None:
+        if not isinstance(faq, list) or len(faq) > ITEM_FAQ_MAX:
+            return None
+        pairs = []
+        for f in faq:
+            if not isinstance(f, dict) or not isinstance(f.get("q"), str) \
+                    or not isinstance(f.get("a"), str) or len(f["q"]) > FAQ_CHARS \
+                    or len(f["a"]) > FAQ_CHARS:
+                return None
+            pairs.append({"q": f["q"], "a": f["a"]})
+        if pairs:
+            out["faq"] = pairs
+    return out
+
+
+def clean_board_meta(meta: object, board: dict) -> dict | None:
+    """Board `meta` {doing: {..}, open: [{..}], done: [{..}]} (lists aligned with the board's
+    open / done): None = invalid."""
+    if not isinstance(meta, dict) or set(meta) - set(META_KINDS):
+        return None
+    out: dict = {}
+    if meta.get("doing") is not None:
+        m = clean_meta(meta["doing"])
+        if m is None:
+            return None
+        out["doing"] = m
+    for k in ("open", "done"):
+        v = meta.get(k)
+        if v is None:
+            continue
+        if not isinstance(v, list) or len(v) > len(board.get(k) or []):
+            return None
+        ms = [clean_meta(x) for x in v]
+        if any(m is None for m in ms):
+            return None
+        out[k] = ms
     return out
 
 

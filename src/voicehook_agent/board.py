@@ -399,7 +399,9 @@ def reminder_text(name: str, age_s: float | None, local: bool = False) -> str:
         en = f"voicehook call: your status board is {mins} min old."
     return (f"{de} Jetzt `{set_cmd}` setzen (oder leeren mit `{clear_cmd}`, wenn du nichts "
             f"tust). / {en} Set it now with your current step + ETA (or clear it when idle). "
-            "Keine Pfade, Secrets oder Kundendaten.")
+            "Keine Pfade, Secrets oder Kundendaten. Pflicht je Eintrag und Entscheidung: "
+            '--context "<was, warum, Stand>" + 3 --faq "Frage::Antwort" (noch offen: '
+            '"In Arbeit bei <Name>, ca. 10 Min"). / Always: context + 3 follow-up Q&A.')
 
 
 def output(event_name: str, text: str) -> dict:
