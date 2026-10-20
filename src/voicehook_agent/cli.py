@@ -223,6 +223,7 @@ from . import cards as vcards
 from . import datachan as vdata
 from . import helperaccess as vhelp
 from . import localsessions as vlocal
+from . import midturn as vmidturn
 from . import multisession as vmulti
 from . import plaintext as vplain
 from . import relayops as vrelayops
@@ -469,7 +470,7 @@ _ONBOARDING_TEXT = {
            "Entscheidungen und Board-Einträge als ganzer Satz mit Produkt oder Bereich, was "
            "passiert und wozu, keine nackten PR-Nummern, Ziffernketten oder unerklärten "
            "Abkürzungen, Entscheidungen mit ? und --context; schlecht: \"{bad}\", gut: "
-           "\"{good}\". (4) {wait_de}"),
+           "\"{good}\". (4) {wait_de} (5) {midturn_de}"),
     "en": ("Multi-agent: you can bring more agents into this call. Ask the human whether to set "
            "it up. (1) Invite: every other Claude Code session on this machine reports as a "
            "helper in the call after running `{i0}` once (Codex: `{i1}`); to speak with its own "
@@ -480,7 +481,7 @@ _ONBOARDING_TEXT = {
            "shows you every board and open decision. (3) Plain-language rule for everyone: "
            "decisions and board items as a whole sentence naming the product or area, what "
            "happens and why, no bare PR numbers, digit chains or unexplained abbreviations, "
-           "decisions with ? and --context; bad: \"{bad}\", good: \"{good}\". (4) {wait_en}"),
+           "decisions with ? and --context; bad: \"{bad}\", good: \"{good}\". (4) {wait_en} (5) {midturn_en}"),
 }
 
 
@@ -505,13 +506,15 @@ def onboarding_hint(env=None) -> dict | None:
            "bad": vplain.BAD_EXAMPLE, "good": vplain.GOOD_EXAMPLE,
            "wait_de": vwait.RULE + " Sichtbar wartend: `voicehook-agent status --waiting \"...\" "
                       "--question \"...?\" --context \"...\"`.",
+           "midturn_de": vmidturn.RULE + " Neue Äußerungen kommen per Hook mitten in deinen Turn.",
+           "midturn_en": vmidturn.RULE_EN + " New utterances reach you mid-turn through the hook.",
            "wait_en": vwait.RULE_EN + " Shown as waiting: `voicehook-agent status --waiting \"...\" "
                       "--question \"...?\" --context \"...\"`."}
     return {"role": "system", "topic": "_meta", "_meta": "onboarding", "lang": lang,
             "text": _ONBOARDING_TEXT[lang].format(**fmt),
             "commands": {"invite": list(ONBOARDING_INVITE), "share": list(ONBOARDING_SHARE)},
             "rule": {"text": vplain.RULE, "bad": vplain.BAD_EXAMPLE, "good": vplain.GOOD_EXAMPLE,
-                     "waiting": vwait.RULE}}
+                     "waiting": vwait.RULE, "midturn": vmidturn.RULE}}
 
 
 def _emit_onboarding_hint(json_mode: bool, env=None) -> dict | None:
@@ -946,6 +949,7 @@ class _Control:
         # 0.21.4 listen guard: waiting `next` requests, monotonic end of the last one
         self.listening = 0
         self.listen_end: float | None = None
+        self.last_say_at: float | None = None  # 0.21.7 (midturn.py): wall clock of the last say
 
     def attach(self, room: rtc.Room) -> None:
         self.room = room
@@ -1376,6 +1380,7 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         res = await _publish_say(room, text, extra, ctl.say_tracker, ctl.echo)
         if res.get("ok"):
             ctl.say_status.sent(res["seq"], text)
+            ctl.last_say_at = time.time()  # 0.21.7 midturn: answered since the user spoke?
         return {**res, **nudge} if res.get("ok") else res
     if cmd == "visual":
         ctl.watchdog.touch()
@@ -1521,6 +1526,15 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         if seq is not None:
             out["seq"] = seq  # 0.21.5: the consumer sends {"cmd":"ack","seq":N} once it has it
         return out
+    if cmd == "take_wake":  # 0.21.7 (midturn.py): the hook shows them inside the running turn
+        types = [t for t in (req.get("types") or vmidturn.TYPES) if t in vmidturn.TYPES]
+        try:
+            n = max(1, min(10, int(req.get("max") or 5)))
+        except (TypeError, ValueError):
+            n = 5
+        evs = ctl.events.take(types, n)
+        return {"ok": True, "type": "take_wake", "events": evs, "now": time.time(),
+                "last_say_at": ctl.last_say_at, "pending": len(ctl.events)}
     if cmd == "ack":  # 0.21.5: the consumer printed the event, never hand it out again
         acked = ctl.events.ack(req.get("seq"))
         return {"ok": True, "type": "ack", "seq": req.get("seq"), "acked": acked,
@@ -3859,15 +3873,18 @@ def main(argv: list[str] | None = None) -> None:
     p_next.add_argument("--timeout", type=float, default=60.0, metavar="SEC",
                         help="give up after SEC seconds and print {\"type\":\"timeout\"} (default 60; 0 = only return what is queued).")
     _add_session(p_next)
-    p_listen = sub.add_parser(
-        "listen", help="0.21.4: the gapless listen loop: repeats `next` and prints ONE JSON line "
+    listen_help = (
+        "0.21.4: the gapless listen loop: repeats `next` and prints ONE JSON line "
         "on the first event that needs you (user, decision, helper_decision, voicebot_left, "
         "missed, status_request, revise, call_end, data), then exits 0 (3 = join ended). Run it "
         "with the harness's background mode (Claude Code: run_in_background), never detached "
         "with & or nohup: the exit is what wakes you. Start it again after handling the event. "
         "0.21.5: it reads the join's event spool with a cursor (an event is acked after the "
         "print, so a killed listen loses none); you stay present in the call while you work "
-        "without it, the join holds the presence itself.")
+        "without it, the join holds the presence itself. 0.21.7: " + vmidturn.RULE + " New user "
+        "turns and answers also reach you mid-turn (PostToolUse hook, VOICEHOOK_MIDTURN_EVENTS=0 "
+        "off).")
+    p_listen = sub.add_parser("listen", help=listen_help, description=listen_help)
     p_listen.add_argument("--timeout", type=float, default=0.0, metavar="SEC",
                           help="give up after SEC seconds with {\"type\":\"timeout\"} "
                                "(default 0 = wait until an event)")

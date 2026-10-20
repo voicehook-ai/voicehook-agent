@@ -127,6 +127,26 @@ first. On leave the spool is deleted; nothing of the call stays on disk, and not
 spool holds event content. The orphan guards (`--idle-timeout`, owner pid) still count only
 your own say/next.
 
+### Call events inside the running turn (0.21.7)
+
+**Im Call: jede Äußerung zuerst beantworten (say), Arbeit über 2 Tool-Calls an
+Hintergrund-Agenten geben, Turns kurz halten.** Live: the operator was deep in a long tool
+chain and saw Oliver's new questions only at the end of its turn, he waited for minutes.
+
+The PostToolUse hook (`voicehook-agent hook install`) of the session that owns the join asks
+its join after every tool call (`{"cmd":"take_wake"}`, 1 s) for new `user`, `decision` and
+`helper_decision` events and injects them as `additionalContext` into the running turn:
+`Oliver hat im Call gesagt (vor 12 s): "...". Antworte ZUERST per voicehook-agent say ...,
+delegiere längere Arbeit ...`. A user turn older than 20 s with no `say` since it was spoken
+adds `Oliver wartet seit N s`.
+
+Each event is shown mid-turn exactly once. One still unread in the spool is consumed there
+(cursor, acked), so `listen` / `next` never bring it again. One that a background `listen`
+already took (it takes events within milliseconds, but its exit may only wake you after the
+turn) is shown anyway, marked `kam auch über listen`. PostToolUse, not PreToolUse: its
+additionalContext reliably reaches the running turn. Never for subagents or other sessions.
+`VOICEHOOK_MIDTURN_EVENTS=0` turns it off.
+
 ### Listen guard: never end a turn deaf (0.21.4)
 
 In a call, your turn may only end while something waits for the user: a `next` that

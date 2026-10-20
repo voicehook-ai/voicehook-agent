@@ -3,6 +3,21 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.21.7 (2026-10-20)
+
+Live: the operator was deep in a long tool chain and saw Oliver's new questions only at the
+end of its turn; Oliver waited for minutes.
+
+- **Call events mid-turn:** the PostToolUse hook of the joining session asks its join for new
+  `user` / `decision` / `helper_decision` events (`take_wake`) and injects them as
+  additionalContext: "Oliver hat im Call gesagt (vor N s): ... Antworte ZUERST per
+  voicehook-agent say, delegiere längere Arbeit"; unanswered for more than 20 s: "Oliver wartet
+  seit N s". Shown once; still unread = consumed from the spool (`listen` never brings it
+  again), already taken by `listen` = shown anyway, marked. Never for subagents or other
+  sessions. `VOICEHOOK_MIDTURN_EVENTS=0`.
+- Rule in help (`listen`), MCP instructions and join onboarding: "Im Call: jede Äußerung zuerst
+  beantworten (say), Arbeit über 2 Tool-Calls an Hintergrund-Agenten geben, Turns kurz halten."
+
 ## 0.21.6 (2026-10-20)
 
 Live: a helper waited for Oliver's okay with only `status --doing "... wartet auf dein Okay zu
