@@ -5,15 +5,21 @@ helper-import) and (2) show and share their boards, activity and open decisions.
 English by locale, never spoken, never a credential, once per join."""
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
 from test_join_hint import HUMAN, _run_join  # noqa: F401
-from test_session import _FakeRoom, fake_env  # noqa: F401  (fixture)
+from test_session import URL, _call, _FakeRoom, fake_env  # noqa: F401  (fixture)
 
-from voicehook_agent import cli
+from voicehook_agent import cli, midturn, spool
 
 pytestmark = pytest.mark.usefixtures("fake_env")
+
+
+@pytest.fixture(autouse=True)
+def _onboarding_on(monkeypatch):
+    monkeypatch.delenv(cli.ONBOARDING_ENV, raising=False)  # conftest turns it off for the rest
 
 
 def _onboarding(out: str) -> list[dict]:
@@ -72,3 +78,51 @@ def test_off_switch_and_lang():
     assert cli.onboarding_lang({"LANG": "de_AT.UTF-8"}) == "de"
     assert cli.onboarding_lang({"LC_ALL": "C", "LANG": "de_DE"}) == "en"
     assert cli.onboarding_lang({}) == "en"
+
+
+# ----- 0.21.8: also the first next/listen event (an agent may never read the join's stdout) --
+def test_json_quiet_join_still_prints_onboarding(capsys):
+    """Bug report: `join --json --keep-alive --quiet` with stdout into a file. --quiet only
+    suppresses the share hint, never the onboarding."""
+    assert _run_join(True, quiet=True) == 0
+    assert len(_onboarding(capsys.readouterr().out)) == 1
+
+
+def _first_events(username=None):
+    async def run():
+        join = asyncio.create_task(cli._join(URL, None, "Claude", True, None, model="opus-5.5",
+                                             idle_timeout=0, username=username))
+        await _call({"cmd": "say", "text": "Hallo"})        # the first say arms + queues it
+        _FakeRoom.instances[0].emit("transcript", {"role": "user", "text": "Hallo zurück"})
+        await asyncio.sleep(0.05)
+        out = [await _call({"cmd": "next", "timeout": 0}) for _ in range(3)]
+        await _call({"cmd": "leave"})
+        await asyncio.wait_for(join, 10)
+        return out
+    return asyncio.run(run())
+
+
+def test_onboarding_is_the_first_next_event_once(monkeypatch):
+    monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")
+    evs = _first_events(username="Oliver")
+    assert [e["type"] for e in evs] == ["onboarding", "user", "timeout"]
+    ob = evs[0]
+    assert ob["text"] == ("Biete Oliver an, weitere Sessions einzuladen (helper-credential | "
+                          "helper-import oder eigener Join) und deren Boards zu teilen.")
+    assert "helper-import" in " ".join(ob["commands"]["invite"]) and "Multi-Agent" in ob["details"]
+
+
+def test_onboarding_event_wakes_listen_and_midturn(monkeypatch):
+    monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")
+    assert "onboarding" in spool.WAKE_TYPES and "onboarding" in cli.LISTEN_WAKE
+    assert "onboarding" in midturn.TYPES
+    ev = cli.onboarding_event("Oliver")
+    t = midturn.text_for({"now": ev["ts"], "events": [ev]})
+    assert "Biete Oliver an, weitere Sessions einzuladen" in t and "helper-credential" in t
+
+
+def test_onboarding_event_off_switch(monkeypatch):
+    monkeypatch.setenv(cli.ONBOARDING_ENV, "0")
+    assert cli.onboarding_event("Oliver") is None
+    assert cli.onboarding_event(None, env={"LANG": "de_DE"})["text"].startswith("Biete dem Menschen an")
+    assert cli.onboarding_event(None, env={"LANG": "en_US"})["text"].startswith("Offer the human to invite")

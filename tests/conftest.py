@@ -20,3 +20,6 @@ def _private_state_dir(tmp_path, monkeypatch):
     monkeypatch.delenv("CLAUDE_PID", raising=False)
     # 0.21.4 join: no `ps` scan of the test runner's machine (tests/test_local_sessions.py)
     monkeypatch.setenv("VOICEHOOK_SESSIONS_HINT", "0")
+    # 0.21.8: the onboarding is also the first next/listen event of a join; tests about the
+    # event flow start without it (tests/test_onboarding.py turns it on)
+    monkeypatch.setenv("VOICEHOOK_ONBOARDING_HINT", "0")

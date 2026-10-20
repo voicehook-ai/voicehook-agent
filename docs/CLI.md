@@ -615,7 +615,16 @@ this machine as helpers, `voicehook-agent join <invite-url> --name <Name> --mode
 `voicehook-agent status --doing ... --open ...`, `voicehook-agent decide --question ...
 --context ...` (over the relay), the activity log comes through the hook, `voicehook-agent
 board` lists every board and open decision. Placeholders only, never a credential or the
-invite link. Never spoken. `VOICEHOOK_ONBOARDING_HINT=0` turns it off.
+invite link. Never spoken. `--quiet` does not suppress it (only the share hint).
+`VOICEHOOK_ONBOARDING_HINT=0` turns it off.
+
+0.21.8: an agent that never reads the join's stdout (`--json` into a file) missed it, so the
+onboarding is also the FIRST event of `next` / `listen` (queued with the first `say`/`next`
+that arms the spool): `{"type":"onboarding","text":"Biete Oliver an, weitere Sessions
+einzuladen (helper-credential | helper-import oder eigener Join) und deren Boards zu
+teilen.","details":"...","commands":{...},"rule":{...}}` (`Oliver` = `join --username`, else
+"dem Menschen"; English by locale). It is wake-worthy (`listen` exits on it) and the mid-turn
+hook (0.21.7) shows it inside a running turn. Once per join.
 
 **Agents on MCP or the bridge (no CLI):** they cannot see the machine's sessions. Say that it
 works in principle, but needs the voicehook-agent CLI on this machine, in one line:

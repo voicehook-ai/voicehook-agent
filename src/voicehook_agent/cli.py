@@ -517,6 +517,28 @@ def onboarding_hint(env=None) -> dict | None:
                      "waiting": vwait.RULE, "midturn": vmidturn.RULE}}
 
 
+ONBOARDING_EVENT_TEXT = {
+    "de": ("Biete {who} an, weitere Sessions einzuladen (helper-credential | helper-import oder "
+           "eigener Join) und deren Boards zu teilen."),
+    "en": ("Offer {who} to invite more sessions (helper-credential | helper-import or their own "
+           "join) and to share their boards."),
+}
+
+
+def onboarding_event(username: str | None = None, env=None) -> dict | None:
+    """0.21.8: the onboarding as the first `next`/`listen` event of the join (type onboarding,
+    wake-worthy; midturn.py shows it inside a running turn), so an agent that never reads the
+    join's stdout gets it too. None: VOICEHOOK_ONBOARDING_HINT=0."""
+    hint = onboarding_hint(env)
+    if hint is None:
+        return None
+    lang = hint["lang"]
+    who = (username or "").strip()[:40] or ("dem Menschen" if lang == "de" else "the human")
+    return {"type": "onboarding", "text": ONBOARDING_EVENT_TEXT[lang].format(who=who),
+            "details": hint["text"], "commands": hint["commands"], "rule": hint["rule"],
+            "lang": hint["lang"], "ts": time.time()}
+
+
 def _emit_onboarding_hint(json_mode: bool, env=None) -> dict | None:
     """0.21.5: --json: one `_meta` event `onboarding` on stdout; plain: one line on stderr."""
     got = onboarding_hint(env)
@@ -950,6 +972,7 @@ class _Control:
         self.listening = 0
         self.listen_end: float | None = None
         self.last_say_at: float | None = None  # 0.21.7 (midturn.py): wall clock of the last say
+        self.onboarding: dict | None = None  # 0.21.8: queued once, with the first say/next
 
     def attach(self, room: rtc.Room) -> None:
         self.room = room
@@ -1353,6 +1376,12 @@ async def _decide_rpc(ctl: _Control, req: dict) -> dict:
 async def _control_handler(ctl: _Control, req: dict) -> dict:
     """One request from `voicehook-agent say|next|leave|status|activity`."""
     cmd = req.get("cmd")
+    if ctl.onboarding is not None and cmd in ("say", "next"):
+        # 0.21.8: the first say/next arms the spool; the onboarding is its first event, so an
+        # agent that never reads the join's stdout (--json into a file) still gets it
+        ev, ctl.onboarding = ctl.onboarding, None
+        ctl.events.arm()
+        ctl.events.put_nowait(ev)
     if cmd == "say":
         ctl.watchdog.touch()
         ctl.events.arm()  # from now on user turns are queued for `next`
@@ -2833,6 +2862,7 @@ async def _join(
 
     # Local control socket for `say` / `next` / `leave` / `status` + idle guard.
     ctl = _Control(slug, ident, say_tracker, echo, idle_timeout, no_human_timeout)
+    ctl.onboarding = onboarding_event(username)  # 0.21.8: also as the first next/listen event
     if status_due is not None:
         ctl.clock.due_s = status_due
     if activity_due is not None:

@@ -30,7 +30,7 @@ import os
 import time
 
 ENV_OFF = "VOICEHOOK_MIDTURN_EVENTS"
-TYPES = ("user", "decision", "helper_decision")
+TYPES = ("user", "decision", "helper_decision", "onboarding")  # 0.21.8: onboarding
 WAIT_S = 20.0
 TIMEOUT_S = 1.0
 TEXT_MAX = 400
@@ -57,6 +57,10 @@ def _line(ev: dict, now: float, last_say: float | None) -> str:
     age = _age(ev.get("ts"), now)
     when = f" (vor {age} s)" if age is not None else ""
     typ = ev.get("type")
+    if typ == "onboarding":  # 0.21.8: offer the human to bring in the other sessions
+        cmds = ev.get("commands") if isinstance(ev.get("commands"), dict) else {}
+        inv = "; ".join(f"`{c}`" for c in (cmds.get("invite") or [])[:4])
+        return f"{str(ev.get('text') or '').strip()[:300]}{' Befehle: ' + inv + '.' if inv else ''}"
     if typ == "user":
         text = str(ev.get("text") or "").strip()[:TEXT_MAX]
         line = f"{who} hat im Call gesagt{when}: \"{text}\"."
@@ -85,7 +89,7 @@ def text_for(reply: dict) -> str | None:
     now = float(reply.get("now") or time.time())
     lines = [_line(e, now, reply.get("last_say_at")) + (" (kam auch über listen)" if e.get("delivered")
                                                          else "") for e in evs]
-    has_user = any(e.get("type") == "user" for e in evs)
+    has_user = any(e.get("type") in ("user", "onboarding") for e in evs)
     tail = ("Antworte ZUERST per `voicehook-agent say \"...\"`, delegiere längere Arbeit an einen "
             "Hintergrund-Agenten, dann weiter." if has_user else
             "Bestätige kurz per `voicehook-agent say`, dann handle danach.")
