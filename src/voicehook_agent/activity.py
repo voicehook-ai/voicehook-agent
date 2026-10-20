@@ -99,13 +99,15 @@ HOOK_COMMAND_NOTIFY = "voicehook-agent-hook notification || true"
 HOOK_COMMAND_PERMISSION = "voicehook-agent-hook permission-request || true"
 # 0.21.0 (board.py): answers to the session's questions right at (re)start
 HOOK_COMMAND_START = "voicehook-agent-hook session-start || true"
+# 0.21.4 (board.py): the session ends (window closed, /exit): its board leaves the call
+HOOK_COMMAND_END = "voicehook-agent-hook session-end || true"
 HOOK_COMMANDS = {"PreToolUse": HOOK_COMMAND_PRE, "PostToolUse": HOOK_COMMAND,
                  "PostToolUseFailure": HOOK_COMMAND_FAIL,
                  "UserPromptSubmit": HOOK_COMMAND_PROMPT, "Stop": HOOK_COMMAND_STOP,
                  "Notification": HOOK_COMMAND_NOTIFY,
                  "PermissionRequest": HOOK_COMMAND_PERMISSION,
-                 "SessionStart": HOOK_COMMAND_START}
-NO_MATCHER_EVENTS = ("UserPromptSubmit", "Stop", "SessionStart")  # Claude Code ignores matchers there
+                 "SessionStart": HOOK_COMMAND_START, "SessionEnd": HOOK_COMMAND_END}
+NO_MATCHER_EVENTS = ("UserPromptSubmit", "Stop", "SessionStart", "SessionEnd")  # Claude Code ignores matchers there
 # 0.21.3 (asks.py): the session's own questions answered from the call's Decision Board.
 # ask-wait: a SECOND PreToolUse hook only for AskUserQuestion, long timeout, answers the tool
 # (updatedInput.answers). stop-wait: a SECOND Stop hook, async + asyncRewake: its exit 2
@@ -139,7 +141,9 @@ _OUR_COMMANDS_BY_EVENT = {"PreToolUse": (HOOK_COMMAND_PRE, "voicehook-agent-hook
                                                 "voicehook-agent-hook permission-request",
                                                 "voicehook-agent hook permission-request"),
                           "SessionStart": (HOOK_COMMAND_START, "voicehook-agent-hook session-start",
-                                           "voicehook-agent hook session-start")}
+                                           "voicehook-agent hook session-start"),
+                          "SessionEnd": (HOOK_COMMAND_END, "voicehook-agent-hook session-end",
+                                         "voicehook-agent hook session-end")}
 HOOK_TIMEOUT = 5
 RELAY_HOOK_TIMEOUT = 3     # 0.15.0 relay events: settings timeout + internal alarm (s)
 
@@ -1151,6 +1155,17 @@ def main(argv: list[str] | None = None) -> int:
     if cmd in ("ask-wait", "stop-wait"):  # 0.21.3 (asks.py): answers from the Decision Board
         from . import asks
         return asks.main(cmd)
+    if cmd == "session-end":  # 0.21.4 (board.py): the session's board leaves the call
+        with _deadline(RELAY_HOOK_TIMEOUT):
+            try:
+                raw = sys.stdin.read()
+            except Exception:  # noqa: BLE001
+                raw = ""
+            board_hook(raw)
+        return 0
+    if cmd == "board-watch":  # 0.21.4: detached state watcher (board.py)
+        from . import board
+        return board.watch_main()
     if cmd in ("pre-tool-use", "post-tool-use", "post-tool-use-failure", "user-prompt-submit",
                "stop", "notification", "permission-request", "session-start"):
         out = guard = None
@@ -1255,7 +1270,7 @@ def main(argv: list[str] | None = None) -> int:
         print(msg, file=sys.stderr if rc else sys.stdout)
         return rc
     print("usage: voicehook-agent hook {pre-tool-use|post-tool-use|post-tool-use-failure|"
-          "user-prompt-submit|stop|notification|permission-request|session-start|doctor|"
+          "user-prompt-submit|stop|notification|permission-request|session-start|session-end|doctor|"
           "print [--agent claude|codex]|install [--agent claude|codex] [--settings PATH] "
           "[--codex-home DIR]|codex <event>|codex-notify <json>|mcp [--agent NAME]}",
           file=sys.stderr)

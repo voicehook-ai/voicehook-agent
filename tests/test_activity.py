@@ -246,6 +246,10 @@ def test_snippet_shape():
         # 0.21.0 answers to the session's questions at (re)start (board.py)
         "SessionStart": [{"hooks": [
             {"type": "command", "command": "voicehook-agent-hook session-start || true",
+             "timeout": 3}]}],
+        # 0.21.4 the session ends: its board leaves the call (board.py)
+        "SessionEnd": [{"hooks": [
+            {"type": "command", "command": "voicehook-agent-hook session-end || true",
              "timeout": 3}]}]}}
 
 

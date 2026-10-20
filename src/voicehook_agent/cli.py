@@ -814,6 +814,9 @@ class _Control:
         self.relay_senders: dict[str, str] = {}
         # 0.18.1: local relay: decision id -> question, for the helper_decision copy
         self.relay_questions: dict[str, str] = {}
+        # 0.21.4: local helpers: sender -> {"board": last board, "state": last session state},
+        # so a state update keeps the board and a board update keeps the state (like the server)
+        self.relay_helpers: dict[str, dict] = {}
         # 0.17.0 helper access: the server's helper hub for this join (WebRTC), its
         # credential (relay.json) and one HTTP client for the pump; spans reconnects
         self.helper_pump: vhelp.Pump | None = None
@@ -1586,7 +1589,16 @@ async def _serve_relay_request(ctl: _Control, dir_: Path, obj: dict) -> None:
         if room is None:
             res = {"ok": False, "status": 503, "error": "not connected to the room (yet)"}
         else:
-            data = json.dumps({**body, "sub": sender}, ensure_ascii=False).encode("utf-8")
+            helper = ctl.relay_helpers.setdefault(sender, {})
+            if op == "state":  # 0.21.4: the helper's session state from its hooks
+                helper["state"] = body["state"]
+                payload = {**(helper.get("board") or {"doing": "", "open": [], "done": []})}
+            else:
+                helper["board"] = dict(body)
+                payload = dict(body)
+            if helper.get("state"):
+                payload["state"] = helper["state"]
+            data = json.dumps({**payload, "sub": sender}, ensure_ascii=False).encode("utf-8")
             await room.local_participant.publish_data(data, reliable=True, topic="operator.status")
             res = {"ok": True}
     vrelayops.append_jsonl(vrelayops.answer_path(dir_, frm), {"type": "result", "rid": rid, **res})
