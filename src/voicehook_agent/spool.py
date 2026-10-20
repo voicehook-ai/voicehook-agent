@@ -40,6 +40,7 @@ LEASE_S = 15.0        # an un-acked event goes out again after this (consumer di
 RESUME_S = 600.0      # a spool left by a join restart is picked up when younger than this
 COMPACT_AT = 400      # acked events kept in the file before it is rewritten
 MAXLEN = 200          # unread events kept (oldest dropped, counted in `dropped`)
+RECENT_KEEP = 20      # 0.21.7: acked events kept in memory after a compaction (midturn.take)
 # never kept across a join restart: only for the waiting `next` of the leaving process
 EPHEMERAL = frozenset({"restarting"})
 # 0.21.5: events that need the agent (the Stop hook warns on them, `listen` wakes on them)
@@ -98,6 +99,7 @@ class SpoolQueue:
         self._cond = asyncio.Condition()
         self._disk_ok = self.dir is not None
         self.last_consumed: float | None = None  # clock of the last ack
+        self._shown: dict[int, float] = {}  # 0.21.7: seq -> clock, shown to the agent mid-turn
 
     # ------------------------------------------------------------------ files
     @property
@@ -137,10 +139,12 @@ class SpoolQueue:
             self._disk_error(e)
 
     def _compact(self) -> None:
-        """Rewrite the file with the unread events only (acked ones are history)."""
+        """Rewrite the file with the unread events only (acked ones are history; the newest
+        acked ones stay in memory for midturn.take)."""
         keep = [it for it in self._items if it["seq"] not in self._acked]
-        self._items = keep
-        self._acked = {s for s in self._acked if s > self._cursor}
+        recent = [it for it in self._items if it["seq"] in self._acked][-min(RECENT_KEEP, COMPACT_AT // 2):]
+        self._items = sorted(keep + recent, key=lambda it: it["seq"])
+        self._acked = {s for s in self._acked if s > self._cursor} | {it["seq"] for it in recent}
         if not self._disk_ok:
             return
         try:
@@ -375,6 +379,34 @@ class SpoolQueue:
             asyncio.get_running_loop().create_task(self._notify())
         except RuntimeError:
             pass
+
+    def take(self, types, max_n: int = 5, recent_s: float = 600.0) -> list[dict]:
+        """0.21.7 (midturn.py): events of `types` the agent has not been shown mid-turn yet,
+        oldest first, younger than `recent_s` (by `ts`). Each is shown once; one still unread
+        is consumed (acked), so `listen`/`next` never deliver it again. One a consumer
+        (`listen`) already took is shown too, marked `delivered: true`: the background listen
+        may not have woken the agent yet in the middle of its turn."""
+        wall = time.time()
+        out: list[dict] = []
+        for it in self._items:
+            seq, ev = it["seq"], it["event"]
+            if len(out) >= max(0, max_n):
+                break
+            if ev.get("type") not in types or seq in self._shown:
+                continue
+            try:
+                if wall - float(ev.get("ts") or it.get("ts") or wall) > recent_s:
+                    continue
+            except (TypeError, ValueError):
+                pass
+            delivered = seq in self._acked or seq <= self._cursor
+            self._shown[seq] = self.clock()
+            if not delivered:
+                self.ack(seq)
+            out.append({**ev, "delivered": delivered})
+        while len(self._shown) > 2 * self.maxlen:
+            self._shown.pop(next(iter(self._shown)))
+        return out
 
     async def get(self, timeout: float | None) -> dict | None:
         """EventQueue.get: the oldest event, consumed at once (lease + ack)."""

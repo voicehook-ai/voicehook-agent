@@ -40,7 +40,9 @@ INSTRUCTIONS = (
     "minutes while you work. A question only the human can decide goes to `decide` "
     "(yes/no or 2-3 options), never only into the chat; collect the answer with `next` "
     "(or decide wait_s). When you wait for the human, ALWAYS decide, never only a status "
-    "(a waiting text in status/activity is refused). `activity` adds one short line (3-8 words) to the live log; no "
+    "(a waiting text in status/activity is refused). In a call: answer every utterance first "
+    "(say), hand work longer than 2 tool calls to background agents, keep turns short. "
+    "`activity` adds one short line (3-8 words) to the live log; no "
     "paths, secrets or personal data anywhere.")
 
 _STR_LIST = {"type": "array", "items": {"type": "string"}, "maxItems": 10}

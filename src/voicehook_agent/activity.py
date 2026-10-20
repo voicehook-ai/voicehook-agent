@@ -1220,6 +1220,10 @@ def main(argv: list[str] | None = None) -> int:
         if guard:
             from . import listenguard
             out = listenguard.merge(out, guard)
+        if cmd == "post-tool-use":  # 0.21.7: new call events into the running turn (midturn.py)
+            from . import midturn
+            with _deadline(RELAY_HOOK_TIMEOUT):
+                out = midturn.merge(out, midturn.handle(raw))
         if out and cmd in PRINT_COMMANDS:
             print(json.dumps(out, ensure_ascii=False), flush=True)
         # always 0. stdout: only 0.21.0 additionalContext (Post/Prompt/SessionStart) or, on

@@ -87,7 +87,9 @@ the join itself holds your presence and spools every event durably while you wor
 ([event spool](docs/CLI.md#event-spool-the-join-listens-for-you-0215)): `listen` picks them
 up with a cursor, nothing is lost, and the Stop hook warns on unread events. When you wait for
 the human, ALWAYS `decide`, never only a status (0.21.6: `status --waiting ... --question ...`
-shows "wartet auf dich" together with the decision).
+shows "wartet auf dich" together with the decision). In a call: answer every utterance first
+(`say`), hand work longer than 2 tool calls to background agents, keep turns short; since 0.21.7
+new utterances reach you mid-turn through the PostToolUse hook.
 
 Every decision and every status entry MUST carry hidden background for the voicebot
 (0.21.4): `--context "..."` plus the 3 most likely follow-up questions with prepared
