@@ -49,6 +49,7 @@ import re
 import shlex
 import shutil
 import time
+from pathlib import Path
 
 from . import activity as vact
 from . import multisession as vmulti
@@ -469,8 +470,10 @@ def next_state(event: dict, me: dict) -> str | None:
 
 def _tool_state(event: dict, me: dict) -> str:
     kind = tool_kind(event)
-    if kind == KIND_WAIT or (kind == KIND_META and me.get("state") == STATE_WAIT):
+    if kind == KIND_WAIT:
         return STATE_WAIT
+    if kind == KIND_META and me.get("state") in (STATE_WAIT, STATE_IDLE):
+        return str(me["state"])  # 0.21.4: a board update alone never makes it `arbeitet`
     return STATE_WORK
 
 
@@ -483,7 +486,8 @@ def _known_name(skey: str) -> bool:
         return False
 
 
-def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None) -> dict | None:
+def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None,
+           watch=None) -> dict | None:
     """One hook event of a helper session: board age, session state, answers to its questions.
     Returns the hook's stdout object or None:
     * PostToolUse / UserPromptSubmit / SessionStart: {hookSpecificOutput: {additionalContext}}
@@ -524,11 +528,21 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
         need = name_ev in NAME_EVENTS or got is not None or asked is not None or is_ask \
             or not _known_name(skey)
         label = (_agent_label(event, skey) if agent else _label(event, skey)) if need else ""
+        # 0.21.4: a Stop with an open question (own decide, or the reply asks) is `wartet`
+        waits = name_ev == "Stop" and _stop_waits(event, skey, t)
+        spid = 0 if _known_pid(skey) else session_pid()
 
         def step(st: dict):
             me = _me(st, skey, room, t)
             if label:
                 me["name"] = label
+            if spid:
+                me["pid"] = spid
+            me.pop("gone", None)
+            if name_ev == "PreToolUse":   # 0.21.4: a tool runs (a long build is no idle)
+                me["inflight"] = {"tool": str(event.get("tool_name") or ""), "at": t}
+            elif name_ev in ("PostToolUse", "PostToolUseFailure", "UserPromptSubmit", "Stop"):
+                me.pop("inflight", None)
             if got is not None:
                 frm, cleared = got
                 me["from"] = frm or label or me.get("from") or ""
@@ -551,10 +565,14 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
             if name_ev in WORK_EVENTS:
                 me["work_at"] = t
             state = next_state(event, me)
+            if state == STATE_IDLE and waits:
+                state = STATE_WAIT
             if agent and not me.get("from"):
                 state = None     # a subagent's state goes out once it has its own board
-            if state and not local and not _off(STATE_ENV_OFF) and (
-                    state != me.get("state") or t - _float(me.get("state_at")) >= STATE_RESEND_S):
+            # 0.21.4: local relay too; a Stop always goes out (heals a lost or late update)
+            if state and not _off(STATE_ENV_OFF) and (
+                    state != me.get("state") or name_ev == "Stop"
+                    or t - _float(me.get("state_at")) >= STATE_RESEND_S):
                 me.update(state=state, state_at=t)
                 out["state"] = state
             if asks and (name_ev in NAME_EVENTS or
@@ -578,9 +596,14 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
                     me["reminded_at"] = t
                     out["remind"] = reminder_text(name, None if me.get("cleared") else age, local)
             return out
+        if name_ev == "SessionEnd":
+            return _session_end(skey, room, t, post)
         res = _with_state(step)
         if res.get("state"):
-            (post or _spawn_post)({"op": "state", "from": res["name"], "state": res["state"]})
+            (post or _spawn_post)({"op": "state", "from": res["name"], "state": res["state"],
+                                   "skey": skey, "at": t})
+            if not _off(STATE_ENV_OFF):
+                (watch or _ensure_watcher)()  # tests: conftest stubs _ensure_watcher
         if res.get("spawn") and not _off(IDLE_ENV_OFF):
             (spawn or _spawn_sleeper)(skey)
         answers = deliver(skey, rel, res.get("poll") or [], fetch=fetch) if res.get("poll") else []
@@ -788,10 +811,16 @@ def _spawn_post(job: dict) -> None:
 def post_state(rel: dict, frm: str, state: str) -> bool:
     """POST <relay>/state {from, state} (server merges it into the helper's board card).
     An older server answers 404/405: ignored; one without `wartet` (422) gets `leerlauf`
-    instead. Remote relay only."""
+    instead. 0.21.4: local relay too (request op `state`, the join merges it into the
+    helper's operator.status like the server)."""
     from . import relayops
-    if vmulti._is_local(rel) or state not in STATES:
+    if state not in STATES:
         return False
+    if vmulti._is_local(rel):
+        try:
+            return bool(relayops.local_request(rel, frm, "state", {"state": state}).get("ok"))
+        except Exception:  # noqa: BLE001
+            return False
     try:
         url = relayops.endpoint(rel, "state")
         status, _ = relayops._http(rel, "POST", url, {"from": frm, "state": state},
@@ -804,17 +833,233 @@ def post_state(rel: dict, frm: str, state: str) -> bool:
         return False
 
 
+def run_job(job: dict, rel: dict | None = None) -> bool:
+    """One state job, in order (0.21.4): under POST_LOCK_NAME, and only while it is still
+    the session's newest state (a detached child of an older hook run that starts late
+    never overwrites a newer state: no sticky `arbeitet`). `gone`: clear the board and
+    post `leerlauf`. True when something was sent."""
+    from . import relayops
+    rel = rel if rel is not None else vmulti.load_relay()
+    if not isinstance(job, dict) or rel is None:
+        return False
+    frm = relayops.check_from(str(job.get("from") or ""))
+    vact._private_dir(vact.state_root())
+    fd = os.open(vact.state_root() / POST_LOCK_NAME,
+                 os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        vact._lock(fd)
+        if job.get("op") == "gone":
+            clear_board(rel, frm)
+            return post_state(rel, frm, STATE_IDLE)
+        if job.get("op") != "state":
+            return False
+        skey = str(job.get("skey") or "")
+        if skey and job.get("at") is not None:
+            me = _session(skey)
+            if me is not None and (me.get("state") != job.get("state")
+                                   or _float(me.get("state_at")) != _float(job.get("at"))):
+                return False     # a newer state exists: this one is stale
+        return post_state(rel, frm, str(job.get("state") or ""))
+    finally:
+        os.close(fd)
+
+
 def post_main(raw: str) -> int:
     """The detached child of the hook: one state update. Always 0."""
     try:
-        job = json.loads(raw or "{}")
-        rel = vmulti.load_relay()
-        if isinstance(job, dict) and rel is not None and job.get("op") == "state":
-            from . import relayops
-            frm = relayops.check_from(str(job.get("from") or ""))
-            post_state(rel, frm, str(job.get("state") or ""))
+        run_job(json.loads(raw or "{}"))
     except Exception:  # noqa: BLE001, S110 - detached child, nobody to tell
         pass
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# 0.21.4: the real state, also without hook events (Esc, closed window, crash)
+# --------------------------------------------------------------------------- #
+POST_LOCK_NAME = "board-post.lock"
+WATCH_PID_NAME = "board-watch.pid"
+WATCH_POLL_S = 30.0
+WATCH_MAX_S = 24 * 3600.0
+IDLE_GUESS_S = 180.0       # `arbeitet` without any hook event this long (and no tool running)
+INFLIGHT_MAX_S = 900.0     # a tool call longer than this without an event counts as idle
+GONE_QUIET_S = 60.0        # a dead session pid only counts after this long without events
+LONG_TOOLS = ("Agent", "Task")  # a subagent runs as long as it needs (its own events)
+_SHELLS = ("sh", "bash", "dash", "zsh", "ksh", "fish")
+
+
+def _session(skey: str) -> dict | None:
+    try:
+        st = json.loads((vact.state_root() / STATE_NAME).read_text(encoding="utf-8"))
+        me = st.get("sessions", {}).get(skey)
+    except (OSError, ValueError, AttributeError):
+        return None
+    return me if isinstance(me, dict) else None
+
+
+def _known_pid(skey: str) -> bool:
+    me = _session(skey)
+    return bool(me and int(_float(me.get("pid"))) > 1)
+
+
+def _proc(pid: int) -> tuple[str, int]:
+    """(command name, parent pid) of a process; ('', 0) when unknown."""
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text()
+        comm = raw[raw.index("(") + 1:raw.rindex(")")]
+        return comm, int(raw[raw.rindex(")") + 2:].split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    import subprocess
+    try:
+        out = subprocess.run(["ps", "-o", "ppid=,comm=", "-p", str(pid)], capture_output=True,
+                             text=True, timeout=2, check=False).stdout.strip()
+        ppid, _, comm = out.partition(" ")
+        return comm.strip(), int(ppid)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return "", 0
+
+
+def session_pid(env=None, proc=_proc) -> int:
+    """The pid of the agent process that runs this hook: $CLAUDE_PID, else the first
+    ancestor that is no shell (Claude Code runs hook commands through /bin/sh). 0 = unknown."""
+    env = os.environ if env is None else env
+    v = str(env.get("CLAUDE_PID") or "").strip()
+    if v.isdigit() and int(v) > 1:
+        return int(v)
+    pid = os.getppid()
+    for _ in range(3):
+        comm, ppid = proc(pid)
+        if not comm:
+            return 0
+        if comm.rsplit("/", 1)[-1].lstrip("-") not in _SHELLS:
+            return pid if pid > 1 else 0
+        pid = ppid
+        if pid <= 1:
+            return 0
+    return 0
+
+
+def _stop_waits(event: dict, skey: str, t: float) -> bool:
+    """Stop of a session that waits for the human: an own question is still open, or the
+    reply ends with a question (asks.stop_question)."""
+    try:
+        if open_names(skey, t):
+            return True
+        from . import asks
+        return asks.stop_question(asks.last_message(event)) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _session_end(skey: str, room: str, t: float, post=None) -> None:
+    """SessionEnd: the session is gone: its board leaves the call, state leerlauf."""
+    def step(st: dict):
+        me = st["sessions"].get(skey)
+        if not isinstance(me, dict) or me.get("room") != room:
+            return ""
+        me.update(gone=t, state=STATE_IDLE, state_at=t, sleeper_until=0)
+        me.pop("inflight", None)
+        return str(me.get("from") or me.get("name") or "")
+    name = _with_state(step)
+    if name and not _off(STATE_ENV_OFF):
+        (post or _spawn_post)({"op": "gone", "from": name, "skey": skey})
+
+
+def _inflight(me: dict, t: float) -> bool:
+    inf = me.get("inflight") if isinstance(me.get("inflight"), dict) else None
+    if not inf:
+        return False
+    return str(inf.get("tool") or "") in LONG_TOOLS or t - _float(inf.get("at")) < INFLIGHT_MAX_S
+
+
+def watch_step(now: float | None = None, alive=None) -> tuple[list[dict], int] | None:
+    """One watcher round over the helper sessions of the current call: (jobs, live
+    sessions) or None (no call). A session whose process is gone -> `gone`; `arbeitet` /
+    `problem` without any hook event for IDLE_GUESS_S and no tool running -> `leerlauf`
+    (Claude Code sends no Stop after Esc)."""
+    t = time.time() if now is None else now
+    alive = alive or vact._pid_alive
+    rel = vmulti.load_relay(t)
+    if rel is None:
+        return None
+    room = _room(rel)
+
+    def step(st: dict):
+        jobs: list[dict] = []
+        live = 0
+        for skey, me in st["sessions"].items():
+            name = str(me.get("from") or me.get("name") or "")
+            if me.get("room") != room or me.get("gone") or not name:
+                continue
+            quiet = t - _float(me.get("seen"))
+            pid = int(_float(me.get("pid")))
+            if pid > 1 and not alive(pid) and quiet >= GONE_QUIET_S:
+                me.update(gone=t, state=STATE_IDLE, state_at=t)
+                me.pop("inflight", None)
+                jobs.append({"op": "gone", "from": name, "skey": skey})
+                continue
+            live += 1
+            if me.get("state") in (STATE_WORK, STATE_PROBLEM) and quiet >= IDLE_GUESS_S \
+                    and not _inflight(me, t):
+                me.update(state=STATE_IDLE, state_at=t)
+                jobs.append({"op": "state", "from": name, "state": STATE_IDLE, "skey": skey,
+                             "at": t})
+        return jobs, live
+    return _with_state(step)
+
+
+def _watch_pid_path() -> Path:
+    return vact.state_root() / WATCH_PID_NAME
+
+
+def _watcher_alive() -> bool:
+    try:
+        pid = int(_watch_pid_path().read_text().strip() or 0)
+    except (OSError, ValueError):
+        return False
+    return pid > 1 and vact._pid_alive(pid)
+
+
+def _ensure_watcher() -> None:
+    """One detached `voicehook-agent-hook board-watch` per machine."""
+    if _watcher_alive():
+        return
+    import subprocess
+    try:
+        subprocess.Popen(vact.child_argv("board-watch"), stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True, cwd=vact.child_cwd())
+    except Exception:  # noqa: BLE001
+        return
+
+
+def watch_main(sleep=time.sleep, clock=time.monotonic) -> int:
+    """The machine's state watcher: every WATCH_POLL_S one watch_step, its jobs in order.
+    Ends when the call ends or no helper session lives any more. Always 0."""
+    try:
+        vact._private_dir(vact.state_root())
+        if _watcher_alive():
+            return 0
+        vact._write_private(_watch_pid_path(), str(os.getpid()))
+        start = clock()
+        while clock() - start < WATCH_MAX_S:
+            got = watch_step()
+            if got is None:
+                return 0
+            jobs, live = got
+            for job in jobs:
+                run_job(job)
+            if not live:
+                return 0
+            sleep(WATCH_POLL_S)
+    except Exception:  # noqa: BLE001, S110 - detached child, nobody to tell
+        pass
+    finally:
+        try:
+            if _watch_pid_path().read_text().strip() == str(os.getpid()):
+                _watch_pid_path().unlink()
+        except (OSError, ValueError):
+            pass
     return 0
 
 

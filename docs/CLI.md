@@ -612,6 +612,26 @@ anything else (Edit, Write, build, test, unknown commands) stays `arbeitet`. A s
 with `sub` and `state`). Remote relay only; an older server (404) is ignored.
 `VOICEHOOK_SESSION_STATE=0` turns it off.
 
+**The real state, never a sticky `arbeitet` (0.21.4).** Many helpers showed `arbeitet` while
+idle. Now:
+- Stop is `leerlauf`, or `wartet` when the session still waits for the human (an own
+  `decide` without delivered answer, or the reply ends with a question); a Stop is always
+  sent, also when the state did not change (heals a lost update).
+- Board bookkeeping (`vh-helper status`, `voicehook-agent status --doing ...`) never makes a
+  `leerlauf` / `wartet` session `arbeitet`.
+- Updates go out in order: each detached post takes a lock and is dropped when a newer state
+  exists (an older `arbeitet` that starts late never overwrites the Stop's `leerlauf`).
+- Local helpers (local relay) send their state too: request op `state`, the join publishes it
+  with the helper's last board (as the server does for remote helpers); before, the page
+  derived `arbeitet` from a fresh board.
+- Claude Code sends no Stop after Esc, and nothing when a window is closed or a session
+  crashes. One detached watcher per machine (`voicehook-agent-hook board-watch`, every 30 s
+  while a call runs) sets `leerlauf` after 3 min without any hook event when no tool runs
+  (a tool call counts as running for up to 15 min, a subagent as long as it needs), and
+  removes a session whose process is gone (its board cleared, state `leerlauf`). The new
+  `SessionEnd` hook does the same at once (`hook install` adds it; re-run it after the
+  upgrade). The session pid is `$CLAUDE_PID`, else the first non-shell ancestor of the hook.
+
 **Remote relay** (relay.json with `url` + `token`; `url` = `<base>/api/activity/relay`),
 Bearer relay token: `POST <url>/decide {from, question?, options?, recommend?, id?,
 delete?, context?, recent?}` -> `{ok, id, number}`; `POST <url>/status {from, doing?, open?,

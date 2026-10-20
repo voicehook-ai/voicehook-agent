@@ -25,7 +25,8 @@ Events fetched while `decide --wait` waits for another id are kept in a local in
 Local relay (relay.json kind local, WebRTC join; file protocol, stdlib only):
 * Request file `<join dir>/relay-req.jsonl` (0600, O_APPEND, flock, never a symlink), one
   JSON object per line: {"v": 1, "rid": "<16 hex>", "from": "<label>", "op":
-  "decide"|"status", "body": {...}, "ts": <unix>}. Written only when the join dir is
+  "decide"|"status"|"state" (0.21.4: {state}, the helper's session state), "body": {...},
+  "ts": <unix>}. Written only when the join dir is
   ours and its session.json names the relay's owner pid.
 * The join drains it (flock, read, truncate) every POLL_S and runs decide (LiveKit RPC
   vh.decide with `sender`) or operator.status (with `sub`); sender = sub =
@@ -354,6 +355,14 @@ def _valid_decide(body: object) -> dict | None:
     return out if out.get("question") or out.get("id") else None
 
 
+HELPER_STATES = ("arbeitet", "wartet", "frage", "leerlauf", "problem")  # server board.HELPER_STATES
+
+
+def _valid_state(body: object) -> dict | None:
+    s = body.get("state") if isinstance(body, dict) else None
+    return {"state": s} if isinstance(s, str) and s in HELPER_STATES else None
+
+
 def _valid_status(body: object) -> dict | None:
     if not isinstance(body, dict):
         return None
@@ -548,6 +557,8 @@ def parse_request(obj: dict) -> tuple[str, str, str, dict | None] | None:
         body = _valid_decide(obj.get("body"))
     elif op == "status":
         body = _valid_status(obj.get("body"))
+    elif op == "state":   # 0.21.4: session state of a local helper (board.py)
+        body = _valid_state(obj.get("body"))
     else:
         return rid, frm, str(op), None
     return rid, frm, op, body

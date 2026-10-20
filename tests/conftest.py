@@ -14,3 +14,7 @@ def _private_state_dir(tmp_path, monkeypatch):
     # 0.21.4 notify.unattended(): the runner's own Claude Code / CI env must not decide it
     for k in ("VOICEHOOK_ATTENDED", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_ENTRYPOINT"):
         monkeypatch.delenv(k, raising=False)
+    # 0.21.4 board.py: never a detached state watcher from a test; CLAUDE_PID of the runner
+    from voicehook_agent import board
+    monkeypatch.setattr(board, "_ensure_watcher", lambda: None)
+    monkeypatch.delenv("CLAUDE_PID", raising=False)

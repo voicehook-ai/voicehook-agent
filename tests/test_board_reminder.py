@@ -287,7 +287,7 @@ def test_failure_streak_is_problem_and_success_heals():
     assert [s for _, s in _states()] == ["arbeitet", "problem", "arbeitet"]
 
 
-def test_same_state_resent_after_window_and_local_relay_sends_none(tmp_path):
+def test_same_state_resent_after_window_and_local_relay_too(tmp_path):
     _relay()
     board.handle(ev(), now=T0)
     board.handle(ev(), now=T0 + board.STATE_RESEND_S + 1)
@@ -298,7 +298,7 @@ def test_same_state_resent_after_window_and_local_relay_sends_none(tmp_path):
     (d / "session.json").write_text(json.dumps({"pid": os.getpid()}))
     _relay(local_dir=d, room="other")
     board.handle(ev(sid="x"), now=T0)
-    assert _states() == []
+    assert _states() == [("salesengine " + ms.label_suffix("x"), "arbeitet")]   # 0.21.4
 
 
 def test_post_state_hits_state_endpoint(monkeypatch):
@@ -432,7 +432,8 @@ def test_subagent_state_only_with_board_and_separate_from_parent():
     assert [p["from"] for p in POSTS] == ["salesengine " + ms.label_suffix("sess-1")]
     board.handle(bash('vh-helper status "Scout" "x"', **sub), now=T0 + 2)
     board.handle(ev("PreToolUse", tool_name="Read", tool_input={}, **sub), now=T0 + 3)
-    assert POSTS[-1] == {"op": "state", "from": "Scout", "state": "arbeitet"}
+    assert {k: POSTS[-1][k] for k in ("op", "from", "state")} == \
+        {"op": "state", "from": "Scout", "state": "arbeitet"}
 
 
 def test_raw_helper_credential_in_relay_json_is_usable(monkeypatch):
