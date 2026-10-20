@@ -13,10 +13,19 @@ notification. Now the hook brings it into the call:
     `wartet auf Eingabe`.
   - `elicitation_complete`, `elicitation_response`: the session goes on, its open
     decision is removed. Other types (auth_success, agent_completed, quota_*): nothing.
-* PermissionRequest (`voicehook-agent-hook permission-request`): the same as a
-  permission_prompt, but the question names the tool and its own description
-  (`Freigabe für Bash: Remove node_modules directory?`). The hook prints NOTHING, so the
-  permission flow stays exactly as it is: the human still decides in the session.
+* PermissionRequest (`voicehook-agent-hook permission-request`): 0.21.4 a real question
+  that names the session and the concrete action (permission_question): `Kunde C will
+  ausführen: git worktree remove wt-a – erlauben?` (Bash: the command, first line, paths
+  cut to the basename, secrets scrubbed; Read/Edit/Write: the file; WebFetch: the host;
+  ...); the tool's own description as hidden context. Without a concrete detail (no
+  command, no file, ...) NO decision, only the activity line. A generic permission_prompt
+  Notification ("Claude needs your permission to use Bash") is no question either: only the
+  activity line (the PermissionRequest of the same prompt carries the details). The hook
+  prints NOTHING, so the permission flow stays exactly as it is: the human still decides
+  in the session.
+* 0.21.4 unattended sessions (`claude -p`, SDK runs, timers: unattended()) never put a
+  question on the board, only the activity line: nobody could answer it. The same question
+  of the same session label within RECENT_DEDUPE_S goes out once (repeated runs).
 * PreToolUse of AskUserQuestion: the question text itself, its 2-3 option labels as
   options (more than 3: yes/no on the question). 0.21.3 (asks.py): EVERY question of the
   call gets its own decision, the option descriptions go along as hidden `context`, a 4th
@@ -81,6 +90,9 @@ ASK_TYPES = {"permission_prompt", "elicitation_dialog", "elicitation_url_dialog"
 WAIT_TYPES = {"idle_prompt"}
 DONE_TYPES = {"elicitation_complete", "elicitation_response"}
 ASK_TOOL = "AskUserQuestion"
+RECENT_DEDUPE_S = 600.0       # 0.21.4: the same question of the same label at most once
+DETAIL_MAX = 90               # the action in a permission question (command, file, ...)
+ATTENDED_ENV = "VOICEHOOK_ATTENDED"   # 0.21.4: 1 = always attended, 0 = never ask
 
 PRIO_GENERIC = 1   # Notification text
 PRIO_SPECIFIC = 2  # PermissionRequest / AskUserQuestion
@@ -184,7 +196,83 @@ def _ask_from_tool_input(inp: object) -> tuple[str, list[str], list[dict]] | Non
     return items[0]["question"], items[0]["options"], items
 
 
-def classify(event: dict) -> dict | None:
+# 0.21.4: what a tool will do, as the verb of a permission question
+_VERBS = {"Bash": "ausführen", "Read": "lesen", "NotebookRead": "lesen", "Edit": "ändern",
+          "MultiEdit": "ändern", "NotebookEdit": "ändern", "Write": "schreiben",
+          "WebFetch": "abrufen", "WebSearch": "suchen", "Glob": "durchsuchen",
+          "Grep": "durchsuchen"}
+
+
+def _detail(tool: str, inp: dict) -> str:
+    """The concrete action of a tool call, safe for the call ('' = nothing concrete)."""
+    if tool == "Bash":
+        cmd = next((ln for ln in str(inp.get("command") or "").splitlines() if ln.strip()), "")
+        return clean_text(cmd, DETAIL_MAX) if cmd else ""
+    if tool in vact.FILE_TOOLS:
+        return vact.basename(inp.get(vact.FILE_TOOLS[tool]))
+    if tool == "WebFetch":
+        m = _URL.search(str(inp.get("url") or ""))
+        return m.group(1)[:DETAIL_MAX] if m else ""
+    if tool in ("WebSearch", "Glob", "Grep"):
+        return clean_text(inp.get("query") or inp.get("pattern") or "", DETAIL_MAX)
+    return ""
+
+
+def permission_question(event: dict, label: str = "") -> tuple[str, str] | None:
+    """0.21.4 (question, context) of a PermissionRequest: the session and the concrete
+    action, `<label> will ausführen: <command> – erlauben?`; the tool's own description as
+    context. None when nothing concrete can be named (then no decision)."""
+    tool = vact.sanitize_tool(event.get("tool_name"))
+    inp = event.get("tool_input") if isinstance(event.get("tool_input"), dict) else {}
+    who = vact._clean(label)[:40].strip() or "Eine Session"
+    desc = clean_text(_tool_desc(event), 200).rstrip(" .?!:")
+    detail = _detail(tool, inp)
+    if tool.startswith("mcp__"):
+        parts = [p for p in tool.split("__")[1:] if p]
+        action = f"{' '.join(parts)} nutzen" if parts else ""
+        detail = desc
+        verb = action
+    else:
+        verb = _VERBS.get(tool, "")
+        if not verb and desc:
+            verb, detail = f"{tool} nutzen", desc
+    if not verb or not (detail or tool.startswith("mcp__")):
+        return None
+    tail = " – erlauben?"
+    head = f"{who} will {verb}"
+    if detail:
+        room = QUESTION_MAX - len(head) - len(tail) - 2
+        if room < 8:
+            return None
+        q = f"{head}: {_cut(detail, room)}{tail}"
+    else:
+        q = f"{head}{tail}"
+    ctx = f"Beschreibung: {desc}" if desc and desc != detail else ""
+    return q, ctx
+
+
+def unattended(env=None) -> bool:
+    """0.21.4: nobody sits at this session (`claude -p`, Agent SDK runs, timers): its
+    questions never go to the board. VOICEHOOK_ATTENDED=1/0 overrides; Claude Code's
+    CLAUDE_CODE_SESSION_ATTENDED wins over the entrypoint (sdk-*: headless)."""
+    env = os.environ if env is None else env
+
+    def flag(name: str) -> bool | None:
+        v = str(env.get(name) or "").strip().lower()
+        if v in ("1", "true", "yes", "on"):
+            return True
+        if v in ("0", "false", "no", "off"):
+            return False
+        return None
+    for name in (ATTENDED_ENV, "CLAUDE_CODE_SESSION_ATTENDED"):
+        f = flag(name)
+        if f is not None:
+            return not f
+    ep = str(env.get("CLAUDE_CODE_ENTRYPOINT") or "").strip().lower()
+    return ep.startswith("sdk") or ep in ("print", "headless")
+
+
+def classify(event: dict, label: str = "") -> dict | None:
     """What one hook event means for the call, or None.
     {kind: ask|wait|done, text (activity), question?, options?, tool?, prio?}"""
     name = str(event.get("hook_event_name") or "")
@@ -202,12 +290,16 @@ def classify(event: dict) -> dict | None:
         if ntype in WAIT_TYPES:
             return {"kind": "wait", "text": WAIT_TEXT}
         if ntype in ASK_TYPES:
-            q = clean_text(msg) or ("Claude braucht eine Freigabe" if ntype == "permission_prompt"
-                                    else "Claude hat eine Frage")
             m = _PERM_TOOL.search(msg)
             tool = vact.sanitize_tool(m.group(1)) if m else ""
-            text = PERM_TEXT if ntype == "permission_prompt" else ASK_TEXT
-            return {"kind": "ask", "text": f"{text}: {tool}" if tool else text,
+            if ntype == "permission_prompt":
+                # 0.21.4: "Claude needs your permission to use Bash" is no question; the
+                # PermissionRequest of the same prompt asks with the concrete action
+                return {"kind": "wait", "text": f"{PERM_TEXT}: {tool}" if tool else PERM_TEXT}
+            q = clean_text(msg)
+            if not q:
+                return {"kind": "wait", "text": ASK_TEXT}
+            return {"kind": "ask", "text": f"{ASK_TEXT}: {tool}" if tool else ASK_TEXT,
                     "question": q, "options": [], "tool": tool, "prio": PRIO_GENERIC}
         return None
     if name == "PermissionRequest":
@@ -217,11 +309,15 @@ def classify(event: dict) -> dict | None:
             if got:
                 return {"kind": "ask", "text": ASK_TEXT, "question": got[0], "options": got[1],
                         "items": got[2], "tool": tool, "prio": PRIO_SPECIFIC}
-        desc = clean_text(_tool_desc(event), 120).rstrip(" .?!:")
-        q = _cut(f"Freigabe für {tool}: {desc}", QUESTION_MAX - 1) + "?" if desc \
-            else f"Freigabe für {tool}?"
-        return {"kind": "ask", "text": f"{PERM_TEXT}: {tool}", "question": q, "options": [],
+        got = permission_question(event, label)
+        if got is None:  # 0.21.4: nothing concrete to ask about: only the activity line
+            return {"kind": "wait", "text": f"{PERM_TEXT}: {tool}"}
+        q, ctx = got
+        info = {"kind": "ask", "text": f"{PERM_TEXT}: {tool}", "question": q, "options": [],
                 "tool": tool, "prio": PRIO_SPECIFIC}
+        if ctx:
+            info["items"] = [{"question": q, "options": [], "context": ctx}]
+        return info
     if name == "PreToolUse" and str(event.get("tool_name") or "") == ASK_TOOL:
         got = _ask_from_tool_input(event.get("tool_input"))
         if got:
@@ -338,6 +434,22 @@ def admit_ask(skey: str, info: dict, rt: str, t: float, extra: dict | None = Non
         return {"replace": open_.get("id") if open_ else None,
                 "replace_ids": list(open_.get("ids") or []) if open_ else []}
     return _with_state(step)
+
+
+def recent(label: str, info: dict, t: float, mark: bool = False) -> bool:
+    """0.21.4: was the same question of the same session label (repeated runs, new
+    sessions) on the board within RECENT_DEDUPE_S? `mark`: it goes out now."""
+    key = _qkey(f"{label}|{group_key(info)}")
+
+    def step(st: dict):
+        rec = st.get("recent") if isinstance(st.get("recent"), dict) else {}
+        rec = {k: v for k, v in rec.items() if isinstance(v, (int, float)) and t - v < RECENT_DEDUPE_S}
+        st["recent"] = rec
+        seen = key in rec
+        if mark:
+            rec[key] = t
+        return seen
+    return bool(_with_state(step))
 
 
 def set_id(skey: str, qk: str, dec_id: str) -> bool:
@@ -572,27 +684,30 @@ def handle(raw: str, now: float | None = None, post=None) -> dict | None:
         event = json.loads(raw) if raw and raw.strip() else {}
         if not isinstance(event, dict):
             return None
-        info = classify(event)
-        if info is None:
-            return None
         t = time.time() if now is None else now
         skey = _skey(event)
+        rt, dir_, _rel = route(skey)
+        label = ""
+        if rt:
+            from . import multisession as vmulti
+            label = vmulti.session_label(event, _cached_label(skey))
+        info = classify(event, label)
+        if info is None:
+            return None
         if info["kind"] == "done":
             return _resolve_job(skey, None, t, post)
-        rt, dir_, _rel = route(skey)
         if not rt:
             return None
         _activity(rt, dir_, skey, raw, info["text"], event, t)
-        if info["kind"] != "ask" or rt == "bridge":
+        if info["kind"] != "ask" or rt == "bridge" or unattended():
+            return None  # 0.21.4: nobody at an unattended session could answer
+        extra = {"dir": str(dir_)} if rt == "own" else {"from": label}
+        if recent(label, info, t):
             return None
-        if rt == "own":
-            extra = {"dir": str(dir_)}
-        else:
-            from . import multisession as vmulti
-            extra = {"from": vmulti.session_label(event, _cached_label(skey))}
         adm = admit_ask(skey, info, rt, t, extra)
         if adm is None:
             return None
+        recent(label, info, t, mark=True)
         job = ask_job(rt, skey, info, adm, extra)
         (post or spawn)(job)
         return job

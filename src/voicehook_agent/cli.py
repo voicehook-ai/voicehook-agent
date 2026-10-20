@@ -3499,7 +3499,10 @@ def main(argv: list[str] | None = None) -> None:
         "decide", help="ask the human a decision (Decision Board, not the status board): "
         "yes/no or 2-3 options; the answer arrives as a `next` event type decision")
     p_dec.add_argument("--question", default=None, metavar="TEXT",
-                       help="the question, max 160 chars (yes/no when no --option is given)")
+                       help="the question, max 160 chars (yes/no when no --option is given). "
+                            "Only a real decision the human can make from the board alone: name "
+                            "the thing ('PR #96 mergen?', never 'Weiter?'/'Freigabe?') and give "
+                            "--context (what, why, what yes/no does)")
     p_dec.add_argument("--option", action="append", default=[], metavar="TEXT",
                        help="an answer option, max 40 chars (give 2 or 3; repeatable)")
     p_dec.add_argument("--recommend", type=int, default=None, metavar="N",

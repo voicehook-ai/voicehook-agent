@@ -255,8 +255,8 @@ def _wait_answers(rel: dict, frm: str, ids: list[str], deadline: float, skey: st
 def _helper(event: dict) -> tuple[str, dict, str] | None:
     """(skey, relay, from) when this session is a helper of a running call, else None."""
     from . import multisession as vmulti
-    if _off() or event.get("agent_id"):
-        return None
+    if _off() or event.get("agent_id") or vnotify.unattended():
+        return None  # 0.21.4: nobody at an unattended session (claude -p) could answer
     skey = vnotify._skey(event)
     rt, _dir, rel = vnotify.route(skey)
     if rt != "relay" or rel is None:
