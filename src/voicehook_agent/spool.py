@@ -45,7 +45,7 @@ RECENT_KEEP = 20      # 0.21.7: acked events kept in memory after a compaction (
 EPHEMERAL = frozenset({"restarting"})
 # 0.21.5: events that need the agent (the Stop hook warns on them, `listen` wakes on them)
 WAKE_TYPES = ("user", "decision", "helper_decision", "voicebot_left", "missed",
-              "status_request", "revise", "call_end", "data")
+              "status_request", "revise", "call_end", "data", "onboarding")  # 0.21.8 onboarding
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 

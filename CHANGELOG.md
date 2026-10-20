@@ -3,6 +3,18 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.21.8 (2026-10-20)
+
+Bug: joined with `join --json --keep-alive --quiet`, stdout into a file: nobody read the
+onboarding line, so nobody offered to bring in the other sessions.
+
+- `--quiet` never suppressed the onboarding (checked, test added); it only lands on stdout.
+- **Onboarding as the first `next` / `listen` event** of every join (type `onboarding`,
+  wake-worthy, queued with the first `say`/`next`): "Biete Oliver an, weitere Sessions
+  einzuladen (helper-credential | helper-import oder eigener Join) und deren Boards zu teilen."
+  plus commands and rules; the mid-turn hook (0.21.7) shows it inside a running turn. Once per
+  join; `VOICEHOOK_ONBOARDING_HINT=0` turns both off.
+
 ## 0.21.7 (2026-10-20)
 
 Live: the operator was deep in a long tool chain and saw Oliver's new questions only at the
