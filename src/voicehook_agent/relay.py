@@ -662,10 +662,10 @@ def status_request_event(payload: dict, now: float | None = None) -> dict:
             "hint": STATUS_HINTS["status_request"]}
 
 
-def parse_faq(items: list[str] | None, warn=None) -> list[dict]:
+def parse_faq(items: list[str] | None, warn=None, limit: int = FAQ_MAX) -> list[dict]:
     """`--faq "Frage::Antwort"` values -> [{"q", "a"}]: split on the FIRST "::",
     both halves stripped, an item with an empty half (or no "::") is skipped with
-    a warning, at most FAQ_MAX pairs, q and a capped to FAQ_CHARS each."""
+    a warning, at most `limit` (FAQ_MAX) pairs, q and a capped to FAQ_CHARS each."""
     out: list[dict] = []
     for raw in items or []:
         q, sep, a = str(raw).partition("::")
@@ -674,11 +674,84 @@ def parse_faq(items: list[str] | None, warn=None) -> list[dict]:
             if warn is not None:
                 warn(f"[warn] --faq {raw!r} skipped: expected \"Frage::Antwort\" with both halves")
             continue
-        if len(out) >= FAQ_MAX:
+        if len(out) >= limit:
             if warn is not None:
-                warn(f"[warn] --faq: more than {FAQ_MAX} pairs, the rest is dropped")
+                warn(f"[warn] --faq: more than {limit} pairs, the rest is dropped")
             break
         out.append({"q": q[:FAQ_CHARS], "a": a[:FAQ_CHARS]})
+    return out
+
+
+# 0.21.4 per-item background for the voicebot, never shown to the human: every status item
+# (doing / open / done), activity line and decision may carry {context, faq[{q, a}]}.
+ITEM_CONTEXT_MAX = 2000
+ITEM_FAQ_MAX = 3
+META_KINDS = ("doing", "open", "done")
+
+
+def item_meta(context: str | None, faq_raw: list[str] | None, warn=None) -> dict:
+    """{context?, faq?} of one item from the CLI flags; ValueError when context is too
+    long (nothing is sent then); {} when neither is given."""
+    out: dict = {}
+    ctx = " ".join(str(context or "").split())
+    if ctx:
+        if len(ctx) > ITEM_CONTEXT_MAX:
+            raise ValueError(f"--context is {len(ctx)} chars, max {ITEM_CONTEXT_MAX}")
+        out["context"] = ctx
+    faq = parse_faq(faq_raw, warn=warn, limit=ITEM_FAQ_MAX)
+    if faq:
+        out["faq"] = faq
+    return out
+
+
+def clean_meta(obj: object) -> dict | None:
+    """One item's {context, faq} from outside (relay request): None = invalid."""
+    if not isinstance(obj, dict):
+        return None
+    out: dict = {}
+    ctx = obj.get("context")
+    if ctx is not None:
+        if not isinstance(ctx, str) or len(ctx) > ITEM_CONTEXT_MAX:
+            return None
+        if ctx.strip():
+            out["context"] = ctx
+    faq = obj.get("faq")
+    if faq is not None:
+        if not isinstance(faq, list) or len(faq) > ITEM_FAQ_MAX:
+            return None
+        pairs = []
+        for f in faq:
+            if not isinstance(f, dict) or not isinstance(f.get("q"), str) \
+                    or not isinstance(f.get("a"), str) or len(f["q"]) > FAQ_CHARS \
+                    or len(f["a"]) > FAQ_CHARS:
+                return None
+            pairs.append({"q": f["q"], "a": f["a"]})
+        if pairs:
+            out["faq"] = pairs
+    return out
+
+
+def clean_board_meta(meta: object, board: dict) -> dict | None:
+    """Board `meta` {doing: {..}, open: [{..}], done: [{..}]} (lists aligned with the board's
+    open / done): None = invalid."""
+    if not isinstance(meta, dict) or set(meta) - set(META_KINDS):
+        return None
+    out: dict = {}
+    if meta.get("doing") is not None:
+        m = clean_meta(meta["doing"])
+        if m is None:
+            return None
+        out["doing"] = m
+    for k in ("open", "done"):
+        v = meta.get(k)
+        if v is None:
+            continue
+        if not isinstance(v, list) or len(v) > len(board.get(k) or []):
+            return None
+        ms = [clean_meta(x) for x in v]
+        if any(m is None for m in ms):
+            return None
+        out[k] = ms
     return out
 
 
