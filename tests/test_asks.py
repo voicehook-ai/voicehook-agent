@@ -227,7 +227,8 @@ def test_stop_ask_posts_once_and_wakes_with_the_answer(relay):
     fb.queue = [_dec("d00000000", opt=0)]
     rc, text = asks.stop_ask(_ev("Stop", last_assistant_message=STOP_TEXT), now=1000.0,
                              next_events=fb.next_events, clock=clock, create=fb.create)
-    assert rc == asks.WAKE_EXIT and "Antwort von Human" in text and ": Mergen." in text
+    assert rc == asks.WAKE_EXIT and "(aus deiner Antwort gespiegelt)" in text
+    assert '"Was machen wir?" -> Human hat im Call-Board geantwortet: Option 1 "Mergen".' in text
     assert fb.created[0]["question"] == "Was machen wir?" and fb.created[0]["options"] == ["Mergen", "Warten auf Review"]
     sk = ms.session_hash("other-1")
     st = json.loads((activity.state_root() / board.STATE_NAME).read_text())
@@ -245,7 +246,8 @@ def test_stop_ask_option_label_in_wake_text(relay):
     fb.queue = [dict(ev, text="")]
     rc, text = asks.stop_ask(_ev("Stop", last_assistant_message="Soll ich mergen?"),
                              next_events=fb.next_events, clock=clock, create=fb.create)
-    assert rc == asks.WAKE_EXIT and text.startswith("voicehook-Call: Antwort von Human")
+    assert rc == asks.WAKE_EXIT and text.startswith("voicehook-Board")
+    assert "Human hat im Call-Board geantwortet" in text
 
 
 def test_stop_ask_ends_quietly_when_the_session_goes_on(relay):

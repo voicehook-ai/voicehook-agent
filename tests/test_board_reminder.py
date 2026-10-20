@@ -331,8 +331,9 @@ def test_answer_delivered_once_as_context_after_decide():
     board.handle(bash('vh-helper decide "SE Gate" "PR #81 mergen?"'), now=T0, fetch=f)
     store["SE Gate"] = [ANS]
     out = ctx(board.handle(ev(), now=T0 + board.POLL_GAP_S + 1, fetch=f))["additionalContext"]
-    assert out.startswith('voicehook-Call: Antwort von Oliver auf deine Frage #3 ("PR #81 mergen?"): Ja.')
-    assert "Handle jetzt danach" in out
+    assert out.startswith('voicehook-Board #3 (deine Frage): "PR #81 mergen?" -> Oliver hat im '
+                          'Call-Board geantwortet: Option 1 "Ja".')
+    assert "handle jetzt danach" in out and "keine Fehlermeldung" in out
     store["SE Gate"] = [ANS]  # the same answer again (e.g. inbox + server): never twice
     assert board.handle(ev("UserPromptSubmit"), now=T0 + 100, fetch=f) is None
 
@@ -404,7 +405,7 @@ def test_fetch_answers_remote_and_inbox(monkeypatch):
 
 def test_answer_text_scrubs():
     t = board.answer_text({"verdict": "other", "text": "nimm token=fakefakefakefake", "by": "Oliver"})
-    assert "fakefakefakefake" not in t and "Antwort von Oliver auf deine Frage:" in t
+    assert "fakefakefakefake" not in t and "Oliver hat im Call-Board geantwortet: eigene Antwort" in t
 
 
 def test_subagent_has_its_own_board_also_in_the_joining_session():

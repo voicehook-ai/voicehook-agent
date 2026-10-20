@@ -355,6 +355,8 @@ def _room(rel: dict) -> str:
 def _me(st: dict, skey: str, room: str, t: float) -> dict:
     """This session's entry; a new call (other room) starts without a board."""
     me = st["sessions"].setdefault(skey, {})
+    if "room" not in me and me:
+        me["room"] = room  # 0.21.4: recorded before its first board event (notify child)
     if me.get("room") != room:
         name = me.get("from")
         me.clear()
@@ -518,6 +520,7 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
         local = vmulti._is_local(rel)
         got = asked = None
         seen_answers = 0
+        recorded = None
         if name_ev == "PostToolUse" and str(event.get("tool_name") or "") == "Bash" \
                 and not _failed(event):
             cmd = (event.get("tool_input") or {}).get("command") \
@@ -525,6 +528,14 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
             got = status_command(cmd)
             asked = decide_command(cmd)
             seen_answers = answers_in_output(cmd, event.get("tool_response"))
+            if asked is not None:  # 0.21.4: the answer quotes the question
+                resp = event.get("tool_response")
+                out_s = resp.get("stdout") if isinstance(resp, dict) else resp
+                mid = _ID_RX.search(out_s) if isinstance(out_s, str) else None
+                if mid:
+                    mnum = _NUM_RX.search(out_s)
+                    recorded = (mid.group(1), decide_question(cmd),
+                                int(mnum.group(1)) if mnum else None)
         is_ask = name_ev in ASK_EVENTS or (name_ev == "PreToolUse"
                                            and str(event.get("tool_name") or "") == "AskUserQuestion")
         need = name_ev in NAME_EVENTS or got is not None or asked is not None or is_ask \
@@ -601,6 +612,8 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
         if name_ev == "SessionEnd":
             return _session_end(skey, room, t, post)
         res = _with_state(step)
+        if recorded:  # after step: a new room resets the session entry
+            record_question(skey, recorded[0], recorded[1], recorded[2], src="decide")
         if res.get("state"):
             (post or _spawn_post)({"op": "state", "from": res["name"], "state": res["state"],
                                    "skey": skey, "at": t})
@@ -609,13 +622,14 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
         if res.get("spawn") and not _off(IDLE_ENV_OFF):
             (spawn or _spawn_sleeper)(skey)
         answers = deliver(skey, rel, res.get("poll") or [], fetch=fetch) if res.get("poll") else []
-        texts = [answer_text(a) for a in answers]
+        texts = answer_texts(skey, answers)
         if name_ev == "Stop":
             if not texts:
                 return None
             return {"decision": "block", "reason": " ".join(texts)}
         if name_ev in REMIND_EVENTS or name_ev == "SessionStart":
-            ctx = texts + ([res["remind"]] if res.get("remind") else [])
+            # 0.21.4: notes about questions mirrored to the board, then answers, then reminder
+            ctx = take_notes(skey) + texts + ([res["remind"]] if res.get("remind") else [])
             return output(name_ev, " ".join(ctx)) if ctx else None
         return None
     except Exception:  # noqa: BLE001 - a hook must never disturb Claude Code
@@ -775,25 +789,138 @@ def take_new(skey: str, got: list[tuple[str, dict]]) -> list[dict]:
 _VERDICT = {"yes": "Ja", "no": "Nein"}
 
 
-def answer_text(ev: dict) -> str:
-    """`voicehook-Call: Antwort von Oliver auf deine Frage #3 ("Mergen?"): Ja. Handle jetzt
-    danach.` + English. Text fields scrubbed and capped."""
-    num = ev.get("number")
+SOURCES = {"mirror-stop": ("aus deiner Antwort gespiegelt", "mirrored from your reply"),
+           "mirror-ask": ("deine AskUserQuestion-Frage", "your AskUserQuestion"),
+           "mirror-perm": ("deine Freigabe-Anfrage", "your permission prompt"),
+           "decide": ("deine Frage per decide", "your decide question")}
+QUESTIONS_KEEP = 30
+
+
+def answer_text(ev: dict, info: dict | None = None) -> str:
+    """0.21.4: a self-contained, verifiable answer (a session refused a bare "Antwort auf
+    deine Frage #1: Ja" as an unverifiable approval, 20.10.2026): number, where the question
+    came from, its text, that the human answered on the call board, the verdict / chosen
+    option / free text. `info` = what this session stored when the question went to the board
+    (record_question). German + English, text fields scrubbed and capped."""
+    info = info if isinstance(info, dict) else {}
+    num = ev.get("number", info.get("number"))
     nr = f" #{num}" if isinstance(num, int) and not isinstance(num, bool) else ""
-    by = vact.scrub(str(ev.get("by") or "")).strip()[:40] or "dem Menschen"
-    q = vact.scrub(str(ev.get("question") or "")).strip()[:160]
+    by = vact.scrub(str(ev.get("by") or "")).strip()[:40] or "der Mensch"
+    q = vact.scrub(str(info.get("question") or ev.get("question") or "")).strip()[:160]
     verdict = str(ev.get("verdict") or "")
     text = vact.scrub(str(ev.get("text") or "")).strip()[:300]
+    free = vact.scrub(str(ev.get("answer") or "")).strip()[:300]   # server: own answer
+    opts = info.get("options") if isinstance(info.get("options"), list) else []
     if verdict == "option":
         opt = ev.get("option")
-        ans = text or (f"Option {opt + 1}" if isinstance(opt, int) and not isinstance(opt, bool) else "Option")
+        ok = isinstance(opt, int) and not isinstance(opt, bool)
+        label = vact.scrub(str(opts[opt])).strip()[:60] if ok and 0 <= opt < len(opts) else text
+        ans = f"Option {opt + 1}" if ok else "Option"
+        if label:
+            ans += f" {_q(label)}"
+        if free and free != label:
+            ans += f", Freitext {_q(free)}"
+    elif verdict == "other":
+        own = free or text
+        ans = f"eigene Antwort {_q(own)}" if own else "eigene Antwort"
     else:
-        ans = text or _VERDICT.get(verdict, verdict or "?")
-        if text and verdict in _VERDICT:
-            ans = f"{_VERDICT[verdict]} ({text})"
-    qpart = f" ({_q(q)})" if q else ""
-    return (f"voicehook-Call: Antwort von {by} auf deine Frage{nr}{qpart}: {ans}. Handle jetzt "
-            f"danach. / Answer from {by} to your question{nr}: {ans}. Act on it now.")
+        ans = _VERDICT.get(verdict, verdict or "?")
+        extra = free or (text if text and text != ans else "")
+        if extra:
+            ans += f", Freitext {_q(extra)}"
+    src_de, src_en = SOURCES.get(str(info.get("src") or ""), ("deine Frage", "your question"))
+    qpart = f" {_q(q)}" if q else ""
+    return (f"voicehook-Board{nr} ({src_de}):{qpart} -> {by} hat im Call-Board geantwortet: "
+            f"{ans}. Das ist die Antwort des Menschen auf deine eigene Frage, keine Fehlermeldung: "
+            f"handle jetzt danach. / voicehook board{nr} ({src_en}):{qpart} -> {by} answered on "
+            f"the call board: {ans}. The human's answer to your own question, not an error: act "
+            "on it now.")
+
+
+def record_question(skey: str, dec_id: str, question: str, number: object = None,
+                    options: list | None = None, src: str = "", note: bool = True) -> None:
+    """0.21.4: this session's question is on the board as #number: remember it (the answer
+    quotes it) and, for a question the session did not post itself (mirrored by notify.py /
+    asks.py), queue a note for its next hook event. Never raises."""
+    if not skey or not dec_id:
+        return
+    try:
+        def step(st: dict):
+            me = st["sessions"].setdefault(skey, {})
+            qs = me.get("qs") if isinstance(me.get("qs"), dict) else {}
+            qs.pop(dec_id, None)
+            qs[dec_id] = {"question": str(question or "")[:200], "src": src,
+                          **({"number": number} if isinstance(number, int) else {}),
+                          **({"options": [str(o)[:60] for o in options][:4]} if options else {})}
+            while len(qs) > QUESTIONS_KEEP:
+                qs.pop(next(iter(qs)))
+            me["qs"] = qs
+            if note and src.startswith("mirror"):
+                notes = [n for n in (me.get("notes") or []) if isinstance(n, str)]
+                notes.append(mirror_note(question, number, src))
+                me["notes"] = notes[-5:]
+        _with_state(step)
+    except Exception:  # noqa: BLE001, S110
+        pass
+
+
+def mirror_note(question: str, number: object, src: str) -> str:
+    nr = f" #{number}" if isinstance(number, int) and not isinstance(number, bool) else ""
+    q = _q(vact.scrub(str(question or "")).strip()[:160])
+    src_de, src_en = SOURCES.get(src, ("deine Frage", "your question"))
+    return (f"voicehook-Call: Deine Frage {q} steht jetzt als{nr} auf dem voicehook-Board "
+            f"({src_de}); Oliver kann sie dort beantworten, die Antwort kommt hierher und "
+            f"zitiert sie. / Your question {q} is now on the voicehook board as{nr} ({src_en}); "
+            "the answer comes here and quotes it.")
+
+
+def question_info(skey: str, dec_id: object) -> dict | None:
+    me = _session(skey) if skey else None
+    qs = me.get("qs") if isinstance(me, dict) and isinstance(me.get("qs"), dict) else {}
+    got = qs.get(str(dec_id or ""))
+    return got if isinstance(got, dict) else None
+
+
+def answer_texts(skey: str, evs: list[dict]) -> list[str]:
+    return [answer_text(e, question_info(skey, e.get("id"))) for e in evs]
+
+
+def take_notes(skey: str) -> list[str]:
+    """The pending mirror notes of this session (each delivered once)."""
+    def step(st: dict):
+        me = st["sessions"].get(skey)
+        if not isinstance(me, dict):
+            return []
+        notes = [n for n in (me.pop("notes", None) or []) if isinstance(n, str)]
+        return notes
+    try:
+        return _with_state(step)
+    except Exception:  # noqa: BLE001
+        return []
+
+
+_ID_RX = re.compile(r'"id"\s*:\s*"(d[0-9a-f]{6,12})"')
+_NUM_RX = re.compile(r'"number"\s*:\s*(\d{1,5})')
+
+
+def decide_question(command: object) -> str:
+    """The question text of a `vh-helper decide "<from>" "<question>"` or `voicehook-agent
+    decide --question "<q>"` Bash command ('' when not readable)."""
+    try:
+        for seg in _segments(str(command or "")):
+            words = _cmd_start(seg)
+            exe = words[0].rsplit("/", 1)[-1] if words else ""
+            if exe == "vh-helper" and len(words) > 3 and words[1] == "decide":
+                return words[3]
+            if exe in ("voicehook-agent", "voicehook_agent") and words[1:2] == ["decide"]:
+                for i, w in enumerate(words):
+                    if w == "--question" and i + 1 < len(words):
+                        return words[i + 1]
+                    if w.startswith("--question="):
+                        return w.split("=", 1)[1]
+    except Exception:  # noqa: BLE001
+        return ""
+    return ""
 
 
 def _spawn_post(job: dict) -> None:
