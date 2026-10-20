@@ -729,21 +729,27 @@ def vocab_request(term: str, wrongs: list[str] | None) -> dict:
 
 async def _vocab_add(ctl: _Control, body: dict) -> dict:
     """POST /api/bridge/vocab with this join's operator credential (bridge: its session,
-    WebRTC: its LiveKit token). One JSON answer, never the token."""
+    WebRTC: its LiveKit token, after it expired (404, 1 h) the helper pump token).
+    One JSON answer, never the token."""
     room = ctl.room
+    bearers = [b for b in (ctl.lk_jwt, getattr(ctl.helper_pump, "token", None)) if b]
     if room is not None and hasattr(room, "post_vocab"):
         status, data = await room.post_vocab(body)
-    elif ctl.lk_jwt and ctl.api_base:
+    elif bearers and ctl.api_base:
+        status, data = 0, {}
         try:
             async with httpx.AsyncClient(timeout=10.0, headers={"user-agent": _USER_AGENT,
                                                                 "x-vh-cli": _VERSION}) as http:
-                r = await http.post(ctl.api_base.rstrip("/") + VOCAB_PATH, json=body,
-                                    headers={"authorization": f"Bearer {ctl.lk_jwt}"})
-            status = r.status_code
-            try:
-                data = r.json()
-            except ValueError:
-                data = {}
+                for bearer in bearers:   # LiveKit token expired (404) -> pump token
+                    r = await http.post(ctl.api_base.rstrip("/") + VOCAB_PATH, json=body,
+                                        headers={"authorization": f"Bearer {bearer}"})
+                    status = r.status_code
+                    try:
+                        data = r.json()
+                    except ValueError:
+                        data = {}
+                    if status != 404 or len(bearers) == 1:
+                        break
         except httpx.HTTPError as e:
             return {"ok": False, "type": "vocab", "error": f"request failed ({type(e).__name__})"}
     else:
