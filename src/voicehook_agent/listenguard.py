@@ -1,4 +1,4 @@
-"""Listen guard (0.21.4): the joining Claude Code session never ends its turn deaf.
+"""Listen guard (0.21.4, 0.21.5): the joining Claude Code session never ends its turn deaf.
 
 Observed in live calls: the operator agent is joined (`status` says connected) but ends its
 turn while no `voicehook-agent next` waits for this join, or starts the listener detached so
@@ -11,6 +11,19 @@ socket (`status`, 1 s): the join counts the `next` requests that wait right now
 owns a connected join, nobody listens and the last `next` ended more than LISTEN_GAP_S ago
 (the gap between two `next` of a loop is not "deaf"), the hook answers
 `{"decision": "block", "reason": ...}` with the pending count and the command to start.
+
+0.21.5: the join holds the presence itself and spools every event (spool.py), so the agent
+is no longer "absent" while it works. `status` now says `listening: true` while join + spool
+hold the call, `consumers` = the waiting `next`/`listen` requests, `unread` / `unread_wake` =
+spool events not acked yet. The Stop hook blocks only when
+* wake-worthy events wait unread and no consumer is there to take them (`unread`),
+* this session's join process is gone without leaving the call (a spool is left behind,
+  `dead`), or
+* nothing would wake the agent: no consumer waits and the last one ended more than
+  LISTEN_GAP_S ago (`nolistener`; the join keeps the presence, but a user turn would only
+  pile up in the spool).
+The reason always names `voicehook-agent listen` with run_in_background. A join older than
+0.21.5 (no `consumers` field) is judged as before.
 
 Loop safety: on `stop_hook_active` (Claude Code already continues because of a Stop hook) it
 blocks again only when MORE sentences are pending than at its last block (state file
@@ -28,6 +41,7 @@ import time
 from pathlib import Path
 
 from . import session as vsession
+from . import spool as vspool
 
 ENV_OFF = "VOICEHOOK_LISTEN_GUARD"
 LISTEN_GAP_S = 5.0          # a `next` ended this recently: a loop between two calls
@@ -35,7 +49,8 @@ STATUS_TIMEOUT_S = 1.0      # control socket answer for the hook (Stop hook alar
 STATE_NAME = "listen-guard.json"
 LAST_BLOCK_KEEP_S = 600.0   # an older block state does not count for stop_hook_active
 LISTEN_CMD = "voicehook-agent listen"
-NEXT_LOOP = "voicehook-agent next --timeout 45"
+NEXT_LOOP = "voicehook-agent next --timeout 10"
+DEAD_RECENT_S = 3600.0      # a spool left by a dead join counts this long (then: stale)
 
 
 def _off() -> bool:
@@ -49,47 +64,75 @@ def _int(v: object) -> int:
         return 0
 
 
-def deaf(status: dict | None) -> bool:
-    """Is this join connected while no `next` waits for it (and none just ended)?
-    A join without the `listening` field (older than 0.21.4) never counts as deaf."""
+def kind(status: dict | None) -> str | None:
+    """Why this join's session must not end its turn: "unread", "nolistener" or None."""
     if not isinstance(status, dict) or not status.get("ok"):
-        return False
+        return None
     if not status.get("connected") or status.get("leaving") or "listening" not in status:
-        return False
-    if _int(status.get("listening")) > 0:
-        return False
+        return None
+    if "consumers" in status:  # 0.21.5 join: listening = join + spool hold the call
+        if _int(status.get("consumers")) > 0:
+            return None  # a `listen`/`next` waits: it takes every event at once
+        if _int(status.get("unread_wake")) > 0:
+            return "unread"
+    elif _int(status.get("listening")) > 0:  # 0.21.4 join: listening = waiting `next`
+        return None
     idle = status.get("listen_idle_s")
     just_ended = isinstance(idle, (int, float)) and not isinstance(idle, bool) \
         and idle < LISTEN_GAP_S
-    return not just_ended
+    return None if just_ended else "nolistener"
 
 
-def reason(status: dict, session: str = "") -> str:
-    pending = _int(status.get("pending"))
+def deaf(status: dict | None) -> bool:
+    """Is this join connected while nobody would take its events (0.21.4 name)?"""
+    return kind(status) is not None
+
+
+def _pending(status: dict) -> int:
+    return _int(status.get("unread_wake" if "unread_wake" in status else "pending"))
+
+
+def reason(status: dict, session: str = "", why: str | None = None) -> str:
     where = f" --session {session}" if session else ""
+    start = (f"Start the listen loop now with run_in_background (so the harness wakes you), e.g. "
+             f"`{LISTEN_CMD}{where}` (or `{NEXT_LOOP}{where}` in a loop), before ending the turn. "
+             f"Not detached with & or nohup: nobody would wake you. Leaving the call instead: "
+             f"`voicehook-agent leave`.")
+    why = why or kind(status) or "nolistener"
+    if why == "unread":
+        n = _pending(status)
+        return (f"You are in a live voicehook call and {n} event{'s' if n != 1 else ''} for you "
+                f"wait{'' if n != 1 else 's'} unread (the user or a decision). `{LISTEN_CMD}` prints "
+                f"the first one and exits; handle it, then start it again. {start}")
+    if why == "dead":
+        n = _int(status.get("unread"))
+        return (f"Your voicehook join process ended without leaving the call ({n} unread "
+                f"event{'s' if n != 1 else ''} left in its spool): nobody takes the user's turns "
+                f"now. Join again in the background (`voicehook-agent join <invite-url> --name "
+                f"... --model ... --json`), then {start[0].lower()}{start[1:]}")
+    pending = _int(status.get("pending"))
     return (f"You are in a live voicehook call and nobody is listening ({pending} pending). "
-            f"The user's sentences pile up and to them you have left the call. Start the listen "
-            f"loop now with run_in_background (so the harness wakes you), e.g. "
-            f"`{LISTEN_CMD}{where}` (or `{NEXT_LOOP}{where}` in a loop), before ending the "
-            f"turn. Not detached with & or nohup: nobody would wake you. Leaving the call "
-            f"instead: `voicehook-agent leave`.")
+            f"The call keeps you present, but nothing wakes you when the user speaks: the "
+            f"sentences pile up and to the user you do not answer. {start}")
 
 
 def decide(event: dict, status: dict | None, last: dict | None, now: float,
-           session: str = "") -> dict | None:
+           session: str = "", why: str | None = None) -> dict | None:
     """The Stop hook's answer for this session's own join (None = let the turn end).
     `status`: the join's status reply (None = no own join); `last`: the state of the last
-    block ({pending, at}) or None."""
+    block ({pending, at}) or None. `why`="dead": the join process is gone (status = the
+    spool counts read from disk)."""
     if not isinstance(event, dict) or str(event.get("agent_id") or "").strip():
         return None  # a subagent's Stop is not the joining agent's turn end
-    if not deaf(status):
+    why = why or kind(status)
+    if why is None:
         return None
-    pending = _int(status.get("pending"))  # type: ignore[union-attr]
+    pending = _int(status.get("unread")) if why == "dead" else _pending(status)  # type: ignore[union-attr]
     if event.get("stop_hook_active") and isinstance(last, dict):
         fresh = now - float(last.get("at") or 0.0) < LAST_BLOCK_KEEP_S
         if fresh and pending <= _int(last.get("pending")):
             return None  # already told once for this pending state: no loop
-    return {"decision": "block", "reason": reason(status, session)}
+    return {"decision": "block", "reason": reason(status, session, why)}  # type: ignore[arg-type]
 
 
 # --------------------------------------------------------------------------- #
@@ -110,6 +153,34 @@ def own_join_dirs(event: dict) -> list[Path]:
         except OSError:
             continue
     return [d for d in seen.values() if vact.dir_owner(d) == me]
+
+
+def dead_join_dirs(event: dict, now: float | None = None) -> list[Path]:
+    """0.21.5: join dirs of THIS session whose join process is gone without leaving the call:
+    session.json names a dead pid and the event spool is still there (a clean leave deletes
+    it), written within DEAD_RECENT_S."""
+    from . import activity as vact
+    from . import multisession as vmulti
+    me = vmulti.session_hash(event.get("session_id")) or vmulti.own_session_hash()
+    if not me:
+        return []
+    t = time.time() if now is None else now
+    out: list[Path] = []
+    try:
+        infos = sorted(vsession.sessions_root().glob(f"*/*/{vsession.INFO_NAME}"))
+    except OSError:
+        return []
+    for info in infos:
+        d = info.parent
+        try:
+            pid = int(json.loads(info.read_text(encoding="utf-8")).get("pid"))
+            age = t - os.lstat(d / vspool.EVENTS_NAME).st_mtime
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+        if pid <= 0 or vact._pid_alive(pid) or age > DEAD_RECENT_S or vact.dir_owner(d) != me:
+            continue
+        out.append(d)
+    return out
 
 
 def join_status(dir_: Path) -> dict | None:
@@ -144,10 +215,12 @@ def _read_state(dir_: Path) -> dict | None:
     return d if isinstance(d, dict) else None
 
 
-def _write_state(dir_: Path, pending: int, now: float) -> None:
+def _write_state(dir_: Path, pending: int, now: float, dead: bool = False) -> None:
+    state: dict = {"pending": pending, "at": now}
+    if dead:
+        state["dead"] = True
     try:
-        (dir_ / STATE_NAME).write_text(json.dumps({"pending": pending, "at": now}),
-                                       encoding="utf-8")
+        (dir_ / STATE_NAME).write_text(json.dumps(state), encoding="utf-8")
     except OSError:
         pass
 
@@ -161,11 +234,24 @@ def handle(raw: str, now: float | None = None) -> dict | None:
         if not isinstance(event, dict) or str(event.get("agent_id") or "").strip():
             return None
         t = time.time() if now is None else now
-        for d in own_join_dirs(event):
+        live = own_join_dirs(event)
+        for d in live:
             status = join_status(d)
             out = decide(event, status, _read_state(d), t, _label(d))
             if out is not None:
-                _write_state(d, _int((status or {}).get("pending")), t)
+                _write_state(d, _pending(status or {}), t)
+                return out
+        if live:
+            return None
+        for d in dead_join_dirs(event, t):  # 0.21.5: the join died without leaving
+            last = _read_state(d)
+            if isinstance(last, dict) and last.get("dead"):
+                continue  # told once for this dead join: never again
+            unread, wake = vspool.unread_on_disk(d)
+            out = decide(event, {"ok": True, "unread": unread, "unread_wake": wake},
+                         None, t, "", why="dead")
+            if out is not None:
+                _write_state(d, unread, t, dead=True)
                 return out
         return None
     except Exception:  # noqa: BLE001

@@ -62,12 +62,12 @@ voicehook-agent leave --say "See you soon."             # clean exit
 |---|---|---|
 | `say <text> [--mode append\|overwrite\|revise] [--urgent]` | `{"ok":true,"seq":3}` | 0 ok, 1 failed |
 | `next [--timeout SEC]` | `{"type":"user","text":...}`, `{"type":"revise","text":...,"unspoken":[...],"new":...}` (your `--mode revise` replaced own not-started says; if any still matters, send one merged `say --mode overwrite`), `{"type":"timeout"}`, `{"type":"ended"}`; 0.21.0 `{"type":"voicebot_left","room","text"}` / `{"type":"voicebot_back","room","seconds","text"}` (the voicebot dropped out, e.g. a server update: tell your user in chat, keep calling `next`, never leave; back: `say` works again. A takeover sends neither; also a JSONL line in `--json` mode) | 0, 3 on `ended` |
-| `listen [--timeout SEC] [--poll SEC]` (0.21.4) | the gapless `next` loop: ONE line, the first event that needs you (`user`, `decision`, `helper_decision`, `voicebot_left`, `missed`, `status_request`, `revise`, `call_end`); `timeout`, `human_state`, `voicebot_back` keep it waiting. `--timeout` 0 (default) = until an event. Run it in the harness's background mode, see [Listen guard](#listen-guard-never-end-a-turn-deaf-0214) | 0, 3 on `ended` / no join |
+| `listen [--timeout SEC] [--poll SEC]` (0.21.4) | the gapless `next` loop: ONE line, the first event that needs you (`user`, `decision`, `helper_decision`, `voicebot_left`, `missed`, `status_request`, `revise`, `call_end`, `data`); `timeout`, `human_state`, `voicebot_back` keep it waiting. `--timeout` 0 (default) = until an event; `--poll` (0.21.5: default 10, was 45) = timeout of each single `next`. Reads the join's event spool with a cursor and acks after the print ([Event spool](#event-spool-the-join-listens-for-you-0215)). Run it in the harness's background mode, see [Listen guard](#listen-guard-never-end-a-turn-deaf-0214) | 0, 3 on `ended` / no join |
 | `board [--open-only]`, `decide --list` (0.21.4) | `{"type":"board","open":[{id,number,from,question,options,recommend?,context?,recent?,faq?,state:"open"}],"recent":[... with verdict, option?, text?, by],"own_board":{...},"boards":[{from, doing, open, done, state?, meta?}],"note":"..."}`: what your join has seen on the boards. Decisions: your own and those of local helpers from the moment they are asked; remote helpers' (relay from another machine, MCP, bridge) only once answered, because the server has no decision listing for operators (`delta.decisions` goes to the humans only). Boards: yours plus every `operator.status` your join received (helper boards with `sub` and `state`, other operators) | 0, 3 no join |
 | `send-data --to <label\|identity\|*> (--json J \| --text T \| --file PATH) [--name N] [--mime M] [--id ID]` (0.21.4) | `{"ok":true,"type":"data","id":"...","to":["Scout"],"size":123}`: agent-to-agent data like MCP `send_data` (topic `operator.data`, only to other operator agents, never spoken, never to the humans or the voicebot). Bridge transport: `POST /api/bridge/data`, inline up to ~15 KB, larger files (max 10 MB) first via `POST /api/bridge/upload` and sent as `file_id`. WebRTC: the join sends the packet itself to the targets' identities, inline only (413 names `--transport bridge` for larger files). Incoming: `next` returns `{"type":"data","from","from_identity","kind":"json\|text\|file","id","name?","mime?","size?","payload"\|"url"+"file_id","summary":"Daten von Scout: JSON (1.2 KB)"}`, and `listen` wakes on it. A file `url` needs the Bearer of a bridge session in the same call | 0 ok, 1 failed, 3 no join |
 | `says` (0.9.0) | `{"type":"says","says":[{"seq":3,"state":"spoken","spoken_chars":12,"age_s":4.1,"text":"..."}]}`: last state of each own say (`sent` until the voicebot's first receipt) | 0 |
 | `leave [--say TEXT]` | `{"type":"leaving"}` | 0 |
-| `status` | room, identity, connected, pending events, idle seconds, peers; 0.21.4 `listening` (`next` requests waiting now), `listen_idle_s` (seconds since the last one ended, `null` = none yet), `leaving` | 0 |
+| `status` | room, identity, connected, pending events, idle seconds, peers; 0.21.4 `listen_idle_s` (seconds since the last `next` ended, `null` = none yet), `leaving`; 0.21.5 `listening` (bool: join + event spool hold the call, true from the first `say`/`next` on, also while you work), `consumers` (`next`/`listen` requests waiting now; 0.21.4 called this `listening`), `unread` / `unread_wake` (spool events not acked yet / the ones that need you), `last_consumed_s` (seconds since the last ack, `null` = none yet) | 0 |
 | `status [TEXT] [--doing T] [--open T]... [--done T]... [-f board.json]` (0.7.0) | `{"type":"board","board":{...}}`: sends your status board | 0 ok, 1 failed |
 | `decide --question T [--option T]... [--recommend N] [--context T] [--recent T]` (0.14.4) | `{"ok":true,"id":"d...","number":1}`: a question ONLY the human can decide (Decision Board, not the status board); the answer comes back in `next` as `{"type":"decision","verdict":"yes"\|"no"\|"option"\|"other"\|"unclear","option":N?,"text":"..."?}` | 0 ok, 1 failed |
 | `ui open\|close\|min\|medium\|large\|max <window>`, `ui layout <preset>`, `ui move <window> <slot> [--preset P]`, `ui focus <project\|all>` (0.21.0) | one line `ui: window log large`: the humans' call page changes like on their own click (see [Page control](#page-control-ui-0210)) | 0 ok, 1 failed, 2 invalid |
@@ -107,6 +107,25 @@ voicehook-agent leave --say "See you soon."             # clean exit
   Turns spoken while you were thinking are kept, never lost. `--timeout 0` only
   returns what is already queued. Each event carries `ts` (unix time it was
   spoken).
+### Event spool: the join listens for you (0.21.5)
+
+The running `join` is the listener. From your first `say`/`next` on, every event for `next`
+goes into an append-only JSONL spool in the join's session dir (`events.jsonl` + the cursor
+`cursor.json`, both 0600, dir 0700), and the join keeps you present for the server by
+itself: `operator.alive` every 10 s with `idle_s` 0 (the join is "in next"),
+`consumer_idle_s` = how long you have not served say/next. Working for minutes between two
+`next` no longer makes you "not reachable".
+
+`next`, `listen` and the MCP `next` read the spool with a cursor: the join hands an event
+out (`{"cmd":"next","lease":true}` -> the reply carries `seq`), the consumer prints it and
+then acks it (`{"cmd":"ack","seq":N}`). A consumer killed before the ack loses nothing: the
+event is handed out again after 15 s. An acked event never comes twice, also across
+restarts of the consumer and of the join itself (self-update re-exec in the same session
+dir picks up what was not acked, within 10 min). `call_end` and `status_request` still come
+first. On leave the spool is deleted; nothing of the call stays on disk, and nothing but the
+spool holds event content. The orphan guards (`--idle-timeout`, owner pid) still count only
+your own say/next.
+
 ### Listen guard: never end a turn deaf (0.21.4)
 
 In a call, your turn may only end while something waits for the user: a `next` that
@@ -128,6 +147,14 @@ pending). ... Start the listen loop now with run_in_background ..."}` and the tu
 Loop-safe: with `stop_hook_active` it blocks again only when more sentences are pending than
 at its last block. Never: outside a call, for other sessions (helpers, `owner_session` of
 the join), subagents, a leaving join, a join older than 0.21.4 (no `listening` field).
+
+0.21.5 (event spool): the presence no longer depends on it, the hook blocks only when
+(a) wake-worthy events wait unread in the spool and no `listen`/`next` waits (`N events for
+you wait unread`), (b) this session's join process is gone without leaving the call (its
+spool is still there; told once per dead join: join again, then `listen`), or (c) nothing
+would wake you: no `listen`/`next` waits and the last one ended more than 5 s ago (the join
+keeps you present, but a user turn would only pile up). Every reason names
+`voicehook-agent listen` with run_in_background. A 0.21.4 join is judged as before.
 `VOICEHOOK_LISTEN_GUARD=0` turns it off. To end the call instead: `voicehook-agent leave`.
 
 - Queueing starts with your first `say` or `next`. Turns spoken before that are
@@ -264,6 +291,28 @@ the join), subagents, a leaving join, a join older than 0.21.4 (no `listening` f
 > Since 0.2.0, `--keep-alive` is the default: **stdin-EOF no longer quits** and
 > transient room-disconnects auto-reconnect. Run with a closed stdin in the
 > background without the FIFO sleep-holder hack. See [Relay flags](PROTOCOL.md#relay-flags).
+
+### Klartext rule: decisions and board items anyone can follow (0.21.5)
+
+Live: "db quick wins 620", "SE gate 519 95 grün", "Indizes nach 18h" on the boards, nobody
+could follow. `decide --question` (also over the relay and the MCP `decide`) must be a whole
+sentence (at least 30 characters, 5 words) that names the product or area, what happens and
+why, and ends with `?` (a parenthesis may follow); no bare PR/ticket number without a
+description, no digit chains, no unexplained abbreviation (SE, WF, RLS, CI, DB ... only as
+"Sales Engine (SE)" or "SE (Sales Engine)"; PR, KI, UI, URL, API and a few more are fine).
+`--context` is mandatory for a new decision (MCP: `context` is required). A violation: exit
+2, `{"ok":false,"type":"invalid","error":"Entscheidung nicht im Klartext, nichts gesendet:
+..."}` with every rule broken and how to fix it; nothing is sent. No purpose word ("damit",
+"um ... zu", "so that" ...): only a `[hint]` on stderr. `status --doing/--open/--done` items
+and `activity` lines get the same checks (at least 3 words) as a `[warn] Klartext ...` line
+on stderr, never refused. `VOICEHOOK_PLAIN_CHECK=0` turns it off.
+
+| | |
+|---|---|
+| bad | `DB quick wins 620?` |
+| good | `Sales Engine: vier Datenbank-Indizes anlegen, damit die Admin-Ansicht schneller lädt? (nachts, ohne Ausfall)` |
+| bad (board) | `SE gate 519 95 grün` |
+| good (board) | `Sales Engine: Freigabe-Prüfung für 519 Firmen bestanden, 95 Prozent grün` |
 
 ### Decision background (0.21.0)
 
@@ -425,6 +474,24 @@ log, never published).
   for a curl bridge join) writes tool lines there; every other session reaches the call
   labeled through the multi-session relay below, never as the joining agent's own lines. The file is cleared when a join starts
   and ends, mode 0600, trimmed to the last 50 lines above 200.
+- **No call bookkeeping (0.21.5):** Delta read out lines like "Read call event", "Wait for
+  next call event", "Restart listening loop". The hook now drops a tool call that only
+  manages the call: a Bash command made only of `voicehook-agent` / `vh-helper`
+  `next|listen|status|say|says|board|decide|activity|send-data|relay-next|show|ui|leave`,
+  listen/wait wrappers (basename `vh-*` / `voicehook-*` or containing `listen`/`wait`, also
+  as `bash wrapper.sh`), reads of background task output (`*.output`, `/tasks/`), with
+  `sleep` and read-only probes around them (a plain `sleep 300` with its own description
+  stays); the task output tools (TaskOutput, BashOutput), voicehook MCP tools, a Read of a
+  task output file; and descriptions whose words are only call words (call, event, listen,
+  loop, Ereignis, Anruf, ...) and fillers (read, wait, next, restart, ...). Own ignore list:
+  `VOICEHOOK_ACTIVITY_IGNORE` (regexes, separated by newline or `;;`) and
+  `~/.voicehook/activity-ignore.txt` (one regex per line, `#` comments), case-insensitive on
+  description and command. `VOICEHOOK_ACTIVITY_FILTER=0` turns the built-in rules off.
+- **Subagents (0.21.5):** Delta read a background agent's internal test steps in first person
+  as the operator's own work. A tool call inside a subagent (hook payload `agent_id` /
+  `agent_type`, or a transcript under `.../subagents/`) is dropped by default;
+  `VOICEHOOK_SUBAGENT_ACTIVITY=bundle` logs one line per subagent instead,
+  `note: Hintergrund-Agent für <agent_type> arbeitet`.
 
 ### Multi-session relay: every Claude Code session of a machine in the call (0.15.0)
 
@@ -488,6 +555,20 @@ restart; from then on they report turn goal, PR, deploy, errors, questions and t
 board through the multi-session relay. With the hook already installed there is no `ask`:
 they report by themselves. `reporting` = sessions whose hook reported in the last 2 h.
 Never spoken, never sent into the call. `VOICEHOOK_SESSIONS_HINT=0` turns it off.
+
+**Multi-agent onboarding (0.21.5).** Once per join, right after the connect, the join offers
+the multi-agent feature: `--json` one event `{"role":"system","topic":"_meta",
+"_meta":"onboarding","lang":"de"|"en","text":"...","commands":{"invite":[...],"share":[...]}}`
+on stdout, plain mode one `[onboarding] ...` line on stderr. German or English by the locale
+(`LC_ALL`, `LC_MESSAGES`, `LANG`). It tells you to ask the human and lists ready commands:
+(1) invite: `voicehook-agent hook install` (Codex `--agent codex`) for the other sessions of
+this machine as helpers, `voicehook-agent join <invite-url> --name <Name> --model <Model>
+--json` for a session with its own voice, `voicehook-agent helper-credential --label <host>
+| ssh <host> 'voicehook-agent helper-import'` for another machine; (2) show and share:
+`voicehook-agent status --doing ... --open ...`, `voicehook-agent decide --question ...
+--context ...` (over the relay), the activity log comes through the hook, `voicehook-agent
+board` lists every board and open decision. Placeholders only, never a credential or the
+invite link. Never spoken. `VOICEHOOK_ONBOARDING_HINT=0` turns it off.
 
 **Agents on MCP or the bridge (no CLI):** they cannot see the machine's sessions. Say that it
 works in principle, but needs the voicehook-agent CLI on this machine, in one line:

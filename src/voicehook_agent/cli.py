@@ -12,6 +12,9 @@ Agent loop without polling (against the running join, via a local socket):
     voicehook-agent next --timeout 60            # block until the next user turn
     voicehook-agent listen                       # 0.21.4: gapless next loop, exits on the
                                                  # first actionable event (run_in_background)
+                                                 # 0.21.5: reads the join's durable event
+                                                 # spool with a cursor; the join itself
+                                                 # keeps you present while you work
     voicehook-agent leave                        # end the join cleanly
     voicehook-agent status                       # connection + room state
 
@@ -221,9 +224,11 @@ from . import datachan as vdata
 from . import helperaccess as vhelp
 from . import localsessions as vlocal
 from . import multisession as vmulti
+from . import plaintext as vplain
 from . import relayops as vrelayops
 from . import selfupdate as vselfupdate
 from . import session as vsession
+from . import spool as vspool
 from . import transport as vtransport
 from . import ui as vui
 from . import visual as vvisual
@@ -434,6 +439,84 @@ async def _emit_sessions_hint(json_mode: bool, detect=None) -> dict | None:
         print(json.dumps(got, ensure_ascii=False), flush=True)
     else:
         print(f"[sessions] {got['text']}", file=sys.stderr, flush=True)
+    return got
+
+
+# 0.21.5 onboarding: right after the join the agent learns how to bring more agents into the
+# call (multi-agent). Never spoken, no credential (placeholders only). Off: VOICEHOOK_ONBOARDING_HINT=0.
+ONBOARDING_ENV = "VOICEHOOK_ONBOARDING_HINT"
+ONBOARDING_INVITE = [
+    "voicehook-agent hook install",
+    "voicehook-agent hook install --agent codex",
+    "voicehook-agent join <invite-url> --name <Name> --model <Model> --json",
+    "voicehook-agent helper-credential --label <host> | ssh <host> 'voicehook-agent helper-import'",
+]
+ONBOARDING_SHARE = [
+    'voicehook-agent status --doing "<step + ETA>" --open "<task>"',
+    'voicehook-agent decide --question "<question>?" --context "<what, why, yes/no>"',
+    "voicehook-agent board",
+]
+_ONBOARDING_TEXT = {
+    "de": ("Multi-Agent: du kannst weitere Agenten in diesen Call holen. Frag den Menschen, ob du "
+           "das einrichten sollst. (1) Einladen: jede weitere Claude-Code-Session dieses Rechners "
+           "meldet sich nach einmal `{i0}` (Codex: `{i1}`) als Helfer im Call; soll sie mit eigener "
+           "Stimme sprechen (jeder Agent eigene Stimme), tritt sie selbst bei: `{i2}` (derselbe "
+           "Einladungslink). Anderer Rechner: `{i3}` (nie in einen Chat kopieren). (2) Einblenden "
+           "und teilen: Helfer zeigen ihr Status-Board mit `{s0}` und offene Entscheidungen mit "
+           "`{s1}` im Call (über den Relay), ihr Aktivitätslog kommt per Hook von selbst; `{s2}` "
+           "zeigt dir alle Boards und offenen Entscheidungen. (3) Klartext-Regel für alle: "
+           "Entscheidungen und Board-Einträge als ganzer Satz mit Produkt oder Bereich, was "
+           "passiert und wozu, keine nackten PR-Nummern, Ziffernketten oder unerklärten "
+           "Abkürzungen, Entscheidungen mit ? und --context; schlecht: \"{bad}\", gut: "
+           "\"{good}\"."),
+    "en": ("Multi-agent: you can bring more agents into this call. Ask the human whether to set "
+           "it up. (1) Invite: every other Claude Code session on this machine reports as a "
+           "helper in the call after running `{i0}` once (Codex: `{i1}`); to speak with its own "
+           "voice (every agent has its own voice), it joins itself: `{i2}` (the same invite "
+           "link). Another machine: `{i3}` (never paste it into a chat). (2) Show and share: "
+           "helpers put their status board into the call with `{s0}` and open decisions with "
+           "`{s1}` (over the relay); their activity log comes by itself through the hook; `{s2}` "
+           "shows you every board and open decision. (3) Plain-language rule for everyone: "
+           "decisions and board items as a whole sentence naming the product or area, what "
+           "happens and why, no bare PR numbers, digit chains or unexplained abbreviations, "
+           "decisions with ? and --context; bad: \"{bad}\", good: \"{good}\"."),
+}
+
+
+def onboarding_lang(env=None) -> str:
+    """'de' when the locale is German (LC_ALL, LC_MESSAGES, LANG), else 'en'."""
+    env = os.environ if env is None else env
+    for k in ("LC_ALL", "LC_MESSAGES", "LANG"):
+        v = (env.get(k) or "").strip()
+        if v:
+            return "de" if v.lower().startswith("de") else "en"
+    return "en"
+
+
+def onboarding_hint(env=None) -> dict | None:
+    """The `_meta: onboarding` event (None: off)."""
+    env = os.environ if env is None else env
+    if (env.get(ONBOARDING_ENV) or "").strip().lower() in ("0", "false", "no", "off"):
+        return None
+    lang = onboarding_lang(env)
+    fmt = {**{f"i{n}": c for n, c in enumerate(ONBOARDING_INVITE)},
+           **{f"s{n}": c for n, c in enumerate(ONBOARDING_SHARE)},
+           "bad": vplain.BAD_EXAMPLE, "good": vplain.GOOD_EXAMPLE}
+    return {"role": "system", "topic": "_meta", "_meta": "onboarding", "lang": lang,
+            "text": _ONBOARDING_TEXT[lang].format(**fmt),
+            "commands": {"invite": list(ONBOARDING_INVITE), "share": list(ONBOARDING_SHARE)},
+            "rule": {"text": vplain.RULE, "bad": vplain.BAD_EXAMPLE, "good": vplain.GOOD_EXAMPLE}}
+
+
+def _emit_onboarding_hint(json_mode: bool, env=None) -> dict | None:
+    """0.21.5: --json: one `_meta` event `onboarding` on stdout; plain: one line on stderr."""
+    got = onboarding_hint(env)
+    if got is None:
+        return None
+    if json_mode:
+        print(json.dumps(got, ensure_ascii=False), flush=True)
+    else:
+        print(f"[onboarding] {got['text']}", file=sys.stderr, flush=True)
     return got
 
 
@@ -802,7 +885,9 @@ class _Control:
         self.ident = ident
         self.say_tracker = say_tracker
         self.echo = echo
-        self.events = vsession.EventQueue()
+        # 0.21.5: the join is the listener: events go into a durable spool (spool.py), `next`
+        # leases + acks them; _join() points it at the session dir (memory only until then)
+        self.events = vspool.SpoolQueue()
         self.watchdog = vsession.IdleWatchdog(timeout=idle_timeout)
         self.quit = asyncio.Event()
         self.room: rtc.Room | None = None
@@ -1396,11 +1481,17 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         if ctl.watchdog.timeout > 0:
             timeout = min(timeout, ctl.watchdog.timeout)
         ctl.watchdog.enter()
-        listen = timeout > 0  # 0.21.4 listen guard: a waiting `next` = someone listens
+        listen = timeout > 0  # 0.21.4 listen guard: a waiting `next` = a consumer waits
         if listen:
             ctl.listening += 1
+        seq = None
         try:
-            ev = await ctl.events.get(timeout)
+            if req.get("lease"):  # 0.21.5: handed out until the consumer acks it (spool.py)
+                got = await ctl.events.lease(timeout)
+                ev = None if got is None else got[1]
+                seq = None if got is None else got[0]
+            else:  # older clients: consumed at once
+                ev = await ctl.events.get(timeout)
         finally:
             ctl.watchdog.leave()
             if listen:
@@ -1420,7 +1511,14 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
             return {"ok": True, "type": "timeout", "pending": 0, **hints}
         if ev.get("type") == "user":
             ctl.clock.delivered()
-        return {"ok": True, **ev, "pending": len(ctl.events), **hints}
+        out = {"ok": True, **ev, "pending": len(ctl.events), **hints}
+        if seq is not None:
+            out["seq"] = seq  # 0.21.5: the consumer sends {"cmd":"ack","seq":N} once it has it
+        return out
+    if cmd == "ack":  # 0.21.5: the consumer printed the event, never hand it out again
+        acked = ctl.events.ack(req.get("seq"))
+        return {"ok": True, "type": "ack", "seq": req.get("seq"), "acked": acked,
+                "pending": len(ctl.events)}
     if cmd == "leave":
         ctl.watchdog.touch()
         text = str(req.get("say") or "").strip()
@@ -1474,13 +1572,26 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         return {"ok": True, "type": "status", "room": ctl.slug, "identity": ctl.ident,
                 "connected": room is not None, "pending": len(ctl.events),
                 "idle_s": round(ctl.watchdog.idle_for(), 1),
-                # 0.21.4 listen guard (listenguard.py): `next` requests waiting right now,
-                # seconds since the last one ended (null: none yet), leaving
-                "listening": ctl.listening, "listen_idle_s": _listen_idle(ctl),
+                # 0.21.5 (listenguard.py): listening = the join + its spool hold the call
+                # (true from the first say/next on, also while you work); consumers = `next`
+                # / `listen` requests waiting right now; unread / unread_wake = spool events
+                # not acked yet (all / the ones that need you); last_consumed_s = seconds
+                # since the last ack (null: none yet); listen_idle_s = since the last `next`
+                # ended (null: none yet)
+                "listening": _spool_listening(ctl), "consumers": ctl.listening,
+                "unread": ctl.events.unread(), "unread_wake": ctl.events.unread_wake(),
+                "last_consumed_s": ctl.events.last_consumed_s(),
+                "listen_idle_s": _listen_idle(ctl),
                 "leaving": ctl.leaving,
                 "idle_timeout_s": ctl.watchdog.timeout,
                 "peers": sorted(peers, key=lambda d: d["identity"])}
     return {"ok": False, "error": f"unknown cmd {cmd!r}"}
+
+
+def _spool_listening(ctl: _Control) -> bool:
+    """0.21.5: the join itself listens for the agent: connected, spool armed and open."""
+    return (ctl.room is not None and bool(ctl.events.armed) and not ctl.events.closed
+            and not ctl.leaving)
 
 
 def _listen_idle(ctl: _Control) -> float | None:
@@ -1496,8 +1607,12 @@ async def _publish_alive(ctl: _Control, alive: bool) -> bool:
     room = ctl.room
     if room is None:
         return False
+    consumer_idle = round(ctl.watchdog.idle_for(), 1)
+    # 0.21.5: while the join's spool listens, the join itself is "in next" for the server
+    # (idle_s 0); consumer_idle_s = how long the agent has not served say/next (info only)
     payload = {"alive": alive, "ts": time.time(),
-               "idle_s": round(ctl.watchdog.idle_for(), 1)}
+               "idle_s": 0.0 if alive and _spool_listening(ctl) else consumer_idle,
+               "consumer_idle_s": consumer_idle}
     try:
         await room.local_participant.publish_data(
             json.dumps(payload).encode("utf-8"), reliable=True, topic="operator.alive")
@@ -1510,12 +1625,16 @@ async def _publish_alive(ctl: _Control, alive: bool) -> bool:
 async def _alive_loop(ctl: _Control) -> None:
     """Sign of life: send `operator.alive` every `alive_interval` s while the
     brain served say/next within `alive_window` s, and at once when it comes
-    back. Silent while orphaned (the UI dims the chip after ~20 s)."""
+    back. Silent while orphaned (the UI dims the chip after ~20 s).
+    0.21.5: also the whole time the join's spool listens (_spool_listening): the agent
+    stays present while it works between two `next`; the orphan guards still count
+    only the agent's own say/next (watchdog)."""
     tick = max(0.05, min(1.0, ctl.alive_interval / 4))
     last_sent = 0.0
     was_active = False
     while not ctl.quit.is_set():
-        active = ctl.room is not None and ctl.watchdog.idle_for() < ctl.alive_window
+        active = ctl.room is not None and (_spool_listening(ctl)
+                                           or ctl.watchdog.idle_for() < ctl.alive_window)
         now = time.monotonic()
         due = not was_active or now - last_sent >= ctl.alive_interval
         if active and not ctl.leaving and due and await _publish_alive(ctl, True):
@@ -2401,6 +2520,9 @@ async def _connect_and_listen(
     if share_hint is not None and not share_hint.get("shown"):
         share_hint["shown"] = True  # once per join: never again on a reconnect cycle
         _emit_share_hint(json_mode)
+    if share_hint is not None and not share_hint.get("onboarding"):
+        share_hint["onboarding"] = True  # 0.21.5: multi-agent onboarding, once per join
+        _emit_onboarding_hint(json_mode)
     if share_hint is not None and not share_hint.get("sessions"):
         share_hint["sessions"] = True  # 0.21.4: the other agent sessions of this machine, once
         st = asyncio.create_task(_emit_sessions_hint(json_mode))
@@ -2716,6 +2838,13 @@ async def _join(
                                            # 0.15.0: hash only; hooks of other sessions skip this join
                                            "owner_session": vmulti.own_session_hash()})
             vactivity.write_pointer(sess_dir)  # 0.13.0: hook finds us under any home
+            # 0.21.5: durable event spool in the session dir (0600); a restart of this join
+            # (self-update) picks up what was not acked yet, an old one is deleted
+            ctl.events = vspool.SpoolQueue(sess_dir)
+            resumed = ctl.events.resume()
+            if resumed:
+                _print_event(json_mode, "system", f"event spool: {resumed} unread event(s) "
+                             "kept from the previous run of this join", topic="_meta")
             _print_event(json_mode, "system",
                          f"control socket ready: {server.sock_path}", topic="_meta")
     vactivity.clear(sess_dir)  # 0.10.0: no activity lines of a previous call leak in
@@ -2852,6 +2981,8 @@ async def _join(
         if server is not None:
             await asyncio.sleep(0.05)
             await server.close()
+            if rc != RC_RESTART:  # 0.21.5: no turn of the call stays on disk (spool.py)
+                ctl.events.clear()
             vsession.remove_info(sess_dir)
             vactivity.remove_pointer(sess_dir)
             vactivity.clear(sess_dir)
@@ -3081,6 +3212,8 @@ def _client_request(args) -> dict:
         if text == "-":
             text = sys.stdin.read()
         vactivity.note_line(text)  # ValueError when empty -> exit 1 before connecting
+        for w in vplain.item_warnings([text.strip()], "Aktivität"):  # 0.21.5 Klartext
+            print(w, file=sys.stderr, flush=True)
         req = {"cmd": "activity", "text": text.strip()}
         meta = relay.item_meta(getattr(args, "context", None), getattr(args, "faq", None),
                                warn=lambda m: print(m, file=sys.stderr, flush=True))
@@ -3110,6 +3243,8 @@ def _client_request(args) -> dict:
                 req["delete"] = True
             else:  # change an open decision ('' clears context/recent)
                 if args.question is not None:
+                    for w in vplain.check_decide(args.question, context, new=False):  # 0.21.5
+                        print(w, file=sys.stderr, flush=True)
                     req["question"] = args.question
                 if args.option:
                     req["options"] = args.option
@@ -3128,6 +3263,10 @@ def _client_request(args) -> dict:
             return req
         if not args.question:
             raise ValueError("decide needs --question (plus optional --option/--recommend/--context)")
+        # 0.21.5 Klartext: a whole sentence ending with ?, no bare numbers or abbreviations,
+        # --context mandatory; PlainError -> exit 2, nothing sent (plaintext.py)
+        for w in vplain.check_decide(args.question, context):
+            print(w, file=sys.stderr, flush=True)
         req = {"cmd": "decide", "question": args.question}
         faq = _decide_faq(args)
         if faq:
@@ -3159,6 +3298,9 @@ def _client_request(args) -> dict:
                            len(args.open or []), len(args.done or []), warn)
         if meta:  # 0.21.4: per item {context, faq}, hidden, for the voicebot
             board["meta"] = meta
+        items = [board.get("doing") or ""] + list(board.get("open") or []) + list(board.get("done") or [])
+        for w in vplain.item_warnings([i for i in items if isinstance(i, str) and i.strip()]):
+            warn(w)  # 0.21.5 Klartext, a warning: never refused while you work
         missing = relay.missing_meta(board)
         if missing:  # 0.21.4 mandatory, but never refused during a live call
             warn(f"{relay.MANDATORY_HINT} Fehlt bei: " + "; ".join(missing[:5]))
@@ -3234,7 +3376,8 @@ def _run_client(args) -> int:
     next timeout), 1 = request failed, 3 = no running join / join ended."""
     try:
         req = _client_request(args)
-    except (vvisual.VisualError, vcards.CardError, vui.UiError) as e:  # bad shape/card/ui: nothing sent, exit 2
+    except (vvisual.VisualError, vcards.CardError, vui.UiError,
+            vplain.PlainError) as e:  # bad shape/card/ui/0.21.5 not plain language: nothing sent, exit 2
         print(json.dumps({"ok": False, "type": "invalid", "error": str(e)}, ensure_ascii=False),
               flush=True)
         print(f"[error] {e}", file=sys.stderr, flush=True)
@@ -3253,6 +3396,8 @@ def _run_client(args) -> int:
         sock = vsession.resolve_socket(args.session,
                                        wait=30.0 if wait_answer else args.wait)
         sock_timeout = None if args.cmd == "next" else PHONE_SOCK_TIMEOUT_S.get(req["cmd"], 30.0)
+        if req.get("cmd") == "next":
+            req = {**req, "lease": True}  # 0.21.5: acked below, after the print (spool.py)
         reply = vsession.request(sock, req, timeout=sock_timeout)
     except vsession.SessionError as e:
         print(json.dumps({"ok": False, "type": "no-session", "error": str(e)},
@@ -3270,6 +3415,8 @@ def _run_client(args) -> int:
               flush=True)
         return 0
     print(json.dumps(reply, ensure_ascii=False), flush=True)
+    if req.get("cmd") == "next":
+        _ack(vsession.request, sock, reply)
     if reply.get("type") == "ended":
         return 3
     return 0 if reply.get("ok") else 1
@@ -3286,9 +3433,21 @@ WAIT_ANSWER = -1.0  # `decide --wait` without SEC: wait for the answer (helper s
 
 # 0.21.4 `listen`: the gapless `next` loop. It prints and exits on the first event that needs
 # the agent; everything else (timeout, human_state, voicebot_back) keeps it waiting.
-LISTEN_WAKE = ("user", "decision", "helper_decision", "voicebot_left", "missed",
-               "status_request", "revise", "call_end", "data")
-LISTEN_POLL_S = 45.0
+LISTEN_WAKE = vspool.WAKE_TYPES
+# 0.21.5: 10 s (was 45): each single `next` of the loop; the join keeps the presence itself
+LISTEN_POLL_S = 10.0
+
+
+def _ack(request, sock, reply: dict) -> None:
+    """0.21.5: tell the join the event is out (spool cursor); best effort, never raises.
+    A missing ack only means the event comes once more after spool.LEASE_S."""
+    seq = reply.get("seq")
+    if seq is None:
+        return
+    try:
+        request(sock, {"cmd": "ack", "seq": seq}, timeout=5.0)
+    except (vsession.SessionError, OSError, ValueError):
+        pass
 
 
 def _run_listen(args, request=None, resolve=None, clock=time.monotonic) -> int:
@@ -3311,7 +3470,8 @@ def _run_listen(args, request=None, resolve=None, clock=time.monotonic) -> int:
             _print_json({"ok": True, "type": "timeout", "pending": 0})
             return 0
         try:
-            reply = request(sock, {"cmd": "next", "timeout": max(1.0, wait)}, timeout=None)
+            reply = request(sock, {"cmd": "next", "timeout": max(1.0, wait), "lease": True},
+                            timeout=None)
         except (vsession.SessionError, OSError) as e:
             _print_json({"ok": False, "type": "no-session", "error": repr(e)})
             return 3
@@ -3324,7 +3484,9 @@ def _run_listen(args, request=None, resolve=None, clock=time.monotonic) -> int:
             return 1
         if kind in LISTEN_WAKE:
             _print_json(reply)
+            _ack(request, sock, reply)  # after the print: a kill in between = once more, never lost
             return 0
+        _ack(request, sock, reply)  # timeout / human_state / voicebot_back: consumed silently
 
 
 def _print_json(obj: dict) -> None:
@@ -3587,9 +3749,12 @@ def main(argv: list[str] | None = None) -> None:
     p_listen = sub.add_parser(
         "listen", help="0.21.4: the gapless listen loop: repeats `next` and prints ONE JSON line "
         "on the first event that needs you (user, decision, helper_decision, voicebot_left, "
-        "missed, status_request, revise, call_end), then exits 0 (3 = join ended). Run it with "
-        "the harness's background mode (Claude Code: run_in_background), never detached with "
-        "& or nohup: the exit is what wakes you. Start it again after handling the event.")
+        "missed, status_request, revise, call_end, data), then exits 0 (3 = join ended). Run it "
+        "with the harness's background mode (Claude Code: run_in_background), never detached "
+        "with & or nohup: the exit is what wakes you. Start it again after handling the event. "
+        "0.21.5: it reads the join's event spool with a cursor (an event is acked after the "
+        "print, so a killed listen loses none); you stay present in the call while you work "
+        "without it, the join holds the presence itself.")
     p_listen.add_argument("--timeout", type=float, default=0.0, metavar="SEC",
                           help="give up after SEC seconds with {\"type\":\"timeout\"} "
                                "(default 0 = wait until an event)")
@@ -3605,7 +3770,9 @@ def main(argv: list[str] | None = None) -> None:
     _add_session(p_leave)
     p_status = sub.add_parser(
         "status", help="no args: show the running join's state as JSON; with text/flags: send "
-        "your status board (operator.status, replaces the last one, never spoken)")
+        "your status board (operator.status, replaces the last one, never spoken). 0.21.5 "
+        "Klartext (a warning otherwise): every item names the area and what happens, no bare "
+        f"numbers or abbreviations; bad: '{vplain.BAD_ITEM}', good: '{vplain.GOOD_ITEM}'")
     p_status.add_argument("text", nargs="?", default=None,
                           help="what you are doing right now, one sentence ('' = finished, clears)")
     p_status.add_argument("--doing", default=None, action=_SeqAction, help="current task (same as TEXT)")
@@ -3736,7 +3903,7 @@ def main(argv: list[str] | None = None) -> None:
     p_act = sub.add_parser(
         "activity", help="append one line `HH:MM:SS note: <text>` to the activity log of the "
         "running join (for agents without the Claude Code hook); send your own short status "
-        "line 1:1, 3-8 words")
+        "line 1:1, 3-8 words, in plain language (0.21.5: no bare numbers or abbreviations)")
     p_act.add_argument("text", nargs="+", help="what is happening now ('-' reads it from stdin); "
                        "scrubbed, capped at 120 chars; no paths, secrets or personal data")
     p_act.add_argument("--project", default=None, metavar="NAME",
@@ -3753,12 +3920,18 @@ def main(argv: list[str] | None = None) -> None:
     # result comes back as a `next` event type "decision". Create, change or delete.
     p_dec = sub.add_parser(
         "decide", help="ask the human a decision (Decision Board, not the status board): "
-        "yes/no or 2-3 options; the answer arrives as a `next` event type decision")
+        "yes/no or 2-3 options; the answer arrives as a `next` event type decision. 0.21.5 "
+        "Klartext (else exit 2, nothing sent): a whole sentence that names the product or "
+        "area, what happens and why, ending with ?; no bare PR/ticket numbers, digit chains "
+        "or unexplained abbreviations (SE, WF, RLS, CI ... only with the long form); "
+        f"--context is mandatory. Bad: '{vplain.BAD_EXAMPLE}' Good: '{vplain.GOOD_EXAMPLE}'")
     p_dec.add_argument("--question", default=None, metavar="TEXT",
                        help="the question, max 160 chars (yes/no when no --option is given). "
-                            "Only a real decision the human can make from the board alone: name "
-                            "the thing ('PR #96 mergen?', never 'Weiter?'/'Freigabe?') and give "
-                            "--context (what, why, what yes/no does)")
+                            "Only a real decision the human can make from the board alone, in "
+                            "plain language (0.21.5, checked): a whole sentence with product or "
+                            "area, what happens and why, ending with ?, never 'Weiter?'/"
+                            f"'Freigabe?'/'{vplain.BAD_EXAMPLE}'; good: '{vplain.GOOD_EXAMPLE}'. "
+                            "Give --context (what, why, what yes/no does)")
     p_dec.add_argument("--option", action="append", default=[], metavar="TEXT",
                        help="an answer option, max 40 chars (give 2 or 3; repeatable)")
     p_dec.add_argument("--recommend", type=int, default=None, metavar="N",
@@ -3768,7 +3941,7 @@ def main(argv: list[str] | None = None) -> None:
     p_dec.add_argument("--delete", action="store_true", default=False,
                        help="delete the decision given by --id")
     p_dec.add_argument("--context", default=None, metavar="TEXT",
-                       help=f"0.21.0, always pass it: background for Delta, never shown to the human "
+                       help=f"0.21.0, mandatory since 0.21.5 for a new decision: background for Delta, never shown to the human "
                             f"(max {DECIDE_CONTEXT_MAX} chars): 2-4 plain sentences, what it is about, why, "
                             "what happens on yes, what on no. With --id: change it ('' clears)")
     p_dec.add_argument("--faq", action="append", default=[], metavar="'FRAGE::ANTWORT'",

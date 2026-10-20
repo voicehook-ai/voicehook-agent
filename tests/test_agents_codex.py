@@ -290,6 +290,7 @@ def test_mcp_without_call_is_an_error_not_a_crash():
 
 
 def test_mcp_helper_over_remote_relay(monkeypatch):
+    monkeypatch.setenv("VOICEHOOK_PLAIN_CHECK", "0")  # 0.21.5 rule: tests/test_plaintext.py
     ms.write_relay(URL, TOKEN, "room-a", 3600, owner_pid=os.getpid(),
                    owner_session=ms.session_hash("CLAUDE-JOINER"))
     monkeypatch.chdir("/")
@@ -329,7 +330,7 @@ def test_mcp_own_join_goes_to_the_control_socket(monkeypatch):
     assert not err and seen[-1] == {"cmd": "board", "board": {"doing": "Release", "open": [],
                                                                 "done": []}}
     _call("next", {"timeout_s": 5})
-    assert seen[-1] == {"cmd": "next", "timeout": 5.0}
+    assert seen[-1] == {"cmd": "next", "timeout": 5.0, "lease": True}  # 0.21.5: acked after
     _call("activity", {"text": "Release gebaut"})
     assert seen[-1] == {"cmd": "activity", "text": "Release gebaut"}
 

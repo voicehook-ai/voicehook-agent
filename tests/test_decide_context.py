@@ -15,6 +15,13 @@ from voicehook_agent import relayops as ro
 from voicehook_agent import transport as vt
 
 
+@pytest.fixture(autouse=True)
+def _plain_check_off(monkeypatch):
+    """These tests are about the decide wiring with short sample questions; the 0.21.5
+    Klartext rule has its own tests (tests/test_plaintext.py)."""
+    monkeypatch.setenv("VOICEHOOK_PLAIN_CHECK", "0")
+
+
 def _args(**kw):
     base = {"cmd": "decide", "question": None, "option": [], "recommend": None,
             "id": None, "delete": False, "context": None, "recent": None}
