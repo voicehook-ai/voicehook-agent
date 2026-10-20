@@ -23,7 +23,8 @@ TOKEN = "fake.relay.test.only"  # fake, low entropy (gitleaks)
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch, tmp_path):
     for k in ("CLAUDE_CODE_SESSION_ID", ms.LABEL_ENV, ms.MACHINE_LABEL_ENV, ms.NO_RELAY_ENV,
-              "VOICEHOOK_SESSION"):
+              "VOICEHOOK_SESSION", notify.ATTENDED_ENV, "CLAUDE_CODE_SESSION_ATTENDED",
+              "CLAUDE_CODE_ENTRYPOINT"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("VOICEHOOK_AGENT_HOME", str(tmp_path / "home"))
 
@@ -50,9 +51,10 @@ def _perm_notif(sid="other-1", tool="Bash"):
                title="Permission needed", notification_type="permission_prompt")
 
 
-def _perm_req(sid="other-1", desc="Remove node_modules directory", tool="Bash", **inp):
+def _perm_req(sid="other-1", desc="Remove node_modules directory", tool="Bash",
+              command="rm -rf node_modules", **inp):
     return _ev("PermissionRequest", sid=sid, tool_name=tool, permission_mode="default",
-               tool_input={"command": "rm -rf node_modules", "description": desc, **inp})
+               tool_input={"command": command, "description": desc, **inp})
 
 
 def _ask(sid="other-1", question="Which color should the button get?", options=("Teal", "Grey")):
@@ -78,10 +80,13 @@ def _progress(raw, now):
 
 
 # ----- classify ----------------------------------------------------------------------
+RM_Q = "SE Refill will ausführen: rm -rf node_modules – erlauben?"
+
+
 def test_classify_notification_types():
+    # 0.21.4: "Claude needs your permission to use Bash" is no question: activity only
     c = notify.classify(json.loads(_perm_notif()))
-    assert c["kind"] == "ask" and c["question"] == "Claude needs your permission to use Bash"
-    assert c["text"] == "wartet auf Freigabe: Bash" and c["prio"] == notify.PRIO_GENERIC
+    assert c == {"kind": "wait", "text": "wartet auf Freigabe: Bash"}
     idle = notify.classify(json.loads(_ev("Notification", message="Claude is waiting for your input",
                                           notification_type="idle_prompt")))
     assert idle == {"kind": "wait", "text": "wartet auf Eingabe"}
@@ -97,21 +102,23 @@ def test_classify_notification_types():
 
 def test_classify_notification_without_type_by_message():
     c = notify.classify(json.loads(_ev("Notification", message="Claude needs your permission to use Edit")))
-    assert c["kind"] == "ask" and c["tool"] == "Edit"
+    assert c == {"kind": "wait", "text": "wartet auf Freigabe: Edit"}
     c = notify.classify(json.loads(_ev("Notification", message="Claude is waiting for your input")))
     assert c["kind"] == "wait"
 
 
-def test_classify_permission_request_names_tool_and_description():
-    c = notify.classify(json.loads(_perm_req()))
-    assert c["question"] == "Freigabe für Bash: Remove node_modules directory?"
+def test_classify_permission_request_names_session_and_action():
+    c = notify.classify(json.loads(_perm_req()), "SE Refill")
+    assert c["question"] == RM_Q
+    assert c["items"][0]["context"] == "Beschreibung: Remove node_modules directory"
     assert c["prio"] == notify.PRIO_SPECIFIC and c["tool"] == "Bash" and c["options"] == []
     c = notify.classify(json.loads(_ev("PermissionRequest", tool_name="Edit",
-                                       tool_input={"file_path": "/Users/x/secret-proj/src/app.py"})))
-    assert c["question"] == "Freigabe für Edit: app.py?"
+                                       tool_input={"file_path": "/Users/x/secret-proj/src/app.py"})),
+                        "Kunde C")
+    assert c["question"] == "Kunde C will ändern: app.py – erlauben?"
     c = notify.classify(json.loads(_ev("PermissionRequest", tool_name="mcp__github__merge",
-                                       tool_input={"pullNumber": 3})))
-    assert c["question"] == "Freigabe für mcp__github__merge?"
+                                       tool_input={"pullNumber": 3})), "Kunde C")
+    assert c["question"] == "Kunde C will github merge nutzen – erlauben?"
 
 
 def test_question_has_no_paths_urls_or_secrets_and_is_capped():
@@ -140,9 +147,10 @@ def test_classify_ask_user_question_options():
 def test_helper_permission_becomes_decision_and_feed_line(relay_lines, monkeypatch):
     monkeypatch.setenv(ms.LABEL_ENV, "SE Refill")
     job = _handle(_perm_req())
-    assert job == {"op": "create", "route": "relay", "skey": ms.session_hash("other-1"),
-                   "question": "Freigabe für Bash: Remove node_modules directory?",
-                   "options": [], "replace": None, "from": "SE Refill"}
+    assert {k: job[k] for k in ("op", "route", "skey", "question", "options", "replace", "from")} == \
+        {"op": "create", "route": "relay", "skey": ms.session_hash("other-1"),
+         "question": RM_Q, "options": [], "replace": None, "from": "SE Refill"}
+    assert job["items"][0]["context"] == "Beschreibung: Remove node_modules directory"
     assert relay_lines == ["SE Refill: wartet auf Freigabe: Bash"]
     state = (activity.state_root() / notify.STATE_NAME).read_text()
     assert "other-1" not in state and "node_modules" not in state   # hashes only
@@ -164,25 +172,33 @@ def test_nothing_without_join_or_relay():
     assert _progress(_ev("Stop"), 1001.0) is None
 
 
+def _elicit(sid="other-1"):
+    return _ev("Notification", sid=sid, message="Welche Region soll der Server bekommen?",
+               notification_type="elicitation_dialog")
+
+
 def test_repeated_push_is_deduped_and_specific_beats_generic(relay_lines):
     assert _handle(_perm_req(), now=1000.0) is not None
-    assert _handle(_perm_notif(), now=1001.0) is None             # generic after specific
+    assert _handle(_elicit(), now=1001.0) is None                 # generic after specific
     assert _handle(_perm_req(), now=1200.0) is None               # the same, still open
     notify.set_id(ms.session_hash("other-2"), "x", "d00000000")   # other session untouched
-    assert _handle(_perm_notif(sid="other-2"), now=1000.0)["replace"] is None
+    assert _handle(_elicit(sid="other-2"), now=1000.0)["replace"] is None
     assert notify.set_id(ms.session_hash("other-2"),
-                         notify._qkey("Claude needs your permission to use Bash"), "d11111111") is False
-    up = _handle(_perm_req(sid="other-2"), now=1002.0)            # specific replaces generic
+                         notify._qkey("Welche Region soll der Server bekommen?"), "d11111111") is False
+    up = _handle(_perm_req(sid="other-2", command="rm -rf dist"), now=1002.0)   # specific replaces generic
     assert up["replace"] == "d11111111"
 
 
-def test_rate_limits(relay_lines):
-    assert _handle(_perm_req(desc="eins"), now=1000.0) is not None
-    notify.set_id(ms.session_hash("other-1"), notify._qkey("Freigabe für Bash: eins?"), "d1")
-    assert _handle(_perm_req(desc="zwei"), now=1005.0) is None    # < ASK_GAP_S
-    assert _handle(_perm_req(desc="zwei"), now=1011.0)["replace"] == "d1"
+def test_rate_limits(relay_lines, monkeypatch):
+    monkeypatch.setenv(ms.LABEL_ENV, "L")
+    assert _handle(_perm_req(command="make eins"), now=1000.0) is not None
+    notify.set_id(ms.session_hash("other-1"),
+                  notify._qkey("L will ausführen: make eins – erlauben?"), "d1")
+    assert _handle(_perm_req(command="make zwei"), now=1005.0) is None    # < ASK_GAP_S
+    assert _handle(_perm_req(command="make zwei"), now=1011.0)["replace"] == "d1"
     t = 2000.0
-    got = [_handle(_perm_req(sid=f"s{i}"), now=t + i) for i in range(notify.GLOBAL_ASK_MAX + 1)]
+    got = [_handle(_perm_req(sid=f"s{i}", command=f"make t{i}"), now=t + i)
+           for i in range(notify.GLOBAL_ASK_MAX + 1)]
     assert all(got[:-1]) and got[-1] is None                       # all sessions together
 
 
@@ -191,15 +207,14 @@ def test_progress_deletes_the_open_decision(relay_lines, monkeypatch):
     monkeypatch.setenv(ms.LABEL_ENV, "SE Refill")
     _handle(_perm_req(), now=1000.0)
     sk = ms.session_hash("other-1")
-    assert notify.set_id(sk, notify._qkey("Freigabe für Bash: Remove node_modules directory?"),
-                         "d0a1b2c3d") is False
+    assert notify.set_id(sk, notify._qkey(RM_Q), "d0a1b2c3d") is False
     assert _progress(_ev("PostToolUse", tool_name="Read", tool_input={}), 1003.0) is None
     job = _progress(_ev("PostToolUse", tool_name="Bash", tool_input={}), 1004.0)
     assert job == {"op": "delete", "route": "relay", "skey": sk, "delete": "d0a1b2c3d",
                    "from": "SE Refill"}
     assert _progress(_ev("Stop"), 1005.0) is None                  # gone already
     assert _handle(_perm_notif(), now=1006.0) is None              # late push: stale
-    assert _handle(_perm_req(desc="next"), now=1020.0) is not None  # a new prompt
+    assert _handle(_perm_req(command="ls dist"), now=1020.0) is not None  # a new prompt
 
 
 def test_progress_before_the_id_arrived_makes_the_child_delete(relay_lines):
@@ -245,13 +260,13 @@ def _own_join(owner: str):
 
 def test_joining_session_asks_over_its_own_join():
     d = _own_join(ms.session_hash("JOINER"))
-    job = _handle(_perm_notif(sid="JOINER"), now=1000.0)
+    job = _handle(_perm_req(sid="JOINER"), now=1000.0)
     assert job["route"] == "own" and job["dir"] == str(d) and "from" not in job
     lines = activity.read_tail(d / activity.ACTIVITY_NAME)
     assert len(lines) == 1 and lines[0].endswith(" Notification: wartet auf Freigabe: Bash")
-    _handle(_perm_notif(sid="JOINER"), now=1001.0)
+    _handle(_perm_req(sid="JOINER"), now=1001.0)
     assert len(activity.read_tail(d / activity.ACTIVITY_NAME)) == 1   # deduped
-    assert _handle(_perm_notif(sid="other-9"), now=1002.0) is None    # another session: no relay
+    assert _handle(_perm_req(sid="other-9"), now=1002.0) is None      # another session: no relay
 
 
 def test_own_route_decide_goes_to_the_control_socket(monkeypatch):
@@ -265,7 +280,7 @@ def test_own_route_decide_goes_to_the_control_socket(monkeypatch):
 
 
 # ----- hook process: silent, exit 0, nothing on stdout ---------------------------------
-@pytest.mark.parametrize("cmd,raw", [("notification", _perm_notif()),
+@pytest.mark.parametrize("cmd,raw", [("notification", _elicit()),
                                      ("permission-request", _perm_req())])
 def test_hook_main_prints_nothing(cmd, raw, monkeypatch, capsys, relay_lines):
     spawned = []
@@ -347,8 +362,8 @@ def test_real_hook_process_posts_helper_decision_to_relay(tmp_path):
         assert dec, got
         path, auth, body = dec[0]
         assert path == "/api/activity/relay/decide" and auth == f"Bearer {TOKEN}"
-        assert body == {"from": "SE Refill",
-                        "question": "Freigabe für Bash: Remove node_modules directory?"}
+        assert body == {"from": "SE Refill", "question": RM_Q,
+                        "context": "Beschreibung: Remove node_modules directory"}
         st = json.loads((activity.state_root() / notify.STATE_NAME).read_text())
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline and \

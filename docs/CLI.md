@@ -184,7 +184,10 @@ the join), subagents, a leaving join, a join older than 0.21.4 (no `listening` f
   spoke since.
 - **Decisions (0.14.4):** EVERY question the human decides (yes/no, A/B, an approval,
   picking a value) ALWAYS goes to `decide`, plus one short `say` with its number; never only
-  `say`, never into the status board (progress only). Yes/no: `voicehook-agent decide --question "Deploy the fix now?"`;
+  `say`, never into the status board (progress only). 0.21.4: only REAL questions: one
+  concrete decision the human can make from the board alone, naming the thing ("PR #96
+  mergen?", not "Weiter?" / "Freigabe?"), with `--context` (what, why, what happens on
+  yes / no); never a question you can decide yourself, never a status. Yes/no: `voicehook-agent decide --question "Deploy the fix now?"`;
   options: `voicehook-agent decide --question "Which color?" --option Teal --option Grey
   --recommend 0`. The person answers by voice ("yes", "number two", or their own words);
   the result arrives in `next` as `{"type":"decision","verdict":"yes"|"no"|"option"|"other",
@@ -669,16 +672,20 @@ the call, for the joining session and for every helper session:
 
 | Hook event | Decision Board | Feed line |
 |---|---|---|
-| `PermissionRequest` | yes/no `Freigabe für Bash: Remove node_modules directory?` (the tool's own description, a file tool's basename, else only the tool name) | `wartet auf Freigabe: Bash` |
+| `PermissionRequest` | 0.21.4: yes/no `<session> will ausführen: <command> – erlauben?` (Bash: first line of the command, paths cut to the basename, URLs to the host, secrets scrubbed; Read/Edit/Write: `will lesen/ändern/schreiben: <file>`; WebFetch: `will abrufen: <host>`; MCP: `will <server> <tool> nutzen`; other tools only with their own description). The tool's description goes along as hidden context. Nothing concrete to name: no decision, only the feed line | `wartet auf Freigabe: Bash` |
 | `PreToolUse` of `AskUserQuestion` | 0.21.3: every question its own decision, as written; its option labels as options (2-3; a 4th is named in the question), descriptions, header and multiSelect as hidden context | `hat eine Frage` |
-| `Notification` `permission_prompt` | yes/no with the notification text (`Claude needs your permission to use Bash`), only when no more specific question is open | `wartet auf Freigabe: Bash` |
+| `Notification` `permission_prompt` | 0.21.4: nothing (`Claude needs your permission to use Bash` is no question; the PermissionRequest of the same prompt asks with the details) | `wartet auf Freigabe: Bash` |
 | `Notification` `elicitation_dialog`, `elicitation_url_dialog`, `agent_needs_input` | yes/no with the notification text | `hat eine Frage` |
 | `Notification` `idle_prompt` | nothing | `wartet auf Eingabe` |
+| any of these in an unattended session (0.21.4: `claude -p`, Agent SDK runs, timers: `CLAUDE_CODE_ENTRYPOINT` `sdk-*` unless `CLAUDE_CODE_SESSION_ATTENDED=1`; `CLAUDE_CODE_SESSION_ATTENDED=0`; force with `VOICEHOOK_ATTENDED=1/0`) | nothing: nobody could answer it (also no Stop / AskUserQuestion question, asks.py) | as above |
 | `Notification` `elicitation_complete`, `elicitation_response` | removes the open question | |
 | others (`auth_success`, `agent_completed`, `quota_*`) | nothing | nothing |
 
 Without `notification_type` (older Claude Code) the message decides: a permission text
-asks, a "waiting for your input" text is a feed line.
+is a feed line (0.21.4), a "waiting for your input" text too.
+
+0.21.4: the same question of the same session name goes to the board at most once per 10
+min, also from new sessions (repeated runs of one job).
 
 - **Who asks:** the session that started the join asks over its own control socket (the
   answer arrives in its `next` as a `decision` event; feed line `HH:MM:SS Notification: ...`
@@ -1000,8 +1007,9 @@ What works in Codex:
   in its own activity log. Session id = `CODEX_THREAD_ID` (hooks: `session_id`).
 - Turn end also without trusted hooks (`notify`); Stop hook and notify share a turn list,
   one line per turn.
-- Permission prompt -> a decision on the Decision Board (`Freigabe für Bash: <Codex's
-  reason>?`); the hook never answers it, you still decide in Codex.
+- Permission prompt -> a decision on the Decision Board (0.21.4: `<session> will
+  ausführen: <command> – erlauben?`, Codex's reason as context); the hook never answers it,
+  you still decide in Codex.
 - board.py features (session state, board reminder, answers delivered into the session,
   0.21.0) run in the Codex adapter as well when this CLI has them; their JSON is what Codex
   reads (`additionalContext`, Stop `decision: block`).

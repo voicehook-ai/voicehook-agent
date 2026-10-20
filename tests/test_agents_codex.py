@@ -87,7 +87,7 @@ def test_failed_bash_and_permission_reason():
                                    "tool_input": {"command": "rm -rf build",
                                                   "description": "Build-Ordner löschen"}})
     from voicehook_agent import notify
-    assert notify.classify(perm)["question"] == "Freigabe für Bash: Build-Ordner löschen?"
+    assert notify.classify(perm, "Codex")["question"] == "Codex will ausführen: rm -rf build – erlauben?"
 
 
 def test_codex_thread_id_is_the_own_session(monkeypatch):

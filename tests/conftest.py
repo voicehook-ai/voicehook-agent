@@ -11,3 +11,6 @@ def _private_state_dir(tmp_path, monkeypatch):
     # they set their own (tests/test_hook_abs_path.py)
     monkeypatch.setenv("VOICEHOOK_HOOK_BIN", "voicehook-agent-hook")
     monkeypatch.delenv("CODEX_THREAD_ID", raising=False)  # 0.20.0: Codex session id too
+    # 0.21.4 notify.unattended(): the runner's own Claude Code / CI env must not decide it
+    for k in ("VOICEHOOK_ATTENDED", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_ENTRYPOINT"):
+        monkeypatch.delenv(k, raising=False)
