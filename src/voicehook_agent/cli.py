@@ -217,6 +217,7 @@ from . import __version__, relay
 from . import activity as vactivity
 from . import boardlist as vboardlist
 from . import cards as vcards
+from . import datachan as vdata
 from . import helperaccess as vhelp
 from . import localsessions as vlocal
 from . import multisession as vmulti
@@ -680,7 +681,7 @@ PHONE_REASONS = ("done", "blocked", "decision")
 PHONE_MESSAGE_MAX = {"notify_me": 120, "call_me": 200}
 CLI_PHONE_PATH = "/api/cli/{kind}"
 PHONE_HTTP_TIMEOUT_S = {"notify_me": 20.0, "call_me": 720.0}   # server dials up to 690 s
-PHONE_SOCK_TIMEOUT_S = {"notify_me": 30.0, "call_me": 750.0}
+PHONE_SOCK_TIMEOUT_S = {"notify_me": 30.0, "call_me": 750.0, "data": 120.0}  # data: upload
 
 
 def phone_request(kind: str, reason: str, message: str | None) -> dict:
@@ -1143,6 +1144,69 @@ def _decide_text(value: str | None, flag: str, limit: int) -> str | None:
     return t
 
 
+async def _send_data(ctl: _Control, req: dict) -> dict:
+    """0.21.4: agent-to-agent data (datachan.py). Bridge: POST /api/bridge/data (a large file
+    first via /api/bridge/upload); WebRTC: the packet itself to the targets' identities."""
+    to = str(req.get("to") or "").strip()
+    kind = str(req.get("kind") or "")
+    name = vdata.clean_name(req.get("name") or "")
+    mime = str(req.get("mime") or "")
+    payload = req.get("payload")
+    if kind == "file":
+        path = str(req.get("path") or "")
+        try:
+            size = os.path.getsize(path)
+            if size > vdata.FILE_MAX_BYTES:
+                return {"ok": False, "status": 413, "type": "data",
+                        "error": f"file too large (max {vdata.FILE_MAX_BYTES} bytes)"}
+            payload = await asyncio.to_thread(Path(path).read_bytes)
+        except OSError as e:
+            return {"ok": False, "type": "data", "error": f"file not readable: {type(e).__name__}"}
+        name = name or vdata.clean_name(os.path.basename(path))
+    room = await ctl.wait_room(10.0)
+    if room is None:
+        return {"ok": False, "type": "data", "error": "not connected to the room (yet)"}
+    send = getattr(room, "send_data", None)
+    if send is not None:  # bridge transport: the server resolves and builds
+        body: dict = {"to": to, "kind": kind}
+        try:
+            if kind == "file":
+                if vdata.fits_inline(payload, name, mime):
+                    import base64
+                    body["payload"] = base64.b64encode(payload).decode("ascii")
+                else:
+                    up = await room.upload_file(payload, name, mime)
+                    body["file_id"] = up.get("file_id")
+            else:
+                body["payload"] = payload
+            for k, v in (("name", name), ("mime", mime), ("id", req.get("id"))):
+                if v:
+                    body[k] = v
+            out = await send(body)
+        except vtransport.BridgeError as e:
+            detail = (e.body or {}).get("detail") if isinstance(e.body, dict) else None
+            return {"ok": False, "type": "data", "status": e.status or 503, "error": str(detail or e)}
+        return {**out, "type": "data"}
+    try:
+        targets = vdata.resolve_targets(room.remote_participants.values(), to)
+        pkt, size = vdata.build_packet(sender_identity=ctl.ident, sender_label=ctl.ident, to=to,
+                                       targets=[p.identity for p in targets], kind=kind,
+                                       payload=payload, name=name, mime=mime,
+                                       msg_id=req.get("id") or None)
+    except vdata.DataError as e:
+        hint = (" WebRTC join: no file store; send a smaller file or join with "
+                "--transport bridge (upload up to 10 MB)") if e.status == 413 else ""
+        return {"ok": False, "type": "data", "status": e.status, "error": e.detail + hint}
+    try:
+        await room.local_participant.publish_data(
+            json.dumps(pkt, ensure_ascii=False).encode("utf-8"), reliable=True, topic=vdata.TOPIC,
+            destination_identities=[p.identity for p in targets])
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "type": "data", "status": 503, "error": f"publish failed: {type(e).__name__}"}
+    return {"ok": True, "type": "data", "id": pkt["id"], "to": [vdata.label(p) for p in targets],
+            "size": size}
+
+
 async def _decide_rpc(ctl: _Control, req: dict) -> dict:
     """vh.decide RPC to the voicebot (own decide, and 0.16.0 helper requests with sender;
     a helper request never touches the idle watchdog). 0.21.0: context/recent ride along;
@@ -1287,6 +1351,9 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         out = await _decide_rpc(ctl, req)
         ctl.ledger.created(req, out)  # 0.21.4 `board`
         return out
+    if cmd == "data":  # 0.21.4 `voicehook-agent send-data` (datachan.py)
+        ctl.watchdog.touch()
+        return await _send_data(ctl, req)
     if cmd == "board_list":  # 0.21.4 `voicehook-agent board` / `decide --list`
         return ctl.ledger.listing(only_open=bool(req.get("open")))
     if cmd == "vocab":
@@ -2132,6 +2199,14 @@ async def _connect_and_listen(
                 _emit_meta(f"call-ended reason={reason}")
                 disconnect_reason["name"] = "CALL_ENDED"
                 stop.set()
+        elif topic == vdata.TOPIC:
+            # 0.21.4 agent-to-agent data: a `next` event (never printed with its content)
+            ev = vdata.receive_event(ctl.ident if ctl is not None else "", pkt.participant, payload)
+            if ev is not None:
+                if ctl is not None:
+                    ctl.events.put_nowait(ev)
+                _print_event(json_mode, "system", ev["summary"], topic=topic,
+                             **{k: ev[k] for k in ("from", "kind", "id", "name", "size") if k in ev})
         elif topic.startswith("operator."):
             if topic in ("operator.revise", "operator.say_status") and relay.foreign_owner(
                     payload, _own_ids()):
@@ -2935,6 +3010,28 @@ def status_meta(seq: list, board: dict, n_open: int, n_done: int, warn=None) -> 
     return meta
 
 
+def _data_request(args) -> dict:
+    """`send-data --to X (--json J | --text T | --file PATH) [--name N] [--mime M]`: the
+    request for the join (a file goes by path: the join reads it, no 10 MB over the socket)."""
+    req: dict = {"cmd": "data", "to": args.to}
+    if args.json is not None:
+        try:
+            req.update(kind="json", payload=json.loads(args.json))
+        except ValueError as e:
+            raise ValueError(f"--json is not valid JSON: {e}") from None
+    elif args.text is not None:
+        req.update(kind="text", payload=sys.stdin.read() if args.text == "-" else args.text)
+    else:
+        path = os.path.abspath(os.path.expanduser(args.file))
+        if not os.path.isfile(path):
+            raise ValueError(f"--file {args.file!r} is not a file")
+        req.update(kind="file", path=path)
+    for k in ("name", "mime", "id"):
+        if getattr(args, k, None):
+            req[k] = getattr(args, k)
+    return req
+
+
 def _decide_faq(args) -> list[dict]:
     return relay.parse_faq(getattr(args, "faq", None) or [],
                            warn=lambda m: print(m, file=sys.stderr, flush=True),
@@ -2996,6 +3093,8 @@ def _client_request(args) -> dict:
         return {"cmd": "ui", "body": vui.command(args.action, args.args, args.preset)}
     if args.cmd == "leave":
         return {"cmd": "leave", "say": args.say} if args.say else {"cmd": "leave"}
+    if args.cmd == "send-data":  # 0.21.4
+        return _data_request(args)
     if args.cmd == "board" or (args.cmd == "decide" and getattr(args, "list", False)):
         # 0.21.4: open + recent decisions and the boards this join has seen
         return {"cmd": "board_list", "open": bool(getattr(args, "open_only", False))}
@@ -3188,7 +3287,7 @@ WAIT_ANSWER = -1.0  # `decide --wait` without SEC: wait for the answer (helper s
 # 0.21.4 `listen`: the gapless `next` loop. It prints and exits on the first event that needs
 # the agent; everything else (timeout, human_state, voicebot_back) keeps it waiting.
 LISTEN_WAKE = ("user", "decision", "helper_decision", "voicebot_left", "missed",
-               "status_request", "revise", "call_end")
+               "status_request", "revise", "call_end", "data")
 LISTEN_POLL_S = 45.0
 
 
@@ -3684,6 +3783,21 @@ def main(argv: list[str] | None = None) -> None:
     p_dec.add_argument("--timeout", type=float, default=120.0, metavar="SEC",
                        help="0.16.0, with --wait (no SEC): wait up to SEC for the answer (default 120)")
     _add_session(p_dec, answer_wait=True)
+    p_sd = sub.add_parser(
+        "send-data", help="0.21.4: agent-to-agent data (topic operator.data, like MCP send_data): "
+        "JSON, text or a file to another operator agent of the call, never spoken, never to the "
+        "humans or the voicebot. Bridge: inline up to ~15 KB, larger files via the upload "
+        "(10 MB); WebRTC: inline only")
+    p_sd.add_argument("--to", required=True, metavar="LABEL|IDENTITY|*",
+                      help="the target agent's label or identity, '*' = every other agent")
+    g_sd = p_sd.add_mutually_exclusive_group(required=True)
+    g_sd.add_argument("--json", default=None, metavar="JSON", help="a JSON value")
+    g_sd.add_argument("--text", default=None, metavar="TEXT", help="a text ('-' = stdin)")
+    g_sd.add_argument("--file", default=None, metavar="PATH", help="a file (max 10 MB)")
+    p_sd.add_argument("--name", default=None, metavar="N", help="file / item name")
+    p_sd.add_argument("--mime", default=None, metavar="M", help="mime type, e.g. text/csv")
+    p_sd.add_argument("--id", default=None, metavar="ID", help="own message id [A-Za-z0-9._-]")
+    _add_session(p_sd)
     p_board = sub.add_parser(
         "board", help="0.21.4: what is on the call's boards, as seen by your join: open and "
         "recent decisions (number, asking label, question, options, hidden context/faq, "
@@ -3799,7 +3913,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "helper-import":
         sys.exit(_run_helper_import())
     if args.cmd in ("say", "next", "says", "leave", "status", "activity", "decide", "helper-credential",
-                    "vocab", "ui", "notify-me", "call-me", "board"):
+                    "vocab", "ui", "notify-me", "call-me", "board", "send-data"):
         sys.exit(_run_client(args))
     if args.cmd == "show":
         sys.exit(_run_client(args))

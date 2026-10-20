@@ -396,6 +396,31 @@ class BridgeRoom:
         r = await self._post_retry("/api/bridge/ui", body, "ui")
         return _json(r)
 
+    async def send_data(self, body: dict) -> dict:
+        """0.21.4: POST /api/bridge/data {to, kind, payload | file_id, name?, mime?, id?} ->
+        {ok, id, to, size, file_id?, url?}; BridgeError with the status otherwise."""
+        r = await self._post_retry("/api/bridge/data", body, "data")
+        return _json(r)
+
+    async def upload_file(self, data: bytes, name: str = "", mime: str = "") -> dict:
+        """0.21.4: POST /api/bridge/upload (raw body, X-Filename) -> {ok, file_id, url, size,
+        expires_in}. BridgeError with the status otherwise (413 too large, 429 busy)."""
+        if self._http is None or not self._session or self._closed:
+            raise BridgeError("bridge not connected")
+        headers = {**self._auth(), "content-type": mime or "application/octet-stream"}
+        if name:
+            headers["x-filename"] = name
+        try:
+            r = await self._http.post(f"{self.api_base}/api/bridge/upload", headers=headers,
+                                      content=data, timeout=60.0)
+        except Exception as e:  # noqa: BLE001
+            raise BridgeError(f"bridge upload failed: {type(e).__name__}") from None
+        if r.status_code != 200:
+            detail = _detail(r)
+            raise BridgeError(f"bridge upload failed: HTTP {r.status_code} {detail}",
+                              status=r.status_code, body={"detail": detail})
+        return _json(r)
+
     async def send_decide(self, body: dict) -> dict:
         """0.21.0: POST /api/bridge/decide {question, options?, recommend?, context?, recent?}
         | {id, ...changes} | {id, delete: true} -> {ok, id, number}; BridgeError with the
