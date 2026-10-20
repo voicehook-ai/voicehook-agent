@@ -199,4 +199,5 @@ Reference: [OPERATOR-PROTOCOL.md](https://voicehook.ai/agent/OPERATOR-PROTOCOL.m
 | `CLAUDE_CODE_REMOTE`   | unset                   | `true` (Claude Code cloud session) -> `join` prints a heads-up naming the remote MCP server |
 | `VOICEHOOK_NO_SELF_UPDATE` | unset             | `1` = never self-update on `join` (same as `--no-self-update`) |
 | `VOICEHOOK_QUIET`      | unset                   | `1` = no join hint (same as `join --quiet`) |
+| `VOICEHOOK_SESSIONS_HINT` | unset               | `0` = `join` does not list the other agent sessions of this machine (0.21.4) |
 | `VOICEHOOK_LISTEN_GUARD` | unset                 | `0` = the Stop hook never blocks a turn end of the joining session while nobody listens (0.21.4 listen guard) |

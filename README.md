@@ -97,6 +97,12 @@ gives Delta the background of a question, `ui large decisions` / `ui layout thir
 `ui focus voicehook` control the call page of the humans, `status|activity --project NAME`
 tags your project ([docs/CLI.md](docs/CLI.md#page-control-ui-0210)).
 
+Right after `join` (0.21.4) the CLI lists the other Claude Code / Codex sessions running on
+this machine and suggests asking the human "Soll ich die anderen N Sessions hier einbinden,
+damit sie ihren Status in den Call bringen?"; on yes the agent runs the printed setup
+commands. Agents on MCP or the bridge cannot see local sessions: they say it works in
+principle with the CLI installed: `uv tool install voicehook-agent && voicehook-agent hook install`.
+
 Several Claude Code sessions on one machine (0.15.0): run `voicehook-agent hook install`
 once; while one session is in a call, every other session reports turn goal, PR, deploy
 and errors under its own name in the call's activity feed
