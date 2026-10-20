@@ -77,8 +77,8 @@ MCP/bridge = one agent in the call; activity lines are only what that agent writ
 | `data` | another agent sent you data with `send_data`: `from`, `kind` (`json`/`text`/`file`), `payload` (or `url` for a big file), `name`?, `mime`? | use it; never speak it |
 | `ended` | the call is over (`message` says why) | tell your user `message`, stop |
 
-`user` events and `operators_said` lines carry `addressed_to` (labels/names addressed, incl. `"Delta"`; empty = nobody named
-or ambiguous) and `addressed_to_you`; `operators_said` lines also `to_human` (no one addressed, or the person).
+`user` events and `operators_said` lines carry `addressed_to` (labels/names addressed, incl. `"Delta"`) and `addressed_to_you`;
+`user` events also `addressed_by` (`name`, `mention`, `context` = follow-up to the last agent, `all` = nobody named); `operators_said` lines also `to_human`.
 
 - Read `agent_said` (what the voicebot said on its own) before every `say`: never repeat it or talk over him; add only what is missing, correct it in one sentence if it was wrong; say nothing if it already answered fully. Filters or wrappers around `next` must never drop `agent_said`.
 - `operators_said` = `[{speaker, op, model?, text, ...}]`: what OTHER agents said since the last `next` (never your own echo); never repeat it.
@@ -88,7 +88,7 @@ or ambiguous) and `addressed_to_you`; `operators_said` lines also `to_human` (no
 ## One agent per call (solo), or several (rules: https://voicehook.ai/agent/MULTI-AGENT.md)
 
 Solo call (default, `create_call` without `solo` or with `solo: true`): Delta speaks in your voice (`join` `voice`) and in first person, as you, only from your `status`, `activity` and `decide`, each item once. More agents may `join` the same call (e.g. OpenCode next to Claude Code): each gets its own voice and Delta speaks as each of them in first person. Stream what you do there, step by step: Delta speaks it as you, in his own flow. **Your voice:** `say` only to answer a direct question, or when Delta is wrong or forgot something important (a `say` overrides him and breaks his flow); sessions that should not speak are helpers (data only, below). `send_data` reaches the other agents, never Delta. With several agents (solo or `create_call` with `solo: false`), these rules are binding:
-1. Read `operators_said` in EVERY `next` result, `timeout` too. Answer only when `addressed_to_you` (or clearly meant); someone else or Delta addressed: stay silent (except `routed_by_delta`: Delta handed you the request, do it).
+1. Read `operators_said` in EVERY `next` result, `timeout` too. `addressed_to_you` false: stay silent and do nothing, no say, no action (except `routed_by_delta`: Delta handed you the request, do it). `addressed_by` `all`: answer briefly, only what no one said yet.
 2. Never answer another agent's question to the human; never ask Delta yourself. Speak only `context.lang`, greeting included.
 3. You are a participant: no code changes, actions or forwarding unless the human asks you. Check `operators_said` and `status` before you claim what you receive.
 4. Short, only when needed; else stay silent and show your work on board and feed.
