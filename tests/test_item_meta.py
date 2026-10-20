@@ -131,3 +131,20 @@ def test_join_board_and_decide_pass_meta_through(tmp_path):
     board = {"doing": "x", "open": [], "done": [], "meta": {"doing": {"context": "c"}}}
     asyncio.run(cli._control_handler(ctl, {"cmd": "board", "board": board}))
     assert ctl.room.local_participant.published[-1] == ("operator.status", board)
+
+
+def test_mandatory_context_and_three_faq_warn_but_send(capsys):
+    req = _parse(["decide", "--question", "PR #99 mergen?"])
+    assert req["question"] == "PR #99 mergen?"            # sent anyway (live call)
+    assert relay.MANDATORY_HINT in capsys.readouterr().err
+    req = _parse(["decide", "--question", "PR #99 mergen?", "--context", "CI grün",
+                  "--faq", "a?::1", "--faq", "b?::2", "--faq", "c?::In Arbeit bei Scout, ca. 10 Min"])
+    assert capsys.readouterr().err == ""
+    req = _parse(["status", "--doing", "Deploy", "--context", "PR 99", "--faq", "a?::1",
+                  "--open", "Smoke-Test"])
+    err = capsys.readouterr().err
+    assert relay.MANDATORY_HINT in err and "Deploy" in err and "Smoke-Test" in err
+    assert req["board"]["doing"] == "Deploy"
+    _parse(["status", ""])                                 # clearing the board: no hint
+    assert capsys.readouterr().err == ""
+    assert "In Arbeit bei" in relay.MANDATORY_HINT and "ETA" in relay.FAQ_HINT

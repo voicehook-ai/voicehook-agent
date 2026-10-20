@@ -230,11 +230,15 @@ the join), subagents, a leaving join, a join older than 0.21.4 (no `listening` f
   "When is it live?", "a": "in about 2 minutes"}]}`. Without `--faq` the field is
   omitted. Every `status_due` hint now also asks which 3 questions the user will
   probably ask next, to be answered in advance with `--faq`.
-- **Hidden context + FAQ per item (0.21.4), always:** every status item, activity line
-  and decision takes `--context "<what, why, state, numbers>"` (max 2000 chars) and up to 3
+- **Hidden context + FAQ per item (0.21.4), mandatory:** every decision and every status
+  entry carries `--context "<what, why, state, numbers>"` (max 2000 chars) and 3
   `--faq "Frage::Antwort"`: the 3 questions the user will most likely ask about THAT item,
-  with prepared answers. Never shown to the human; the voicebot answers from it without
-  asking you. On `status` they attach to the item they follow (`--doing` / `--open` /
+  with prepared answers (activity lines: optional). No answer yet: the answer says so,
+  with who works on it and an ETA (`"Wann ist es live?::In Arbeit bei Scout, Ergebnis ca.
+  10 Min"`); never leave the voicebot without material. Never shown to the human; the
+  voicebot answers from it without asking you. `decide` / `status` without them print a
+  `[hint]` on stderr (sent anyway, never refused during a call); the board reminder of the
+  hook and the `status_due` hint say the same. On `status` they attach to the item they follow (`--doing` / `--open` /
   `--done`, else TEXT):
   `voicehook-agent status "Deploy Worker, ETA 2 min" --context "PR #99, CI grün" --faq
   "Wann live?::in 2 Minuten" --open "Smoke-Test" --context "prüft /health und einen Call"`.

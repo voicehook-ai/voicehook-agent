@@ -84,9 +84,11 @@ needs you, which wakes you; start it again after handling it. Since 0.21.4 the S
 (`voicehook-agent hook install`) blocks a turn end while your join is connected and nobody
 listens ([listen guard](docs/CLI.md#listen-guard-never-end-a-turn-deaf-0214)).
 
-Give every status item, activity line and decision hidden background for the voicebot
+Every decision and every status entry MUST carry hidden background for the voicebot
 (0.21.4): `--context "..."` plus the 3 most likely follow-up questions with prepared
-answers, `--faq "Frage::Antwort"` (on `status` they attach to the item they follow; see
+answers, `--faq "Frage::Antwort"` (no answer yet: say who works on it and the ETA, "In
+Arbeit bei <Name>, Ergebnis ca. 10 Min"). Activity lines may carry them too. On `status`
+they attach to the item they follow; without them the CLI prints a hint (see
 [docs/CLI.md](docs/CLI.md)).
 
 For a loop without polling (`say`, `next`, `status`, `leave`), the status board, the activity

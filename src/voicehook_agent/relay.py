@@ -452,7 +452,40 @@ STATUS_DUE_ENV = "VOICEHOOK_STATUS_DUE"
 STATUS_CMD = 'voicehook-agent status --doing "<Zwischenstand, ETA>" --open "<offen>" --done "<erledigt>"'
 # 0.10.0: every status_due hint also asks for the FAQ (predicted next questions).
 FAQ_HINT = ("Welche 3 Fragen stellt der Nutzer wahrscheinlich als Nächstes? "
-            'Beantworte sie vorab per --faq "Frage::Antwort"')
+            'Beantworte sie vorab per --faq "Frage::Antwort"; 0.21.4 Pflicht je Eintrag: '
+            '--context "<was, warum, Stand>" + 3 --faq. Noch keine Antwort: sag es mit Bearbeiter '
+            'und ETA ("In Arbeit bei <Name>, Ergebnis ca. 10 Min")')
+# 0.21.4 (Oliver 20.10.2026): context + the 3 expected follow-up questions are mandatory for
+# every decision and every status entry. The CLI warns (never refuses, a call is live).
+MANDATORY_HINT = ("[hint] Pflicht: zu jeder Entscheidung und jedem Status-Eintrag --context "
+                  '"<was, warum, Stand>" und die 3 wahrscheinlichsten Rückfragen mit Antwort '
+                  '(--faq "Frage::Antwort", 3x). Ohne Antwort bisher: sag es mit Bearbeiter und '
+                  'ETA ("In Arbeit bei <Name>, Ergebnis ca. 10 Min"). Der Voicebot braucht immer '
+                  "Material. / Mandatory: context + the 3 likely follow-up questions with answers "
+                  "(unknown yet: who works on it + ETA).")
+
+
+def missing_meta(board: dict) -> list[str]:
+    """0.21.4: the board items without --context or with fewer than ITEM_FAQ_MAX --faq
+    (short labels for the hint); [] for a cleared board."""
+    meta = board.get("meta") if isinstance(board.get("meta"), dict) else {}
+    out: list[str] = []
+
+    def short(t: str) -> str:
+        t = " ".join(str(t).split())
+        return t if len(t) <= 30 else t[:29] + "…"
+
+    def bad(m: object) -> bool:
+        m = m if isinstance(m, dict) else {}
+        return not m.get("context") or len(m.get("faq") or []) < ITEM_FAQ_MAX
+    if board.get("doing") and bad(meta.get("doing")):
+        out.append(short(board["doing"]))
+    for k in ("open", "done"):
+        ms = meta.get(k) if isinstance(meta.get(k), list) else []
+        for i, item in enumerate(board.get(k) or []):
+            if bad(ms[i] if i < len(ms) else None):
+                out.append(short(item))
+    return out
 STATUS_HINTS = {
     "status_request": "Nutzer fragt nach Stand: Board jetzt aktualisieren: " + STATUS_CMD + ". " + FAQ_HINT,
     "empty": "Board leer, Delta weiss nichts: jetzt setzen: " + STATUS_CMD + ". " + FAQ_HINT,

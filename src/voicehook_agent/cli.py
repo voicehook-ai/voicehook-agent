@@ -2992,6 +2992,8 @@ def _client_request(args) -> dict:
         faq = _decide_faq(args)
         if faq:
             req["faq"] = faq
+        if not context or len(faq) < relay.ITEM_FAQ_MAX:  # 0.21.4 mandatory: warn, never refuse
+            print(relay.MANDATORY_HINT, file=sys.stderr, flush=True)
         if args.option:
             req["options"] = args.option
         if args.recommend is not None:
@@ -3017,6 +3019,9 @@ def _client_request(args) -> dict:
                            len(args.open or []), len(args.done or []), warn)
         if meta:  # 0.21.4: per item {context, faq}, hidden, for the voicebot
             board["meta"] = meta
+        missing = relay.missing_meta(board)
+        if missing:  # 0.21.4 mandatory, but never refused during a live call
+            warn(f"{relay.MANDATORY_HINT} Fehlt bei: " + "; ".join(missing[:5]))
         if project is not None:
             board["project"] = project
         return {"cmd": "board", "board": board}
