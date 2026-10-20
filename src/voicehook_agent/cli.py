@@ -232,6 +232,7 @@ from . import spool as vspool
 from . import transport as vtransport
 from . import ui as vui
 from . import visual as vvisual
+from . import waitcheck as vwait
 
 _SLUG_RX = re.compile(r"^[a-z]+-[a-z]+-[a-z]+-[A-Z0-9]{4,8}$")
 _VERSION = __version__
@@ -468,7 +469,7 @@ _ONBOARDING_TEXT = {
            "Entscheidungen und Board-Einträge als ganzer Satz mit Produkt oder Bereich, was "
            "passiert und wozu, keine nackten PR-Nummern, Ziffernketten oder unerklärten "
            "Abkürzungen, Entscheidungen mit ? und --context; schlecht: \"{bad}\", gut: "
-           "\"{good}\"."),
+           "\"{good}\". (4) {wait_de}"),
     "en": ("Multi-agent: you can bring more agents into this call. Ask the human whether to set "
            "it up. (1) Invite: every other Claude Code session on this machine reports as a "
            "helper in the call after running `{i0}` once (Codex: `{i1}`); to speak with its own "
@@ -479,7 +480,7 @@ _ONBOARDING_TEXT = {
            "shows you every board and open decision. (3) Plain-language rule for everyone: "
            "decisions and board items as a whole sentence naming the product or area, what "
            "happens and why, no bare PR numbers, digit chains or unexplained abbreviations, "
-           "decisions with ? and --context; bad: \"{bad}\", good: \"{good}\"."),
+           "decisions with ? and --context; bad: \"{bad}\", good: \"{good}\". (4) {wait_en}"),
 }
 
 
@@ -501,11 +502,16 @@ def onboarding_hint(env=None) -> dict | None:
     lang = onboarding_lang(env)
     fmt = {**{f"i{n}": c for n, c in enumerate(ONBOARDING_INVITE)},
            **{f"s{n}": c for n, c in enumerate(ONBOARDING_SHARE)},
-           "bad": vplain.BAD_EXAMPLE, "good": vplain.GOOD_EXAMPLE}
+           "bad": vplain.BAD_EXAMPLE, "good": vplain.GOOD_EXAMPLE,
+           "wait_de": vwait.RULE + " Sichtbar wartend: `voicehook-agent status --waiting \"...\" "
+                      "--question \"...?\" --context \"...\"`.",
+           "wait_en": vwait.RULE_EN + " Shown as waiting: `voicehook-agent status --waiting \"...\" "
+                      "--question \"...?\" --context \"...\"`."}
     return {"role": "system", "topic": "_meta", "_meta": "onboarding", "lang": lang,
             "text": _ONBOARDING_TEXT[lang].format(**fmt),
             "commands": {"invite": list(ONBOARDING_INVITE), "share": list(ONBOARDING_SHARE)},
-            "rule": {"text": vplain.RULE, "bad": vplain.BAD_EXAMPLE, "good": vplain.GOOD_EXAMPLE}}
+            "rule": {"text": vplain.RULE, "bad": vplain.BAD_EXAMPLE, "good": vplain.GOOD_EXAMPLE,
+                     "waiting": vwait.RULE}}
 
 
 def _emit_onboarding_hint(json_mode: bool, env=None) -> dict | None:
@@ -1582,10 +1588,22 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
                 "unread": ctl.events.unread(), "unread_wake": ctl.events.unread_wake(),
                 "last_consumed_s": ctl.events.last_consumed_s(),
                 "listen_idle_s": _listen_idle(ctl),
+                # 0.21.6 (waitcheck.py): own board text that waits for the human (null: none,
+                # or shown with status --waiting) and the open own decisions
+                **_waiting_view(ctl),
                 "leaving": ctl.leaving,
                 "idle_timeout_s": ctl.watchdog.timeout,
                 "peers": sorted(peers, key=lambda d: d["identity"])}
     return {"ok": False, "error": f"unknown cmd {cmd!r}"}
+
+
+def _waiting_view(ctl: _Control) -> dict:
+    own = ctl.ledger.own_board or {}
+    doing = own.get("doing") if isinstance(own.get("doing"), str) else ""
+    waits = bool(doing) and own.get("state") != vwait.STATE and bool(vwait.waiting(doing))
+    opened = [it for it in ctl.ledger.listing(only_open=True).get("open") or []
+              if it.get("from") == "self"]
+    return {"board_waiting": doing[:200] if waits else None, "open_decisions": len(opened)}
 
 
 def _spool_listening(ctl: _Control) -> bool:
@@ -3212,6 +3230,7 @@ def _client_request(args) -> dict:
         if text == "-":
             text = sys.stdin.read()
         vactivity.note_line(text)  # ValueError when empty -> exit 1 before connecting
+        vwait.check(text, "activity")  # 0.21.6: waiting for the human = decide, never a line
         for w in vplain.item_warnings([text.strip()], "Aktivität"):  # 0.21.5 Klartext
             print(w, file=sys.stderr, flush=True)
         req = {"cmd": "activity", "text": text.strip()}
@@ -3294,6 +3313,10 @@ def _client_request(args) -> dict:
             print(m, file=sys.stderr, flush=True)
         faq = relay.parse_faq(faq_raw, warn=warn)
         board = relay.build_board(args.text, args.doing, args.open, args.done, file_obj, faq=faq)
+        # 0.21.6: waiting for the human is a decision, never only a status (waitcheck.py)
+        vwait.check(board.get("doing"), "status --doing")
+        for w in vwait.warn_items(list(board.get("open") or [])):
+            warn(w)
         meta = status_meta(getattr(args, "item_seq", None) or [], board,
                            len(args.open or []), len(args.done or []), warn)
         if meta:  # 0.21.4: per item {context, faq}, hidden, for the voicebot
@@ -3374,10 +3397,12 @@ def _run_helper_import() -> int:
 def _run_client(args) -> int:
     """say / next / leave / status: one JSON line out. Exit 0 = ok (incl.
     next timeout), 1 = request failed, 3 = no running join / join ended."""
+    if args.cmd == "status" and getattr(args, "waiting", None) is not None:
+        return _run_waiting(args)  # 0.21.6: board "wartet auf dich" + its decision
     try:
         req = _client_request(args)
-    except (vvisual.VisualError, vcards.CardError, vui.UiError,
-            vplain.PlainError) as e:  # bad shape/card/ui/0.21.5 not plain language: nothing sent, exit 2
+    except (vvisual.VisualError, vcards.CardError, vui.UiError, vplain.PlainError,
+            vwait.WaitError) as e:  # bad shape/card/ui, not plain, 0.21.6 waits: nothing sent, exit 2
         print(json.dumps({"ok": False, "type": "invalid", "error": str(e)}, ensure_ascii=False),
               flush=True)
         print(f"[error] {e}", file=sys.stderr, flush=True)
@@ -3526,6 +3551,94 @@ def _run_relay_client(args, req: dict, rel: dict) -> int:
         out = {"ok": False, "status": 503, "error": f"relay: {type(e).__name__}", "via": "relay"}
     _print_json(out)
     return 0 if out.get("ok") else 1
+
+
+def _waiting_out(obj: dict, rc: int) -> int:
+    _print_json(obj)
+    if not obj.get("ok"):
+        print(f"[error] {obj.get('error')}", file=sys.stderr, flush=True)
+    return rc
+
+
+WAITING_NEEDS = ("status --waiting braucht --question \"<Bereich>: <was> freigeben, damit "
+                 "<wozu>?\" --context \"...\" (stellt die Entscheidung) oder --decision <id|#nr> "
+                 "(eine offene Entscheidung). " + vwait.RULE)
+
+
+def _run_waiting(args) -> int:
+    """0.21.6 `status --waiting TEXT (--question Q --context C | --decision ID)`: the board says
+    "wartet auf dich" (state frage) and points at its decision; with --question the decision is
+    asked first (Klartext rule, nothing on the board when it fails). Own join or relay (helper)."""
+    text = str(args.waiting or "").strip()
+    q = (getattr(args, "question", None) or "").strip()
+    ref = getattr(args, "decision", None)
+    if not text:
+        return _waiting_out({"ok": False, "type": "invalid", "error": "--waiting needs a text"}, 2)
+    if bool(q) == bool(ref):
+        return _waiting_out({"ok": False, "type": "invalid", "error": WAITING_NEEDS}, 2)
+    rel = vrelayops.client_relay(args.session)
+    frm = vrelayops.check_from(vrelayops.session_label()) if rel is not None else ""
+    sock = None
+    if rel is None:
+        try:
+            sock = vsession.resolve_socket(args.session, wait=args.wait)
+        except (vsession.SessionError, OSError) as e:
+            return _waiting_out({"ok": False, "type": "no-session", "error": str(e)}, 3)
+
+    def send(req: dict, kind: str) -> dict:
+        if rel is None:
+            return vsession.request(sock, req, timeout=30.0)
+        local = vmulti._is_local(rel)
+        if kind == "decide":
+            body = vrelayops.decide_body(req)
+            return (vrelayops.local_request(rel, frm, "decide", body) if local
+                    else vrelayops.remote_decide(rel, frm, body))
+        body = vrelayops.status_body(req["board"])
+        return (vrelayops.local_request(rel, frm, "status", body) if local
+                else vrelayops.remote_status(rel, frm, body))
+
+    try:
+        if q:
+            context = _decide_text(getattr(args, "context", None), "--context", DECIDE_CONTEXT_MAX)
+            for w in vplain.check_decide(q, context):
+                print(w, file=sys.stderr, flush=True)
+            res = send({"cmd": "decide", "question": q, "context": context}, "decide")
+            if not res.get("ok"):
+                return _waiting_out({**res, "ok": False, "type": "decide",
+                                     "error": res.get("error") or "decide failed, board not set"}, 1)
+            decision = {"id": res.get("id"), "number": res.get("number"), "question": q}
+        else:
+            r = vwait.decision_ref(ref)
+            if r is None:
+                return _waiting_out({"ok": False, "type": "invalid", "error":
+                                     f"--decision {ref!r}: id d + 8 hex or the board number"}, 2)
+            decision = {"id": r} if r.startswith("d") else {"number": int(r)}
+            if rel is None:  # own join: it must be one of the open decisions it has seen
+                lst = vsession.request(sock, {"cmd": "board_list", "open": True}, timeout=10.0)
+                hit = [it for it in lst.get("open") or []
+                       if it.get("id") == decision.get("id") or it.get("number") == decision.get("number")]
+                if not hit:
+                    return _waiting_out({"ok": False, "type": "invalid", "error":
+                                         f"keine offene Entscheidung {ref}: erst `voicehook-agent decide "
+                                         f"--question ... --context ...`, dann --decision <id>. "
+                                         + vwait.RULE}, 2)
+                decision = {k: hit[0].get(k) for k in ("id", "number", "question") if hit[0].get(k)}
+        board = relay.build_board(None, text, args.open, args.done)
+        board.update(state=vwait.STATE, decision=decision)
+        res = send({"cmd": "board", "board": board}, "status")
+        if rel is not None and res.get("ok"):
+            from . import board as vboardhook
+            vboardhook.post_state(rel, frm, vwait.STATE)  # the helper card: "wartet auf dich"
+    except (vplain.PlainError, ValueError) as e:
+        return _waiting_out({"ok": False, "type": "invalid", "error": str(e)}, 2)
+    except vrelayops.RelayError as e:
+        return _waiting_out({"ok": False, "status": e.status or 503, "error": str(e), "via": "relay"}, 1)
+    except (vsession.SessionError, OSError) as e:
+        return _waiting_out({"ok": False, "type": "no-session", "error": repr(e)}, 3)
+    out = {**res, "type": "board", "board": board, "decision": decision, "state": vwait.STATE}
+    if rel is not None:
+        out["via"] = "relay"
+    return _waiting_out(out, 0 if res.get("ok") else 1)
 
 
 def _run_relay_next(args) -> int:
@@ -3791,6 +3904,16 @@ def main(argv: list[str] | None = None) -> None:
                                "{context, faq[{q, a}]} per item")
     p_status.add_argument("-f", "--file", default=None, metavar="JSON",
                           help="board file {doing, open[], done[]}; flags add to it")
+    p_status.add_argument("--waiting", default=None, metavar="TEXT",
+                          help="0.21.6: you wait for the human: the board shows TEXT as \"wartet auf "
+                               "dich\" (state frage) with its decision. Needs --question (asked "
+                               "right away, plus --context) or --decision ID (an open one). "
+                               + vwait.RULE + " A waiting text in TEXT/--doing is refused (exit 2)")
+    p_status.add_argument("--question", default=None, metavar="TEXT",
+                          help="0.21.6, with --waiting: the decision to ask (Klartext rule, "
+                               "--context mandatory)")
+    p_status.add_argument("--decision", default=None, metavar="ID",
+                          help="0.21.6, with --waiting: an open decision (id d + 8 hex, or #number)")
     p_status.add_argument("--project", default=None, metavar="NAME",
                           help="0.21.0: your project (1-40 chars, e.g. voicehook, salesengine, kunden, "
                                "sonstiges), sent as board field project; overrides the project the "
@@ -3924,7 +4047,8 @@ def main(argv: list[str] | None = None) -> None:
         "Klartext (else exit 2, nothing sent): a whole sentence that names the product or "
         "area, what happens and why, ending with ?; no bare PR/ticket numbers, digit chains "
         "or unexplained abbreviations (SE, WF, RLS, CI ... only with the long form); "
-        f"--context is mandatory. Bad: '{vplain.BAD_EXAMPLE}' Good: '{vplain.GOOD_EXAMPLE}'")
+        f"--context is mandatory. Bad: '{vplain.BAD_EXAMPLE}' Good: '{vplain.GOOD_EXAMPLE}'. "
+        f"0.21.6: {vwait.RULE} ({vwait.RULE_EN})")
     p_dec.add_argument("--question", default=None, metavar="TEXT",
                        help="the question, max 160 chars (yes/no when no --option is given). "
                             "Only a real decision the human can make from the board alone, in "

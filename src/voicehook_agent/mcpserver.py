@@ -39,7 +39,8 @@ INSTRUCTIONS = (
     "`status` (what you do now, open, done) whenever the task changes, at least every 3 "
     "minutes while you work. A question only the human can decide goes to `decide` "
     "(yes/no or 2-3 options), never only into the chat; collect the answer with `next` "
-    "(or decide wait_s). `activity` adds one short line (3-8 words) to the live log; no "
+    "(or decide wait_s). When you wait for the human, ALWAYS decide, never only a status "
+    "(a waiting text in status/activity is refused). `activity` adds one short line (3-8 words) to the live log; no "
     "paths, secrets or personal data anywhere.")
 
 _STR_LIST = {"type": "array", "items": {"type": "string"}, "maxItems": 10}
@@ -49,9 +50,20 @@ TOOLS = [
                     "you do right now (one sentence), open/done = short task lists. All "
                     "empty clears the board. Never spoken.",
      "inputSchema": {"type": "object", "properties": {
-         "doing": {"type": "string", "description": "current task, one sentence"},
+         "doing": {"type": "string", "description": "current task, one sentence. Never a "
+                                                    "text that waits for the human (refused): "
+                                                    "When you wait for the human, ALWAYS decide, "
+                                                    "never only a status"},
          "open": {**_STR_LIST, "description": "open tasks"},
-         "done": {**_STR_LIST, "description": "finished tasks"}},
+         "done": {**_STR_LIST, "description": "finished tasks"},
+         "waiting": {"type": "string", "description": "0.21.6: you wait for the human: the board "
+                     "shows this as 'wartet auf dich'; needs question (+ context) or decision"},
+         "question": {"type": "string", "maxLength": 160,
+                      "description": "with waiting: the decision to ask now (plain language)"},
+         "context": {"type": "string", "maxLength": 1500,
+                     "description": "with waiting + question: background of the decision"},
+         "decision": {"type": "string", "description": "with waiting: id of an open decision "
+                                                       "(from an earlier decide)"}},
          "additionalProperties": False}},
     {"name": "decide",
      "description": "Ask the human a decision on the call's Decision Board: yes/no, or 2-3 "
@@ -139,15 +151,48 @@ def _str_list(v: object, name: str) -> list[str]:
     return [x.strip() for x in v if x.strip()][:10]
 
 
+MCP_WAIT_HINT = ("MCP: call `decide` (question, context) first, then `status` with waiting + "
+                 "decision (or waiting + question + context in one call).")
+
+
 def tool_status(args: dict, agent: str) -> dict:
+    from . import waitcheck
     doing = args.get("doing")
-    if doing is not None and not isinstance(doing, str):
-        raise ToolError("doing must be a string")
+    waiting = args.get("waiting")
+    for k in ("doing", "waiting", "question", "context", "decision"):
+        if args.get(k) is not None and not isinstance(args.get(k), str):
+            raise ToolError(f"{k} must be a string")
+    decision = None
+    if waiting is not None:  # 0.21.6: the board waits for the human, with its decision
+        if not waiting.strip():
+            raise ToolError("waiting needs a text")
+        q, ref = (args.get("question") or "").strip(), (args.get("decision") or "").strip()
+        if bool(q) == bool(ref):
+            raise ToolError("waiting needs question (+ context) or decision. " + waitcheck.RULE)
+        if q:
+            res = tool_decide({"question": q, "context": args.get("context")}, agent)
+            if not res.get("ok"):
+                return {**res, "board": None, "note": "decide failed, board not set"}
+            decision = {"id": res.get("id"), "number": res.get("number"), "question": q}
+        else:
+            r = waitcheck.decision_ref(ref)
+            if r is None:
+                raise ToolError("decision: id d + 8 hex or the board number")
+            decision = {"id": r} if r.startswith("d") else {"number": int(r)}
+        doing = waiting
+    else:
+        try:
+            waitcheck.check(doing, "status doing")
+        except waitcheck.WaitError as e:
+            raise ToolError(f"{e}\n{MCP_WAIT_HINT}") from None
     board = {"doing": (doing or "").strip(), "open": _str_list(args.get("open"), "open"),
              "done": _str_list(args.get("done"), "done")}
+    if decision is not None:
+        board.update(state=waitcheck.STATE, decision=decision)
     rt, rel = _route()
     if rt == "own":
-        return _own({"cmd": "board", "board": board})
+        out = _own({"cmd": "board", "board": board})
+        return {**out, "decision": decision} if decision is not None else out
     if rt != "relay":
         raise ToolError(NO_CALL)
     from . import multisession as vmulti
@@ -156,7 +201,13 @@ def tool_status(args: dict, agent: str) -> dict:
     body = vrelayops.status_body(board)
     res = (vrelayops.local_request(rel, frm, "status", body) if vmulti._is_local(rel)
            else vrelayops.remote_status(rel, frm, body))
-    return {**res, "type": "board", "from": frm, "via": "relay"}
+    if decision is not None and res.get("ok"):
+        from . import board as vboard
+        vboard.post_state(rel, frm, waitcheck.STATE)
+    out = {**res, "type": "board", "from": frm, "via": "relay"}
+    if decision is not None:
+        out["decision"] = decision
+    return out
 
 
 def tool_decide(args: dict, agent: str) -> dict:
@@ -247,6 +298,11 @@ def tool_activity(args: dict, agent: str) -> dict:
         vact.note_line(text)
     except ValueError as e:
         raise ToolError(str(e)) from None
+    from . import waitcheck
+    try:  # 0.21.6: waiting for the human = decide, never an activity line
+        waitcheck.check(text, "activity")
+    except waitcheck.WaitError as e:
+        raise ToolError(f"{e}\n{MCP_WAIT_HINT}") from None
     rt, rel = _route()
     if rt == "own":
         return _own({"cmd": "activity", "text": text.strip()})

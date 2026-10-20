@@ -3,6 +3,24 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.21.6 (2026-10-20)
+
+Live: a helper waited for Oliver's okay with only `status --doing "... wartet auf dein Okay zu
+Musik und Stimme"`; no decision on the board, the card said "arbeitet", nobody saw a question.
+
+- **Waiting for the human = decide.** `status` TEXT/`--doing` and `activity` refuse a text that
+  waits for the human (exit 2, nothing sent) with a ready `decide` command; `--open` items
+  warn. MCP `status`/`activity` the same. `VOICEHOOK_WAIT_CHECK=0` turns it off.
+- **`status --waiting TEXT`** with `--question Q --context C` (asked first) or `--decision ID`
+  (an open one): the board says "wartet auf dich" (`state: frage`) and carries the decision;
+  over the relay the helper state goes to `frage` too. MCP `status`: `waiting` + `question`/
+  `decision`.
+- **Stop hook:** a turn that ends with a waiting board text and no open decision is blocked
+  once: "stelle eine Entscheidung per decide" (helpers incl. `vh-helper status`, and the joining
+  session via the new `status` fields `board_waiting`, `open_decisions`).
+- Help, MCP instructions and the join onboarding: "Wenn du auf den Menschen wartest, IMMER
+  decide, nie nur Status."
+
 ## 0.21.5 (2026-10-20)
 
 Live calls: an agent in a call was marked absent (`listening: 0`, Delta "not reachable", Stop

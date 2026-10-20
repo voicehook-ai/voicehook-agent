@@ -85,7 +85,9 @@ needs you, which wakes you; start it again after handling it. Since 0.21.4 the S
 listens ([listen guard](docs/CLI.md#listen-guard-never-end-a-turn-deaf-0214)). Since 0.21.5
 the join itself holds your presence and spools every event durably while you work
 ([event spool](docs/CLI.md#event-spool-the-join-listens-for-you-0215)): `listen` picks them
-up with a cursor, nothing is lost, and the Stop hook warns on unread events.
+up with a cursor, nothing is lost, and the Stop hook warns on unread events. When you wait for
+the human, ALWAYS `decide`, never only a status (0.21.6: `status --waiting ... --question ...`
+shows "wartet auf dich" together with the decision).
 
 Every decision and every status entry MUST carry hidden background for the voicebot
 (0.21.4): `--context "..."` plus the 3 most likely follow-up questions with prepared

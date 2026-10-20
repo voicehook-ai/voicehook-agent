@@ -68,7 +68,8 @@ voicehook-agent leave --say "See you soon."             # clean exit
 | `says` (0.9.0) | `{"type":"says","says":[{"seq":3,"state":"spoken","spoken_chars":12,"age_s":4.1,"text":"..."}]}`: last state of each own say (`sent` until the voicebot's first receipt) | 0 |
 | `leave [--say TEXT]` | `{"type":"leaving"}` | 0 |
 | `status` | room, identity, connected, pending events, idle seconds, peers; 0.21.4 `listen_idle_s` (seconds since the last `next` ended, `null` = none yet), `leaving`; 0.21.5 `listening` (bool: join + event spool hold the call, true from the first `say`/`next` on, also while you work), `consumers` (`next`/`listen` requests waiting now; 0.21.4 called this `listening`), `unread` / `unread_wake` (spool events not acked yet / the ones that need you), `last_consumed_s` (seconds since the last ack, `null` = none yet) | 0 |
-| `status [TEXT] [--doing T] [--open T]... [--done T]... [-f board.json]` (0.7.0) | `{"type":"board","board":{...}}`: sends your status board | 0 ok, 1 failed |
+| `status [TEXT] [--doing T] [--open T]... [--done T]... [-f board.json]` (0.7.0) | `{"type":"board","board":{...}}`: sends your status board. 0.21.6: a text that waits for the human is refused (exit 2), see [Waiting for the human](#waiting-for-the-human-always-decide-0216) | 0 ok, 1 failed, 2 invalid |
+| `status --waiting T (--question Q --context C \| --decision ID)` (0.21.6) | `{"type":"board","board":{"doing":T,"state":"frage","decision":{id,number,question}},"decision":{...},"state":"frage"}`: the board shows T as "wartet auf dich", with its decision (`--question` asks it first) | 0 ok, 1 failed, 2 invalid |
 | `decide --question T [--option T]... [--recommend N] [--context T] [--recent T]` (0.14.4) | `{"ok":true,"id":"d...","number":1}`: a question ONLY the human can decide (Decision Board, not the status board); the answer comes back in `next` as `{"type":"decision","verdict":"yes"\|"no"\|"option"\|"other"\|"unclear","option":N?,"text":"..."?}` | 0 ok, 1 failed |
 | `ui open\|close\|min\|medium\|large\|max <window>`, `ui layout <preset>`, `ui move <window> <slot> [--preset P]`, `ui focus <project\|all>` (0.21.0) | one line `ui: window log large`: the humans' call page changes like on their own click (see [Page control](#page-control-ui-0210)) | 0 ok, 1 failed, 2 invalid |
 | `notify-me --reason done\|blocked\|decision [--message T]`, `call-me --reason ... [--message T]` | the server's answer, e.g. `{"ok":true,"type":"notify_me","status":"sms_sent",...}` or `{"ok":true,"type":"call_me","status":"refused","why":"no_account"}`: reach the human outside the call (see [Notify the human](#notify-the-human-notify-me-call-me)) | 0 ok, 1 failed, 2 invalid |
@@ -291,6 +292,32 @@ keeps you present, but a user turn would only pile up). Every reason names
 > Since 0.2.0, `--keep-alive` is the default: **stdin-EOF no longer quits** and
 > transient room-disconnects auto-reconnect. Run with a closed stdin in the
 > background without the FIFO sleep-holder hack. See [Relay flags](PROTOCOL.md#relay-flags).
+
+### Waiting for the human: always decide (0.21.6)
+
+**Wenn du auf den Menschen wartest, IMMER decide, nie nur Status.** Live: a helper waited for
+Oliver's okay with only `status --doing "... wartet auf dein Okay zu Musik und Stimme"`; no
+decision on the board, its card said "arbeitet", nobody saw a question.
+
+- `status` TEXT/`--doing` and `activity`: a text that waits for the human ("wartet auf
+  dein/dich/Oliver/Freigabe ...", "warte auf", "dein OK/Okay", "auf deine Freigabe",
+  "Entscheidung von", "sobald du", "waiting for your", "your approval" ...; a machine wait
+  like "wartet auf CI" is fine) is refused: exit 2, nothing sent, with a ready command, e.g.
+  `voicehook-agent decide --question "Promo-Video: Musik und Stimme so freigeben, damit ich
+  weitermachen kann?" --context "<was, warum, was bei Ja und was bei Nein passiert>"`.
+  `--open` items only get a warning. MCP `status` / `activity`: the same, as a tool error.
+- `status --waiting "<text>" --question "<frage>?" --context "<...>"` asks the decision
+  (Klartext rule) and then sets the board with `state: "frage"` ("wartet auf dich") and
+  `decision {id, number, question}`; `--decision <id|#nr>` points at an open one instead (own
+  join: checked against the open decisions it has seen). Without either: exit 2. Over the
+  relay (helper) the state also goes to `POST <relay>/state`. MCP `status`: `waiting` +
+  `question`/`context` or `decision`.
+- Stop hook: a turn that ends while the last board waits for the human and no decision is
+  open (helpers: board.py, also for `vh-helper status`; the joining session: `status` field
+  `board_waiting` + `open_decisions`) is blocked once per board text: "stelle eine
+  Entscheidung per decide", with the command.
+
+`VOICEHOOK_WAIT_CHECK=0` turns all of it off.
 
 ### Klartext rule: decisions and board items anyone can follow (0.21.5)
 
