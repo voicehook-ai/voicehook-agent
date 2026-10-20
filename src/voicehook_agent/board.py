@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import time
@@ -161,6 +162,19 @@ def decide_command(command: object) -> str | None:
     except Exception:  # noqa: BLE001
         return None
     return None
+
+
+_DECISION_RX = re.compile(r'"type"\s*:\s*"decision"')
+
+
+def answers_in_output(command: object, response: object) -> int:
+    """0.21.4: decision events the session read itself (`vh-helper next`, `relay-next`,
+    `decide --wait`, Bash output): they close as many of its open questions."""
+    cmd = str(command or "")
+    if not any(w in cmd for w in ("next", "decide")):
+        return 0
+    out = response.get("stdout") if isinstance(response, dict) else response
+    return len(_DECISION_RX.findall(out)) if isinstance(out, str) else 0
 
 
 def status_command(command: object) -> tuple[str, bool] | None:
@@ -497,12 +511,14 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
         room = _room(rel)
         local = vmulti._is_local(rel)
         got = asked = None
+        seen_answers = 0
         if name_ev == "PostToolUse" and str(event.get("tool_name") or "") == "Bash" \
                 and not _failed(event):
             cmd = (event.get("tool_input") or {}).get("command") \
                 if isinstance(event.get("tool_input"), dict) else ""
             got = status_command(cmd)
             asked = decide_command(cmd)
+            seen_answers = answers_in_output(cmd, event.get("tool_response"))
         is_ask = name_ev in ASK_EVENTS or (name_ev == "PreToolUse"
                                            and str(event.get("tool_name") or "") == "AskUserQuestion")
         need = name_ev in NAME_EVENTS or got is not None or asked is not None or is_ask \
@@ -520,12 +536,16 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
             asks = me.get("asks") if isinstance(me.get("asks"), dict) else {}
             asks = {k: v for k, v in asks.items() if t - _float(v) < ASK_KEEP_S}
             if asked is not None:
-                asks[asked or label or str(me.get("from") or "")] = t
+                who = asked or label or str(me.get("from") or "")
+                asks[who] = t
                 me["poll_at"] = t        # just asked: the answer takes a while
+                _open_add(me, who, 1)    # 0.21.4: open until its answer is delivered
             if is_ask and label:
                 asks[label] = t          # notify.py asks under the session label
             asks.pop("", None)
             me["asks"] = asks
+            for k in sorted(asks, key=lambda k: -_float(asks[k]))[:1] if seen_answers else []:
+                _open_add(me, k, -seen_answers)  # 0.21.4: the session read answers itself
             name = str(me.get("from") or me.get("name") or label or "Session")
             out: dict = {"name": name}
             if name_ev in WORK_EVENTS:
@@ -588,6 +608,24 @@ DELIVERED_KEEP = 100
 STATE_ENV_OFF = "VOICEHOOK_SESSION_STATE"
 
 
+def _open_add(me: dict, name: str, n: int) -> None:
+    """0.21.4: count of this session's questions under `name` without a delivered answer
+    (`vh-helper decide`, `voicehook-agent decide`, a Stop question). Never below 0."""
+    if not name:
+        return
+    opn = me.get("open") if isinstance(me.get("open"), dict) else {}
+    try:
+        cur = int(opn.get(name) or 0)
+    except (TypeError, ValueError):
+        cur = 0
+    cur = max(0, cur + n)
+    if cur:
+        opn[name] = cur
+    else:
+        opn.pop(name, None)
+    me["open"] = opn
+
+
 def note_ask(skey: str, rel: dict, name: str, t: float | None = None) -> None:
     """0.21.3 (asks.py): this session asked under `name`; its hooks poll for the answer
     (a late answer arrives as additionalContext / Stop block). Never raises."""
@@ -601,22 +639,54 @@ def note_ask(skey: str, rel: dict, name: str, t: float | None = None) -> None:
             asks[name] = t
             me["asks"] = asks
             me["poll_at"] = t
+            _open_add(me, name, 1)
         _with_state(step)
     except Exception:  # noqa: BLE001, S110
         pass
 
 
-def mark_delivered(skey: str, evs: list[dict]) -> None:
-    """These answers reached the session another way (asks.py): never deliver them again."""
+def mark_delivered(skey: str, evs: list[dict], frm: str = "") -> None:
+    """These answers reached the session another way (asks.py): never deliver them again.
+    With `frm` (0.21.4) they also close that many open questions under it."""
     try:
         def step(st: dict):
             me = st["sessions"].setdefault(skey, {})
             seen = [x for x in (me.get("delivered") or []) if isinstance(x, str)]
             seen += [_answer_key(e) for e in evs]
             me["delivered"] = seen[-DELIVERED_KEEP:]
+            if frm:
+                _open_add(me, frm, -len(evs))
         _with_state(step)
     except Exception:  # noqa: BLE001, S110
         pass
+
+
+def open_names(skey: str, now: float | None = None) -> list[str]:
+    """0.21.4: the names under which this session still waits for an answer (asked within
+    ASK_KEEP_S, not every answer delivered yet), newest question first."""
+    t = time.time() if now is None else now
+    try:
+        st = json.loads((vact.state_root() / STATE_NAME).read_text(encoding="utf-8"))
+        me = st.get("sessions", {}).get(skey)
+    except (OSError, ValueError, AttributeError):
+        return []
+    if not isinstance(me, dict):
+        return []
+    asks = me.get("asks") if isinstance(me.get("asks"), dict) else {}
+    opn = me.get("open") if isinstance(me.get("open"), dict) else {}
+    names = [k for k, v in opn.items() if isinstance(k, str) and k and _float(v) > 0
+             and t - _float(asks.get(k)) < ASK_KEEP_S]
+    return sorted(names, key=lambda k: -_float(asks.get(k)))[:POLL_MAX]
+
+
+def worked_since(skey: str, since: float) -> bool:
+    """0.21.4: did the session go on (prompt, tool) after `since`?"""
+    try:
+        st = json.loads((vact.state_root() / STATE_NAME).read_text(encoding="utf-8"))
+        me = st.get("sessions", {}).get(skey)
+    except (OSError, ValueError, AttributeError):
+        return False
+    return isinstance(me, dict) and _float(me.get("work_at")) > since
 
 
 def fetch_answers(rel: dict, frm: str) -> list[dict]:
@@ -650,21 +720,28 @@ def _answer_key(ev: dict) -> str:
 
 def deliver(skey: str, rel: dict, names: list[str], fetch=None) -> list[dict]:
     """New answers for this session (deduped across hook runs by a hash of id + verdict)."""
-    evs: list[dict] = []
+    got: list[tuple[str, dict]] = []
     for frm in names:
-        evs += (fetch or fetch_answers)(rel, frm)
-    if not evs:
+        got += [(frm, e) for e in (fetch or fetch_answers)(rel, frm)]
+    return take_new(skey, got)
+
+
+def take_new(skey: str, got: list[tuple[str, dict]]) -> list[dict]:
+    """The answers of (from, event) pairs not delivered yet; marks them delivered and closes
+    their open questions (0.21.4)."""
+    if not got:
         return []
 
     def step(st: dict):
         me = st["sessions"].setdefault(skey, {})
         seen = [x for x in (me.get("delivered") or []) if isinstance(x, str)]
         new = []
-        for ev in evs:
+        for frm, ev in got:
             k = _answer_key(ev)
             if k not in seen:
                 seen.append(k)
                 new.append(ev)
+                _open_add(me, frm, -1)
         me["delivered"] = seen[-DELIVERED_KEEP:]
         return new
     return _with_state(step)

@@ -341,11 +341,11 @@ def stop_ask(raw: str, wait: bool = True, now: float | None = None, post=None,
             return 0, ""
         skey, rel, frm = who
         item = stop_question(last_message(event))
-        if item is None:
-            return 0, ""
         t = time.time() if now is None else now
-        if not _first_time(skey, _hash(item), t):
-            return 0, ""
+        if item is None or not _first_time(skey, _hash(item), t):
+            # 0.21.4: no new question at this Stop, but earlier ones (`vh-helper decide`,
+            # `voicehook-agent decide`) still open: wait for their answers and wake the session
+            return wait_open(skey, rel, t, next_events, clock) if wait else (0, "")
         info = {"kind": "ask", "question": item["question"], "options": item["options"],
                 "items": [item], "tool": "", "prio": vnotify.PRIO_SPECIFIC}
         extra = {"from": frm, "kind": "stop"}
@@ -368,11 +368,47 @@ def stop_ask(raw: str, wait: bool = True, now: float | None = None, post=None,
             return 0, ""
         vnotify.forget(skey, qk)
         evs = list(got.values())
-        board.mark_delivered(skey, evs)
+        board.mark_delivered(skey, evs, frm)
         return WAKE_EXIT, " ".join(board.answer_text(dict(e, text=tool_answer(item, e)))
                                    if e.get("verdict") == "option" else board.answer_text(e)
                                    for e in evs)
     except Exception:  # noqa: BLE001
+        return 0, ""
+
+
+def wait_open(skey: str, rel: dict, t0: float, next_events=None,
+              clock=time.monotonic) -> tuple[int, str]:
+    """0.21.4: the session stopped while questions it asked are still open (board.open_names).
+    Long-poll their answers up to STOP_WAIT_S: (WAKE_EXIT, answer texts) wakes the idle
+    session. The session goes on by itself first: answers fetched meanwhile go back into the
+    local inbox (its next hook event delivers them as additionalContext), (0, ""). Never
+    raises."""
+    from . import board, relayops
+    nxt = next_events or relayops.next_events
+    names = board.open_names(skey, t0)
+    if not names:
+        return 0, ""
+    deadline = clock() + STOP_WAIT_S
+    try:
+        while True:
+            left = deadline - clock()
+            if left <= 0:
+                return 0, ""
+            chunk = max(1.0, min(POLL_CHUNK_S, left) / len(names))
+            got = [(frm, e) for frm in names for e in nxt(rel, frm, chunk)
+                   if isinstance(e, dict) and e.get("type", "decision") == "decision"]
+            if board.worked_since(skey, t0):
+                for frm, e in got:  # not lost: the session's next hook event takes them
+                    vact._private_dir(vact.state_root())
+                    relayops.append_jsonl(relayops.inbox_path(frm), e)
+                return 0, ""
+            new = board.take_new(skey, got)
+            if new:
+                return WAKE_EXIT, " ".join(board.answer_text(e) for e in new)
+            names = board.open_names(skey, t0)
+            if not names:
+                return 0, ""
+    except Exception:  # noqa: BLE001 - relay gone: give up quietly
         return 0, ""
 
 
