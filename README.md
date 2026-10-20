@@ -78,6 +78,12 @@ uvx voicehook-agent join 'https://voicehook.ai/r/<slug>?invite=<code>' --name <y
 - Use the full invite link, including `?invite=<code>`.
 - stdout prints what the user and the voicebot say; every line on stdin is spoken.
 
+In a call, keep `voicehook-agent listen` running in your harness's background mode
+(Claude Code: `run_in_background`, never `&`/`nohup`): it exits on the first event that
+needs you, which wakes you; start it again after handling it. Since 0.21.4 the Stop hook
+(`voicehook-agent hook install`) blocks a turn end while your join is connected and nobody
+listens ([listen guard](docs/CLI.md#listen-guard-never-end-a-turn-deaf-0214)).
+
 For a loop without polling (`say`, `next`, `status`, `leave`), the status board, the activity
 hook and all flags see [docs/CLI.md](docs/CLI.md). Since 0.21.0: `decide --context "..."`
 gives Delta the background of a question, `ui large decisions` / `ui layout thirds` /

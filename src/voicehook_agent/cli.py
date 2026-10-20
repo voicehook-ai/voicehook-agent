@@ -10,6 +10,8 @@ Usage:
 Agent loop without polling (against the running join, via a local socket):
     voicehook-agent say "Hallo, ich bin da."     # speak one line
     voicehook-agent next --timeout 60            # block until the next user turn
+    voicehook-agent listen                       # 0.21.4: gapless next loop, exits on the
+                                                 # first actionable event (run_in_background)
     voicehook-agent leave                        # end the join cleanly
     voicehook-agent status                       # connection + room state
 
@@ -824,6 +826,9 @@ class _Control:
         self.lk_jwt = ""
         # 0.21.0 Silent Mode: aggregate of the humans' vh.mic_muted/vh.speaker_muted/vh.away
         self.human_state = relay.human_state([])
+        # 0.21.4 listen guard: waiting `next` requests, monotonic end of the last one
+        self.listening = 0
+        self.listen_end: float | None = None
 
     def attach(self, room: rtc.Room) -> None:
         self.room = room
@@ -1293,10 +1298,16 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         if ctl.watchdog.timeout > 0:
             timeout = min(timeout, ctl.watchdog.timeout)
         ctl.watchdog.enter()
+        listen = timeout > 0  # 0.21.4 listen guard: a waiting `next` = someone listens
+        if listen:
+            ctl.listening += 1
         try:
             ev = await ctl.events.get(timeout)
         finally:
             ctl.watchdog.leave()
+            if listen:
+                ctl.listening = max(0, ctl.listening - 1)
+                ctl.listen_end = time.monotonic()
         hints = ctl.clock.hints()
         if ev is None or ev.get("type") != "ended":
             hints.update(ctl.agent_said.take())
@@ -1360,9 +1371,21 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         return {"ok": True, "type": "status", "room": ctl.slug, "identity": ctl.ident,
                 "connected": room is not None, "pending": len(ctl.events),
                 "idle_s": round(ctl.watchdog.idle_for(), 1),
+                # 0.21.4 listen guard (listenguard.py): `next` requests waiting right now,
+                # seconds since the last one ended (null: none yet), leaving
+                "listening": ctl.listening, "listen_idle_s": _listen_idle(ctl),
+                "leaving": ctl.leaving,
                 "idle_timeout_s": ctl.watchdog.timeout,
                 "peers": sorted(peers, key=lambda d: d["identity"])}
     return {"ok": False, "error": f"unknown cmd {cmd!r}"}
+
+
+def _listen_idle(ctl: _Control) -> float | None:
+    if ctl.listening:
+        return 0.0
+    if ctl.listen_end is None:
+        return None
+    return round(max(0.0, time.monotonic() - ctl.listen_end), 1)
 
 
 async def _publish_alive(ctl: _Control, alive: bool) -> bool:
@@ -3018,6 +3041,48 @@ def _run_client(args) -> int:
 
 WAIT_ANSWER = -1.0  # `decide --wait` without SEC: wait for the answer (helper sessions)
 
+# 0.21.4 `listen`: the gapless `next` loop. It prints and exits on the first event that needs
+# the agent; everything else (timeout, human_state, voicebot_back) keeps it waiting.
+LISTEN_WAKE = ("user", "decision", "helper_decision", "voicebot_left", "missed",
+               "status_request", "revise", "call_end")
+LISTEN_POLL_S = 45.0
+
+
+def _run_listen(args, request=None, resolve=None, clock=time.monotonic) -> int:
+    """`listen [--timeout SEC] [--poll SEC]`: repeat `next` until an actionable event (one
+    JSON line, exit 0), the join ends (exit 3) or --timeout passes ({"type":"timeout"}, exit
+    0; 0 = no limit). Meant for the harness's background mode (run_in_background), so the
+    agent is woken when it exits."""
+    request = request or vsession.request
+    resolve = resolve or vsession.resolve_socket
+    poll = max(1.0, float(args.poll))
+    deadline = clock() + args.timeout if args.timeout and args.timeout > 0 else None
+    try:
+        sock = resolve(args.session, wait=args.wait)
+    except (vsession.SessionError, OSError) as e:
+        _print_json({"ok": False, "type": "no-session", "error": str(e)})
+        return 3
+    while True:
+        wait = poll if deadline is None else min(poll, deadline - clock())
+        if wait <= 0:
+            _print_json({"ok": True, "type": "timeout", "pending": 0})
+            return 0
+        try:
+            reply = request(sock, {"cmd": "next", "timeout": max(1.0, wait)}, timeout=None)
+        except (vsession.SessionError, OSError) as e:
+            _print_json({"ok": False, "type": "no-session", "error": repr(e)})
+            return 3
+        kind = reply.get("type")
+        if kind == "ended":
+            _print_json(reply)
+            return 3
+        if not reply.get("ok"):
+            _print_json(reply)
+            return 1
+        if kind in LISTEN_WAKE:
+            _print_json(reply)
+            return 0
+
 
 def _print_json(obj: dict) -> None:
     print(json.dumps(obj, ensure_ascii=False), flush=True)
@@ -3276,6 +3341,18 @@ def main(argv: list[str] | None = None) -> None:
     p_next.add_argument("--timeout", type=float, default=60.0, metavar="SEC",
                         help="give up after SEC seconds and print {\"type\":\"timeout\"} (default 60; 0 = only return what is queued).")
     _add_session(p_next)
+    p_listen = sub.add_parser(
+        "listen", help="0.21.4: the gapless listen loop: repeats `next` and prints ONE JSON line "
+        "on the first event that needs you (user, decision, helper_decision, voicebot_left, "
+        "missed, status_request, revise, call_end), then exits 0 (3 = join ended). Run it with "
+        "the harness's background mode (Claude Code: run_in_background), never detached with "
+        "& or nohup: the exit is what wakes you. Start it again after handling the event.")
+    p_listen.add_argument("--timeout", type=float, default=0.0, metavar="SEC",
+                          help="give up after SEC seconds with {\"type\":\"timeout\"} "
+                               "(default 0 = wait until an event)")
+    p_listen.add_argument("--poll", type=float, default=LISTEN_POLL_S, metavar="SEC",
+                          help=f"timeout of each single `next` (default {LISTEN_POLL_S:g})")
+    _add_session(p_listen)
     p_says = sub.add_parser(
         "says", help="last state of your own says (operator.say_status from the voicebot: "
         "sent/queued/spoken/interrupted/requeued/replaced/covered) as JSON")
@@ -3555,6 +3632,8 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(_run_client(args))
     if args.cmd == "relay-next":
         sys.exit(_run_relay_next(args))
+    if args.cmd == "listen":
+        sys.exit(_run_listen(args))
     if args.cmd == "log-summary":
         try:
             rc = asyncio.run(_run_log_summary(args))
