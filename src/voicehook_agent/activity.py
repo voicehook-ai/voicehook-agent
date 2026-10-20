@@ -48,6 +48,10 @@ works gets a short reminder as `hookSpecificOutput.additionalContext` on PostToo
 UserPromptSubmit (at most one per 3 min); after 15 min idle following a Stop its board is
 cleared (see board.py). The only stdout of the hook, never a decision.
 
+0.21.4 listen guard: on Stop of the session that owns a connected join while no `next`
+waits for it, `{"decision": "block", "reason": ...}` (start `voicehook-agent listen` in the
+background first; see listenguard.py, loop-safe via stop_hook_active).
+
 This module stays stdlib-only (no livekit/httpx) so the hook starts fast.
 """
 from __future__ import annotations
@@ -1090,6 +1094,15 @@ def board_hook(raw: str) -> dict | None:
         return None
 
 
+def listen_guard(raw: str) -> dict | None:
+    """0.21.4: Stop of the joining session while nobody listens (listenguard.py). Never raises."""
+    try:
+        from . import listenguard
+        return listenguard.handle(raw)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def notify_progress(raw: str) -> None:
     try:
         from . import notify
@@ -1140,12 +1153,14 @@ def main(argv: list[str] | None = None) -> int:
         return asks.main(cmd)
     if cmd in ("pre-tool-use", "post-tool-use", "post-tool-use-failure", "user-prompt-submit",
                "stop", "notification", "permission-request", "session-start"):
-        out = None
+        out = guard = None
         with _deadline(RELAY_HOOK_TIMEOUT):
             try:
                 raw = sys.stdin.read()
             except Exception:  # noqa: BLE001
                 raw = ""
+            if cmd == "stop":  # 0.21.4: own join connected, nobody listens -> block the stop
+                guard = listen_guard(raw)
             if cmd in ("notification", "permission-request"):
                 notify_hook(raw)  # 0.18.0: question/permission -> Decision Board + feed
             elif cmd == "pre-tool-use":
@@ -1159,10 +1174,14 @@ def main(argv: list[str] | None = None) -> int:
                 notify_progress(raw)  # 0.18.0: the session goes on, its question leaves
             # 0.21.0 (board.py): session state, board reminder, answers to own questions
             out = board_hook(raw)
+        if guard:
+            from . import listenguard
+            out = listenguard.merge(out, guard)
         if out and cmd in PRINT_COMMANDS:
             print(json.dumps(out, ensure_ascii=False), flush=True)
         # always 0. stdout: only 0.21.0 additionalContext (Post/Prompt/SessionStart) or, on
-        # Stop with a new answer to one of the session's questions, decision block + reason
+        # Stop with a new answer to one of the session's questions, decision block + reason;
+        # 0.21.4 also on Stop of the joining session while nobody listens (listenguard.py)
         return 0
     if cmd in ("codex", "codex-notify"):  # 0.20.0: Codex CLI hooks + notify (agents.py)
         from . import agents

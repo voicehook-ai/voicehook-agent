@@ -62,9 +62,10 @@ voicehook-agent leave --say "See you soon."             # clean exit
 |---|---|---|
 | `say <text> [--mode append\|overwrite\|revise] [--urgent]` | `{"ok":true,"seq":3}` | 0 ok, 1 failed |
 | `next [--timeout SEC]` | `{"type":"user","text":...}`, `{"type":"revise","text":...,"unspoken":[...],"new":...}` (your `--mode revise` replaced own not-started says; if any still matters, send one merged `say --mode overwrite`), `{"type":"timeout"}`, `{"type":"ended"}`; 0.21.0 `{"type":"voicebot_left","room","text"}` / `{"type":"voicebot_back","room","seconds","text"}` (the voicebot dropped out, e.g. a server update: tell your user in chat, keep calling `next`, never leave; back: `say` works again. A takeover sends neither; also a JSONL line in `--json` mode) | 0, 3 on `ended` |
+| `listen [--timeout SEC] [--poll SEC]` (0.21.4) | the gapless `next` loop: ONE line, the first event that needs you (`user`, `decision`, `helper_decision`, `voicebot_left`, `missed`, `status_request`, `revise`, `call_end`); `timeout`, `human_state`, `voicebot_back` keep it waiting. `--timeout` 0 (default) = until an event. Run it in the harness's background mode, see [Listen guard](#listen-guard-never-end-a-turn-deaf-0214) | 0, 3 on `ended` / no join |
 | `says` (0.9.0) | `{"type":"says","says":[{"seq":3,"state":"spoken","spoken_chars":12,"age_s":4.1,"text":"..."}]}`: last state of each own say (`sent` until the voicebot's first receipt) | 0 |
 | `leave [--say TEXT]` | `{"type":"leaving"}` | 0 |
-| `status` | room, identity, connected, pending events, idle seconds, peers | 0 |
+| `status` | room, identity, connected, pending events, idle seconds, peers; 0.21.4 `listening` (`next` requests waiting now), `listen_idle_s` (seconds since the last one ended, `null` = none yet), `leaving` | 0 |
 | `status [TEXT] [--doing T] [--open T]... [--done T]... [-f board.json]` (0.7.0) | `{"type":"board","board":{...}}`: sends your status board | 0 ok, 1 failed |
 | `decide --question T [--option T]... [--recommend N] [--context T] [--recent T]` (0.14.4) | `{"ok":true,"id":"d...","number":1}`: a question ONLY the human can decide (Decision Board, not the status board); the answer comes back in `next` as `{"type":"decision","verdict":"yes"\|"no"\|"option"\|"other"\|"unclear","option":N?,"text":"..."?}` | 0 ok, 1 failed |
 | `ui open\|close\|min\|medium\|large\|max <window>`, `ui layout <preset>`, `ui move <window> <slot> [--preset P]`, `ui focus <project\|all>` (0.21.0) | one line `ui: window log large`: the humans' call page changes like on their own click (see [Page control](#page-control-ui-0210)) | 0 ok, 1 failed, 2 invalid |
@@ -104,6 +105,29 @@ voicehook-agent leave --say "See you soon."             # clean exit
   Turns spoken while you were thinking are kept, never lost. `--timeout 0` only
   returns what is already queued. Each event carries `ts` (unix time it was
   spoken).
+### Listen guard: never end a turn deaf (0.21.4)
+
+In a call, your turn may only end while something waits for the user: a `next` that
+blocks, or better `voicehook-agent listen`, started with the harness's background mode
+(Claude Code: Bash `run_in_background`; Codex and others: their background task). Its exit
+(the first event that needs you) is what wakes you: handle the event, start `listen`
+again. Never detach it with `&` or `nohup`: then it runs, but nobody is told when it
+returns, and to the user you have left the call.
+
+```bash
+voicehook-agent listen          # run_in_background; one JSON line on the first actionable event
+```
+
+The Stop hook of `voicehook-agent hook install` enforces it for Claude Code: on Stop of the
+session that owns a connected join, it asks that join (`status`, 1 s) whether a `next`
+waits (`listening`) or one ended less than 5 s ago (the gap in a loop). Nobody: it answers
+`{"decision":"block","reason":"You are in a live voicehook call and nobody is listening (N
+pending). ... Start the listen loop now with run_in_background ..."}` and the turn goes on.
+Loop-safe: with `stop_hook_active` it blocks again only when more sentences are pending than
+at its last block. Never: outside a call, for other sessions (helpers, `owner_session` of
+the join), subagents, a leaving join, a join older than 0.21.4 (no `listening` field).
+`VOICEHOOK_LISTEN_GUARD=0` turns it off. To end the call instead: `voicehook-agent leave`.
+
 - Queueing starts with your first `say` or `next`. Turns spoken before that are
   not queued (a stdout/FIFO-only agent never piles up a backlog), and the queue
   keeps at most the 200 newest events.
