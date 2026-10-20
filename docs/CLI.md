@@ -584,6 +584,17 @@ returns `{"decision": "block", "reason": ...}`, so an idle session goes on with 
 a new answer Stop never blocks (no loop, also with `stop_hook_active`). `hook install` adds
 the `SessionStart` hook (re-run it after the upgrade).
 
+**Answers reach an idle helper by themselves (0.21.4).** Until now the hook only polled while
+the session worked; an answer that came after the helper's turn ended waited until someone
+typed into that session. The hook now counts each question as open (`vh-helper decide`,
+`voicehook-agent decide`, a Stop question) until its answer was delivered or the session read
+it itself (`vh-helper next`, `relay-next`, `decide --wait` output). On Stop with open
+questions the async `stop-wait` hook long-polls their answers (remote relay `next`, local
+relay answer file; up to 30 min) and wakes the idle session with the same text as above
+(asyncRewake). The session goes on by itself first: answers fetched meanwhile go into the
+local inbox and arrive with its next hook event. Remote and local relay; nothing to install
+beyond `hook install` (stop-wait is there since 0.21.3).
+
 **Session state from the hooks (0.21.0).** The hook reports each helper session's state,
 never what the agent writes: PreToolUse / PostToolUse / UserPromptSubmit `arbeitet`,
 Notification / PermissionRequest / AskUserQuestion `frage`, Stop `leerlauf`, 3 failed tools
