@@ -620,6 +620,22 @@ def _body(item: dict) -> dict:
     return body
 
 
+def _record(job: dict, dec_id: str, question: str, res: dict, item: dict) -> None:
+    """0.21.4: a helper's mirrored question is on the board: the session gets a note at its
+    next hook event, and the answer quotes the question (board.record_question)."""
+    if job.get("route") != "relay":
+        return  # the joining session gets its answers in `next`
+    try:
+        from . import board
+        num = res.get("number") if isinstance(res, dict) else None
+        board.record_question(str(job.get("skey") or ""), dec_id, question,
+                              num if isinstance(num, int) else None,
+                              item.get("options") or job.get("options") or [],
+                              str(job.get("src") or "mirror-perm"))
+    except Exception:  # noqa: BLE001, S110
+        pass
+
+
 def create(job: dict) -> list[str]:
     """Delete what the job replaces/deletes, create its decision(s) (one per item of a
     multi-question ask) and store their ids. The ids created (and kept), [] otherwise."""
@@ -643,6 +659,7 @@ def create(job: dict) -> list[str]:
             if set_id(str(job.get("skey") or ""), str(job.get("qk") or _qkey(q)), dec_id):
                 _decide(job, {"id": dec_id, "delete": True})
                 return []
+            _record(job, dec_id, q, res, item)
             return [dec_id]
         return []
     ids: list[str] = []
@@ -651,6 +668,7 @@ def create(job: dict) -> list[str]:
         dec_id = res.get("id") if isinstance(res, dict) and res.get("ok") else None
         if isinstance(dec_id, str) and _ID.match(dec_id):
             ids.append(dec_id)
+            _record(job, dec_id, item["question"], res, item)
     qk = str(job.get("qk") or _qkey("\n".join(i["question"] for i in items)))
     if ids and set_ids(str(job.get("skey") or ""), qk, ids):
         for dec_id in ids:
@@ -720,6 +738,9 @@ def ask_job(rt: str, skey: str, info: dict, adm: dict, extra: dict) -> dict:
     job = {"op": "create", "route": rt, "skey": skey, "question": info["question"],
            "options": info.get("options") or [], "replace": adm.get("replace"),
            **{k: v for k, v in extra.items() if k in ("dir", "from")}}
+    # 0.21.4: where the question came from (the answer and the mirror note say it)
+    job["src"] = ("mirror-stop" if extra.get("kind") == "stop" else
+                  "mirror-ask" if info.get("tool") == ASK_TOOL else "mirror-perm")
     items = info.get("items") or []
     if adm.get("replace_ids"):
         job["replace_ids"] = adm["replace_ids"]

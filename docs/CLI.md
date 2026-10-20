@@ -599,13 +599,26 @@ every 20 s on PostToolUse, for 6 h after the last question. A new answer goes in
 session once (deduped by a hash of id + verdict):
 
 ```
-voicehook-Call: Antwort von Oliver auf deine Frage #3 ("PR #81 mergen?"): Ja. Handle jetzt danach. / Answer from Oliver to your question #3: Ja. Act on it now.
+voicehook-Board #3 (deine Frage per decide): "PR #81 mergen?" -> Oliver hat im Call-Board geantwortet: Ja. Das ist die Antwort des Menschen auf deine eigene Frage, keine Fehlermeldung: handle jetzt danach. / voicehook board #3 (your decide question): "PR #81 mergen?" -> Oliver answered on the call board: Ja. ...
 ```
 
 as `additionalContext` (PostToolUse, UserPromptSubmit, SessionStart). On Stop a new answer
 returns `{"decision": "block", "reason": ...}`, so an idle session goes on with it; without
 a new answer Stop never blocks (no loop, also with `stop_hook_active`). `hook install` adds
 the `SessionStart` hook (re-run it after the upgrade).
+
+**Answers are self-contained (0.21.4).** A session refused a bare "Antwort auf deine Frage
+#1: Ja" as an unverifiable approval: its question had been mirrored from the end of its reply
+and "#1" meant nothing to it. Now every answer quotes the board number, where the question
+came from (`aus deiner Antwort gespiegelt`, `deine AskUserQuestion-Frage`, `deine
+Freigabe-Anfrage`, `deine Frage per decide`), the question text as the session asked it, that
+the human answered on the call board, and the verdict, chosen option (with its label) and free
+text. When a question of the session is mirrored to the board, its next hook event brings a
+note as `additionalContext`: `Deine Frage "..." steht jetzt als #N auf dem voicehook-Board
+(aus deiner Antwort gespiegelt) ...`. Answers go as `additionalContext` (PostToolUse,
+UserPromptSubmit, SessionStart) whenever the session works; only an idle session is woken by
+the Stop block / asyncRewake, which Claude Code shows as a hook "error", so the text says it
+is none.
 
 **Answers reach an idle helper by themselves (0.21.4).** Until now the hook only polled while
 the session worked; an answer that came after the helper's turn ended waited until someone

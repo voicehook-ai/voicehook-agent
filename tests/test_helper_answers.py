@@ -87,7 +87,7 @@ def test_stop_wait_wakes_the_idle_session_with_a_later_answer(relay):
     rc, text = asks.stop_ask(_ev("Stop", last_assistant_message="Fertig, warte auf Oliver."),
                              now=1001.0, next_events=nxt, clock=_clock())
     assert rc == asks.WAKE_EXIT
-    assert "Antwort von Oliver auf deine Frage #4" in text and ": Ja." in text
+    assert text.startswith("voicehook-Board #4 (deine Frage)") and "Oliver hat im Call-Board geantwortet: Ja." in text
     assert polls == ["Hooks"] * 3
     assert board.open_names(SK, 1100.0) == []            # closed: no further waiting
     # delivered once: the next hook poll does not repeat it
@@ -113,7 +113,7 @@ def test_session_goes_on_answer_lands_in_inbox_and_comes_as_context(relay, monke
     monkeypatch.setattr(board, "fetch_answers", REAL_FETCH)
     monkeypatch.setattr(relayops, "_http", lambda *a, **k: (200, {"events": []}))
     out = board.handle(_bash("ls"), now=1030.0)
-    assert "Antwort von Oliver" in out["hookSpecificOutput"]["additionalContext"]
+    assert "Oliver hat im Call-Board geantwortet" in out["hookSpecificOutput"]["additionalContext"]
 
 
 def test_reading_answers_yourself_closes_the_question(relay):
@@ -140,7 +140,7 @@ def test_local_relay_answer_file(tmp_path):
     relayops.append_jsonl(relayops.answer_path(relayops.local_dir(rel), names[0]), _ans("d9"))
     rc, text = asks.stop_ask(_ev("Stop", last_assistant_message="Ok."), now=1001.0,
                              clock=_clock())
-    assert rc == asks.WAKE_EXIT and "Antwort von Oliver" in text
+    assert rc == asks.WAKE_EXIT and "Oliver hat im Call-Board geantwortet" in text
 
 
 def test_stop_wait_hook_command_wakes(relay, monkeypatch, capsys):
@@ -148,7 +148,7 @@ def test_stop_wait_hook_command_wakes(relay, monkeypatch, capsys):
     monkeypatch.setattr(relayops, "next_events", lambda rel, frm, timeout, **k: [_ans()])
     monkeypatch.setattr("sys.stdin", __import__("io").StringIO(_ev("Stop", last_assistant_message="Ok.")))
     assert activity.main(["stop-wait"]) == asks.WAKE_EXIT
-    assert "Antwort von Oliver" in capsys.readouterr().err
+    assert "Oliver hat im Call-Board geantwortet" in capsys.readouterr().err
 
 
 REAL_FETCH = board.fetch_answers

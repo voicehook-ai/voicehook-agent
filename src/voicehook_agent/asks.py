@@ -362,6 +362,9 @@ def stop_ask(raw: str, wait: bool = True, now: float | None = None, post=None,
         ids = (create or vnotify.create)(job)
         if not ids:
             return 0, ""
+        if board.question_info(skey, ids[0]) is None:  # 0.21.4: the answer quotes it
+            board.record_question(skey, ids[0], item["question"], None, item["options"],
+                                  "mirror-stop", note=False)
         qk = vnotify.group_key(info)
         got = _wait_answers(rel, frm, ids, start + STOP_WAIT_S, skey, qk, next_events, clock)
         if not got:
@@ -369,9 +372,7 @@ def stop_ask(raw: str, wait: bool = True, now: float | None = None, post=None,
         vnotify.forget(skey, qk)
         evs = list(got.values())
         board.mark_delivered(skey, evs, frm)
-        return WAKE_EXIT, " ".join(board.answer_text(dict(e, text=tool_answer(item, e)))
-                                   if e.get("verdict") == "option" else board.answer_text(e)
-                                   for e in evs)
+        return WAKE_EXIT, " ".join(board.answer_texts(skey, evs))
     except Exception:  # noqa: BLE001
         return 0, ""
 
@@ -404,7 +405,7 @@ def wait_open(skey: str, rel: dict, t0: float, next_events=None,
                 return 0, ""
             new = board.take_new(skey, got)
             if new:
-                return WAKE_EXIT, " ".join(board.answer_text(e) for e in new)
+                return WAKE_EXIT, " ".join(board.answer_texts(skey, new))
             names = board.open_names(skey, t0)
             if not names:
                 return 0, ""
