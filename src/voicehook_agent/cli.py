@@ -215,6 +215,7 @@ from livekit import rtc
 
 from . import __version__, relay
 from . import activity as vactivity
+from . import boardlist as vboardlist
 from . import cards as vcards
 from . import helperaccess as vhelp
 from . import multisession as vmulti
@@ -815,6 +816,8 @@ class _Control:
         self.relay_senders: dict[str, str] = {}
         # 0.18.1: local relay: decision id -> question, for the helper_decision copy
         self.relay_questions: dict[str, str] = {}
+        # 0.21.4 `board` / `decide --list`: decisions + boards seen by this join
+        self.ledger = vboardlist.Ledger()
         # 0.21.4: local helpers: sender -> {"board": last board, "state": last session state},
         # so a state update keeps the board and a board update keeps the state (like the server)
         self.relay_helpers: dict[str, dict] = {}
@@ -1256,13 +1259,18 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         data = json.dumps(board, ensure_ascii=False).encode("utf-8")
         await room.local_participant.publish_data(data, reliable=True, topic="operator.status")
         ctl.clock.board(board=board)
+        ctl.ledger.board("", board, own=True)
         return {"ok": True, "type": "board", "board": board}
     if cmd == "decide":
         # Decision Board: create/update/delete. Unlike say/status this is a LiveKit RPC
         # to the voicebot (worker, method vh.decide), mirroring Session.decide in the
         # bridge; the result arrives later as a `next` event type "decision".
         ctl.watchdog.touch()
-        return await _decide_rpc(ctl, req)
+        out = await _decide_rpc(ctl, req)
+        ctl.ledger.created(req, out)  # 0.21.4 `board`
+        return out
+    if cmd == "board_list":  # 0.21.4 `voicehook-agent board` / `decide --list`
+        return ctl.ledger.listing(only_open=bool(req.get("open")))
     if cmd == "vocab":
         # 0.21.0: teach the call's speech recognition (server adds to the payer's account)
         ctl.watchdog.touch()
@@ -1593,6 +1601,7 @@ async def _serve_relay_request(ctl: _Control, dir_: Path, obj: dict) -> None:
         ctl.relay_senders[sender] = frm  # before the RPC: an answer can be quick
         out = await _decide_rpc(ctl, {**body, "sender": sender})
         _note_relay_question(ctl, body, out)
+        ctl.ledger.created(body, out, frm=sender)
         res = {k: v for k, v in out.items() if k != "type"}
     else:
         room = await ctl.wait_room(10.0)
@@ -2118,6 +2127,12 @@ async def _connect_and_listen(
                 # 0.9.0: first in line for `next`, status_due until the next board
                 ctl.events.put_front_nowait(relay.status_request_event(payload))
                 ctl.clock.requested()
+            if ctl is not None and payload.get("type") in ("decision", "helper_decision") \
+                    and topic in ("operator.decision", "operator.helper_decision"):
+                ctl.ledger.answered(payload, str(payload.get("sender") or payload.get("label")
+                                                 or ""))  # 0.21.4 `board`
+            if topic == "operator.status" and ctl is not None and pkt.participant is not None:
+                ctl.ledger.board(getattr(pkt.participant, "identity", "?"), payload)
             elif (topic == "operator.decision" and ctl is not None
                     and payload.get("type") == "decision"
                     and not _route_helper_decision(ctl, payload)):
@@ -2958,6 +2973,9 @@ def _client_request(args) -> dict:
         return {"cmd": "ui", "body": vui.command(args.action, args.args, args.preset)}
     if args.cmd == "leave":
         return {"cmd": "leave", "say": args.say} if args.say else {"cmd": "leave"}
+    if args.cmd == "board" or (args.cmd == "decide" and getattr(args, "list", False)):
+        # 0.21.4: open + recent decisions and the boards this join has seen
+        return {"cmd": "board_list", "open": bool(getattr(args, "open_only", False))}
     if args.cmd == "decide":
         # 0.21.0: background for Delta; over the limit -> ValueError, nothing sent
         context = _decide_text(getattr(args, "context", None), "--context", DECIDE_CONTEXT_MAX)
@@ -3637,9 +3655,19 @@ def main(argv: list[str] | None = None) -> None:
     p_dec.add_argument("--recent", default=None, metavar="TEXT",
                        help=f"0.21.0: the last turn of the asking session, one short line (max "
                             f"{DECIDE_RECENT_MAX} chars)")
+    p_dec.add_argument("--list", action="store_true", default=False,
+                       help="0.21.4: list the open and recent decisions (number, asking label, "
+                            "question, options, hidden context) instead of asking; same as `board`")
     p_dec.add_argument("--timeout", type=float, default=120.0, metavar="SEC",
                        help="0.16.0, with --wait (no SEC): wait up to SEC for the answer (default 120)")
     _add_session(p_dec, answer_wait=True)
+    p_board = sub.add_parser(
+        "board", help="0.21.4: what is on the call's boards, as seen by your join: open and "
+        "recent decisions (number, asking label, question, options, hidden context/faq, "
+        "answer) plus your own board and the boards of helpers / other operators")
+    p_board.add_argument("--open-only", action="store_true", default=False,
+                         help="only the open decisions")
+    _add_session(p_board)
     # 0.16.0: answers for a helper session (decide over relay.json)
     p_rn = sub.add_parser(
         "relay-next", help="0.16.0 helper session (not itself in the call): print the answers "
@@ -3748,7 +3776,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "helper-import":
         sys.exit(_run_helper_import())
     if args.cmd in ("say", "next", "says", "leave", "status", "activity", "decide", "helper-credential",
-                    "vocab", "ui", "notify-me", "call-me"):
+                    "vocab", "ui", "notify-me", "call-me", "board"):
         sys.exit(_run_client(args))
     if args.cmd == "show":
         sys.exit(_run_client(args))
