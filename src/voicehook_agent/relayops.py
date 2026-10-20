@@ -331,6 +331,8 @@ def status_body(board: dict) -> dict:
             out[k] = [str(x) for x in v if isinstance(x, str)]
     if isinstance(board.get("project"), str) and board["project"]:
         out["project"] = board["project"]
+    if board.get("state") in ("arbeitet", "wartet", "frage", "leerlauf", "problem"):
+        out["state"] = board["state"]  # 0.21.6 `status --waiting`: frage (server field state)
     if board.get("meta"):  # 0.21.4: per item {context, faq}; a server without it ignores it
         from . import relay as vrelay
         meta = vrelay.clean_board_meta(board["meta"], out)

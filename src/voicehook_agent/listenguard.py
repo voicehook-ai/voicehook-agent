@@ -70,6 +70,10 @@ def kind(status: dict | None) -> str | None:
         return None
     if not status.get("connected") or status.get("leaving") or "listening" not in status:
         return None
+    from . import waitcheck
+    if status.get("board_waiting") and _int(status.get("open_decisions")) == 0 \
+            and not waitcheck.off():
+        return "nodecision"  # 0.21.6: the board waits for the human, the board has no question
     if "consumers" in status:  # 0.21.5 join: listening = join + spool hold the call
         if _int(status.get("consumers")) > 0:
             return None  # a `listen`/`next` waits: it takes every event at once
@@ -99,6 +103,9 @@ def reason(status: dict, session: str = "", why: str | None = None) -> str:
              f"Not detached with & or nohup: nobody would wake you. Leaving the call instead: "
              f"`voicehook-agent leave`.")
     why = why or kind(status) or "nolistener"
+    if why == "nodecision":
+        from . import board as vboard
+        return vboard.wait_stop_text(str(status.get("board_waiting") or ""))
     if why == "unread":
         n = _pending(status)
         return (f"You are in a live voicehook call and {n} event{'s' if n != 1 else ''} for you "
@@ -128,6 +135,13 @@ def decide(event: dict, status: dict | None, last: dict | None, now: float,
     if why is None:
         return None
     pending = _int(status.get("unread")) if why == "dead" else _pending(status)  # type: ignore[union-attr]
+    if why == "nodecision":  # once per board text, never a loop
+        if isinstance(last, dict) and last.get("waiting") == status.get("board_waiting"):  # type: ignore[union-attr]
+            why = kind({**status, "board_waiting": None})  # type: ignore[dict-item]
+            if why is None:
+                return None
+        else:
+            return {"decision": "block", "reason": reason(status, session, why)}  # type: ignore[arg-type]
     if event.get("stop_hook_active") and isinstance(last, dict):
         fresh = now - float(last.get("at") or 0.0) < LAST_BLOCK_KEEP_S
         if fresh and pending <= _int(last.get("pending")):
@@ -215,10 +229,13 @@ def _read_state(dir_: Path) -> dict | None:
     return d if isinstance(d, dict) else None
 
 
-def _write_state(dir_: Path, pending: int, now: float, dead: bool = False) -> None:
+def _write_state(dir_: Path, pending: int, now: float, dead: bool = False,
+                 waiting: str | None = None) -> None:
     state: dict = {"pending": pending, "at": now}
     if dead:
         state["dead"] = True
+    if waiting:
+        state["waiting"] = waiting  # 0.21.6: told once for this board text
     try:
         (dir_ / STATE_NAME).write_text(json.dumps(state), encoding="utf-8")
     except OSError:
@@ -237,9 +254,13 @@ def handle(raw: str, now: float | None = None) -> dict | None:
         live = own_join_dirs(event)
         for d in live:
             status = join_status(d)
-            out = decide(event, status, _read_state(d), t, _label(d))
+            last = _read_state(d)
+            out = decide(event, status, last, t, _label(d))
             if out is not None:
-                _write_state(d, _pending(status or {}), t)
+                st = status or {}
+                told = (last or {}).get("waiting") if isinstance(last, dict) else None
+                _write_state(d, _pending(st), t, waiting=st.get("board_waiting")
+                             if kind(st) == "nodecision" and told != st.get("board_waiting") else told)
                 return out
         if live:
             return None

@@ -178,6 +178,51 @@ def answers_in_output(command: object, response: object) -> int:
     return len(_DECISION_RX.findall(out)) if isinstance(out, str) else 0
 
 
+def status_doing(command: object) -> tuple[str, bool] | None:
+    """0.21.6: (doing text, set with --waiting) of a board-setting Bash command, else None:
+    `vh-helper status "<from>" "<doing>" ...` or `voicehook-agent status [TEXT] [--doing X]
+    [--waiting X]`. Read-only, never raises."""
+    try:
+        for seg in _segments(str(command or "")):
+            words = _cmd_start(seg)
+            if not words:
+                continue
+            exe = words[0].rsplit("/", 1)[-1]
+            if exe == "vh-helper" and len(words) > 2 and words[1] == "status":
+                return (words[3] if len(words) > 3 else ""), False
+            if exe in ("uvx", "pipx") and len(words) > 2 and words[1].split("@")[0] == "voicehook-agent":
+                words = ["voicehook-agent"] + words[2:]
+                exe = "voicehook-agent"
+            if exe in ("voicehook-agent", "voicehook_agent") and len(words) > 1 and words[1] == "status":
+                doing, waiting, i = "", False, 2
+                while i < len(words):
+                    key, eq, val = words[i].partition("=")
+                    if key in ("--doing", "--waiting", "--open", "--done", "--faq", "--context",
+                               "--question", "--decision", "-f", "--file", "--project", "--session"):
+                        if not eq:
+                            i += 1
+                            val = words[i] if i < len(words) else ""
+                        if key in ("--doing", "--waiting"):
+                            doing, waiting = val, waiting or key == "--waiting"
+                    elif not words[i].startswith("-") and not doing:
+                        doing = words[i]
+                    i += 1
+                return doing, waiting
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def wait_stop_text(doing: str) -> str:
+    """0.21.6: the Stop block for a board that waits for the human without a decision."""
+    from . import waitcheck
+    return (f"voicehook: dein Board sagt \"{doing[:100]}\", aber auf dem Board steht keine Frage: "
+            f"der Mensch sieht nicht, dass du auf ihn wartest. {waitcheck.STOP_HINT}: "
+            f"`{waitcheck.suggestion(doing)}`, dann `voicehook-agent status --waiting "
+            f"\"{doing[:80]}\" --decision <id>` (oder `vh-helper decide \"<from>\" \"<Frage>?\"`). "
+            f"{waitcheck.RULE}")
+
+
 def status_command(command: object) -> tuple[str, bool] | None:
     """(from, cleared) when the Bash command sets this session's board ('' = the CLI's own
     session label); None otherwise. Read-only, never raises."""
@@ -518,7 +563,7 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
         t = time.time() if now is None else now
         room = _room(rel)
         local = vmulti._is_local(rel)
-        got = asked = None
+        got = asked = doing_set = None
         seen_answers = 0
         recorded = None
         if name_ev == "PostToolUse" and str(event.get("tool_name") or "") == "Bash" \
@@ -526,6 +571,7 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
             cmd = (event.get("tool_input") or {}).get("command") \
                 if isinstance(event.get("tool_input"), dict) else ""
             got = status_command(cmd)
+            doing_set = status_doing(cmd) if got is not None else None  # 0.21.6
             asked = decide_command(cmd)
             seen_answers = answers_in_output(cmd, event.get("tool_response"))
             if asked is not None:  # 0.21.4: the answer quotes the question
@@ -560,6 +606,8 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
                 frm, cleared = got
                 me["from"] = frm or label or me.get("from") or ""
                 me.update(at=t, cleared=cleared)
+                if doing_set is not None:  # 0.21.6: the last board text, for the Stop check
+                    me.update(doing=doing_set[0][:200], doing_waiting=doing_set[1])
             asks = me.get("asks") if isinstance(me.get("asks"), dict) else {}
             asks = {k: v for k, v in asks.items() if t - _float(v) < ASK_KEEP_S}
             if asked is not None:
@@ -594,6 +642,12 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
                 out["poll"] = sorted(asks, key=lambda k: -_float(asks[k]))[:POLL_MAX]
             if name_ev == "Stop":
                 me["stop_at"] = t
+                doing = str(me.get("doing") or "")
+                from . import waitcheck
+                if (doing and not me.get("doing_waiting") and not waits and not waitcheck.off()
+                        and waitcheck.waiting(doing) and me.get("wait_blocked") != doing):
+                    me["wait_blocked"] = doing  # once per text: never a Stop loop
+                    out["wait_block"] = wait_stop_text(doing)
                 if _float(me.get("sleeper_until")) < t and me.get("at") and not me.get("cleared"):
                     me["sleeper_until"] = t + IDLE_CLEAR_S
                     out["spawn"] = True
@@ -624,6 +678,7 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
         answers = deliver(skey, rel, res.get("poll") or [], fetch=fetch) if res.get("poll") else []
         texts = answer_texts(skey, answers)
         if name_ev == "Stop":
+            texts = texts + ([res["wait_block"]] if res.get("wait_block") else [])
             if not texts:
                 return None
             return {"decision": "block", "reason": " ".join(texts)}

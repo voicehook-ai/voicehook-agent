@@ -206,3 +206,4 @@ Reference: [OPERATOR-PROTOCOL.md](https://voicehook.ai/agent/OPERATOR-PROTOCOL.m
 | `VOICEHOOK_ACTIVITY_FILTER` | unset              | `0` = the hook logs call bookkeeping (`next`/`listen`/`status` ...) again; the ignore list still applies (0.21.5) |
 | `VOICEHOOK_SUBAGENT_ACTIVITY` | unset (= drop)   | `bundle` = one activity line per subagent ("Hintergrund-Agent für <type> arbeitet") instead of dropping its tool calls (0.21.5) |
 | `VOICEHOOK_PLAIN_CHECK` | unset                  | `0` = no Klartext check on `decide` / `status` / `activity` (0.21.5) |
+| `VOICEHOOK_WAIT_CHECK` | unset                   | `0` = a status/activity text that waits for the human is accepted again, no Stop block for it (0.21.6) |
