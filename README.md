@@ -82,7 +82,10 @@ In a call, keep `voicehook-agent listen` running in your harness's background mo
 (Claude Code: `run_in_background`, never `&`/`nohup`): it exits on the first event that
 needs you, which wakes you; start it again after handling it. Since 0.21.4 the Stop hook
 (`voicehook-agent hook install`) blocks a turn end while your join is connected and nobody
-listens ([listen guard](docs/CLI.md#listen-guard-never-end-a-turn-deaf-0214)).
+listens ([listen guard](docs/CLI.md#listen-guard-never-end-a-turn-deaf-0214)). Since 0.21.5
+the join itself holds your presence and spools every event durably while you work
+([event spool](docs/CLI.md#event-spool-the-join-listens-for-you-0215)): `listen` picks them
+up with a cursor, nothing is lost, and the Stop hook warns on unread events.
 
 Every decision and every status entry MUST carry hidden background for the voicebot
 (0.21.4): `--context "..."` plus the 3 most likely follow-up questions with prepared

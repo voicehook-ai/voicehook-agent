@@ -58,14 +58,23 @@ TOOLS = [
                     "options. The answer comes from `next` (type decision), or right here "
                     "when wait_s > 0.",
      "inputSchema": {"type": "object", "properties": {
-         "question": {"type": "string", "maxLength": 160},
+         "question": {"type": "string", "maxLength": 160,
+                      "description": "a whole sentence that names the product or area, what "
+                                     "happens and why, ending with ?; no bare PR/ticket "
+                                     "numbers, digit chains or unexplained abbreviations. Bad: "
+                                     "'DB quick wins 620?' Good: 'Sales Engine: vier "
+                                     "Datenbank-Indizes anlegen, damit die Admin-Ansicht "
+                                     "schneller lädt? (nachts, ohne Ausfall)'"},
+         "context": {"type": "string", "maxLength": 1500,
+                     "description": "required: 2-4 sentences for the voicebot, never shown: "
+                                    "what it is about, why, what yes and what no does"},
          "options": {"type": "array", "items": {"type": "string", "maxLength": 40},
                      "minItems": 2, "maxItems": 3},
          "recommend": {"type": "integer", "minimum": 0, "maximum": 2,
                        "description": "index of the recommended option"},
          "wait_s": {"type": "number", "minimum": 0, "maximum": DECIDE_WAIT_MAX_S,
                     "description": "wait up to this many seconds for the answer (0 = no)"}},
-         "required": ["question"], "additionalProperties": False}},
+         "required": ["question", "context"], "additionalProperties": False}},
     {"name": "next",
      "description": "The next event for this session: answers to your decide questions "
                     "(type decision), or with your own join the next call event. "
@@ -154,7 +163,17 @@ def tool_decide(args: dict, agent: str) -> dict:
     q = args.get("question")
     if not isinstance(q, str) or not q.strip():
         raise ToolError("question is required")
+    ctx = args.get("context")
+    if ctx is not None and not isinstance(ctx, str):
+        raise ToolError("context must be a string")
+    from . import plaintext as vplain
+    try:  # 0.21.5 Klartext + mandatory context: nothing sent otherwise
+        warnings = vplain.check_decide(q, ctx)
+    except vplain.PlainError as e:
+        raise ToolError(str(e)) from None
     req: dict = {"cmd": "decide", "question": q.strip()}
+    if ctx and ctx.strip():
+        req["context"] = ctx.strip()[:1500]
     opts = _str_list(args.get("options"), "options")
     if opts:
         if not 2 <= len(opts) <= 3:
@@ -174,6 +193,8 @@ def tool_decide(args: dict, agent: str) -> dict:
         out = _own(req)
         if out.get("ok") and wait > 0:
             out["hint"] = "own join: the answer comes from `next` (type decision)"
+        if warnings:
+            out["warnings"] = warnings
         return out
     if rt != "relay":
         raise ToolError(NO_CALL)
@@ -189,6 +210,8 @@ def tool_decide(args: dict, agent: str) -> dict:
         out["decision"] = evs[0] if evs else None
         if not evs:
             out["timeout"] = True
+    if warnings:
+        out["warnings"] = warnings
     return out
 
 
@@ -199,7 +222,13 @@ def tool_next(args: dict, agent: str) -> dict:
         raise ToolError("timeout_s must be a number") from None
     rt, rel = _route()
     if rt == "own":
-        return _own({"cmd": "next", "timeout": t}, timeout=t + 30.0)
+        out = _own({"cmd": "next", "timeout": t, "lease": True}, timeout=t + 30.0)
+        if out.get("seq") is not None:  # 0.21.5: the spool cursor moves once we have it
+            try:
+                _own({"cmd": "ack", "seq": out["seq"]}, timeout=5.0)
+            except ToolError:
+                pass  # no ack: the event comes once more after spool.LEASE_S, never lost
+        return out
     if rt != "relay":
         raise ToolError(NO_CALL)
     from . import relayops as vrelayops

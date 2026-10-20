@@ -19,6 +19,14 @@ from voicehook_agent import multisession as ms
 from voicehook_agent import relayops as ro
 from voicehook_agent import session as vsession
 
+
+@pytest.fixture(autouse=True)
+def _plain_check_off(monkeypatch):
+    """These tests are about the decide wiring with short sample questions; the 0.21.5
+    Klartext rule has its own tests (tests/test_plaintext.py)."""
+    monkeypatch.setenv("VOICEHOOK_PLAIN_CHECK", "0")
+
+
 TOKEN = "fake.relay.test.only"  # fake, low entropy (gitleaks)
 
 

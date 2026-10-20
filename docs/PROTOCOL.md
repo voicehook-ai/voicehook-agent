@@ -201,3 +201,8 @@ Reference: [OPERATOR-PROTOCOL.md](https://voicehook.ai/agent/OPERATOR-PROTOCOL.m
 | `VOICEHOOK_QUIET`      | unset                   | `1` = no join hint (same as `join --quiet`) |
 | `VOICEHOOK_SESSIONS_HINT` | unset               | `0` = `join` does not list the other agent sessions of this machine (0.21.4) |
 | `VOICEHOOK_LISTEN_GUARD` | unset                 | `0` = the Stop hook never blocks a turn end of the joining session while nobody listens (0.21.4 listen guard) |
+| `VOICEHOOK_ONBOARDING_HINT` | unset              | `0` = `join` does not print the multi-agent onboarding hint (0.21.5) |
+| `VOICEHOOK_ACTIVITY_IGNORE` | unset              | extra regexes (newline or `;;` separated) whose tool calls never reach the activity log; also `~/.voicehook/activity-ignore.txt` (0.21.5) |
+| `VOICEHOOK_ACTIVITY_FILTER` | unset              | `0` = the hook logs call bookkeeping (`next`/`listen`/`status` ...) again; the ignore list still applies (0.21.5) |
+| `VOICEHOOK_SUBAGENT_ACTIVITY` | unset (= drop)   | `bundle` = one activity line per subagent ("Hintergrund-Agent für <type> arbeitet") instead of dropping its tool calls (0.21.5) |
+| `VOICEHOOK_PLAIN_CHECK` | unset                  | `0` = no Klartext check on `decide` / `status` / `activity` (0.21.5) |

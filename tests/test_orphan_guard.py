@@ -114,17 +114,16 @@ def test_dead_fifo_holder_is_detected_from_agent_home(fake_env, monkeypatch):
 # operator.alive
 # --------------------------------------------------------------------------- #
 def test_alive_on_while_served_off_when_idle(fake_env, monkeypatch):
+    """Before the spool is armed (no say/next yet) the old rule holds: alive only within
+    ALIVE_WINDOW of the agent's last sign of life."""
     monkeypatch.setattr(cli, "ALIVE_INTERVAL", 0.1)
     monkeypatch.setattr(cli, "ALIVE_WINDOW", 0.3)
 
     async def run():
         join = asyncio.create_task(_join(idle_timeout=0))
-        await _call({"cmd": "say", "text": "hallo"})
-        for _ in range(3):
-            await _call({"cmd": "next", "timeout": 0.2})
+        await _call({"cmd": "status"})           # socket up; status arms nothing
         room = _FakeRoom.instances[0]
-        served = len(_alive(room))
-        await asyncio.sleep(0.5)                 # stop serving: window runs out
+        await asyncio.sleep(0.5)                 # nobody served: window runs out
         quiet_from = len(_alive(room))
         await asyncio.sleep(0.6)
         quiet_to = len(_alive(room))
@@ -133,14 +132,39 @@ def test_alive_on_while_served_off_when_idle(fake_env, monkeypatch):
         back = len(_alive(room))
         await _call({"cmd": "leave"})
         await asyncio.wait_for(join, 5)
-        return served, quiet_from, quiet_to, back, _alive(room)
+        return quiet_from, quiet_to, back, _alive(room)
 
-    served, quiet_from, quiet_to, back, pkts = asyncio.run(run())
-    assert served >= 3, "no sign of life while serving"
-    assert quiet_to == quiet_from, "alive kept flowing while nobody served"
+    quiet_from, quiet_to, back, pkts = asyncio.run(run())
+    assert quiet_to == quiet_from, "alive kept flowing while nobody served (spool not armed)"
     assert back > quiet_to, "alive did not resume on activity"
     assert all(p["alive"] is True for p in pkts[:-1]) and pkts[-1]["alive"] is False
     assert all(isinstance(p["ts"], float) for p in pkts)
+
+
+@pytest.mark.usefixtures("fake_env")
+def test_alive_keeps_flowing_while_the_agent_works(monkeypatch):
+    """0.21.5: once armed, the join's spool listens: alive goes on with idle_s 0 while the
+    agent works without any next/say; consumer_idle_s shows the real gap."""
+    monkeypatch.setattr(cli, "ALIVE_INTERVAL", 0.1)
+    monkeypatch.setattr(cli, "ALIVE_WINDOW", 0.3)
+
+    async def run():
+        join = asyncio.create_task(_join(idle_timeout=0))
+        await _call({"cmd": "say", "text": "hallo"})
+        room = _FakeRoom.instances[0]
+        await asyncio.sleep(0.5)
+        quiet_from = len(_alive(room))
+        await asyncio.sleep(0.6)
+        quiet_to = len(_alive(room))
+        await _call({"cmd": "leave"})
+        await asyncio.wait_for(join, 5)
+        return quiet_from, quiet_to, _alive(room)
+
+    quiet_from, quiet_to, pkts = asyncio.run(run())
+    assert quiet_to > quiet_from, "presence dropped while the agent worked"
+    working = [p for p in pkts if p["alive"] and p["consumer_idle_s"] > 0.3]
+    assert working and all(p["idle_s"] == 0.0 for p in working)
+    assert pkts[-1]["alive"] is False
 
 
 # --------------------------------------------------------------------------- #

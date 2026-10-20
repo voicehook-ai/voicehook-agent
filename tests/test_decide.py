@@ -11,6 +11,13 @@ import pytest
 from voicehook_agent import cli, relay
 
 
+@pytest.fixture(autouse=True)
+def _plain_check_off(monkeypatch):
+    """These tests are about the decide wiring with short sample questions; the 0.21.5
+    Klartext rule has its own tests (tests/test_plaintext.py)."""
+    monkeypatch.setenv("VOICEHOOK_PLAIN_CHECK", "0")
+
+
 class _Worker:
     """A fake voicebot: answers vh.decide RPCs with canned JSON (one per call)."""
 

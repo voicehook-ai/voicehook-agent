@@ -113,7 +113,8 @@ def test_hook_against_running_join(monkeypatch):
     async def run():
         join = asyncio.create_task(_join(idle_timeout=0))
         st = await _call({"cmd": "status"})
-        assert st["listening"] == 0 and st["listen_idle_s"] is None and st["leaving"] is False
+        assert st["listening"] is False and st["consumers"] == 0  # 0.21.5: spool not armed yet
+        assert st["listen_idle_s"] is None and st["leaving"] is False
         own = await asyncio.to_thread(_stop, {"session_id": SID})
         foreign = await asyncio.to_thread(_stop, {"session_id": "another-session"})
         again = await asyncio.to_thread(_stop, {"session_id": SID, "stop_hook_active": True})
@@ -131,9 +132,11 @@ def test_hook_against_running_join(monkeypatch):
     assert own and own["decision"] == "block" and "(0 pending)" in own["reason"]
     assert foreign is None                       # another Claude Code session: never
     assert again is None                         # stop_hook_active, same pending: no loop
-    assert st2["listening"] == 1 and st2["listen_idle_s"] == 0.0
+    assert st2["consumers"] == 1 and st2["listen_idle_s"] == 0.0
+    assert st2["listening"] is True              # 0.21.5: join + spool hold the call
     assert listening is None                     # a `next` waits: the stop goes through
-    assert st3["listening"] == 0 and st3["listen_idle_s"] < listenguard.LISTEN_GAP_S
+    assert st3["consumers"] == 0 and st3["listen_idle_s"] < listenguard.LISTEN_GAP_S
+    assert st3["listening"] is True and st3["unread"] == 0
 
 
 def test_hook_main_prints_block_on_stop(monkeypatch, capsys):
@@ -166,7 +169,7 @@ def test_own_join_dirs_needs_known_session(monkeypatch):
 # `voicehook-agent listen`
 # --------------------------------------------------------------------------- #
 def _args(**kw):
-    base = {"session": None, "wait": 0.0, "timeout": 0.0, "poll": 45.0}
+    base = {"session": None, "wait": 0.0, "timeout": 0.0, "poll": 10.0}
     base.update(kw)
     return types.SimpleNamespace(**base)
 
@@ -189,7 +192,8 @@ def test_listen_skips_non_actionable_and_exits_on_user(capsys):
     assert rc == 0
     lines = capsys.readouterr().out.strip().splitlines()
     assert len(lines) == 1 and json.loads(lines[0])["text"] == "Hallo?"
-    assert len(seen) == 4 and all(r == {"cmd": "next", "timeout": 45.0} for r in seen)
+    assert len(seen) == 4 and all(r == {"cmd": "next", "timeout": 10.0, "lease": True}
+                                  for r in seen)  # 0.21.5: no seq in these replies, no ack
 
 
 def test_listen_wakes_on_every_actionable_type(capsys):

@@ -52,6 +52,10 @@ cleared (see board.py). The only stdout of the hook, never a decision.
 waits for it, `{"decision": "block", "reason": ...}` (start `voicehook-agent listen` in the
 background first; see listenguard.py, loop-safe via stop_hook_active).
 
+0.21.5: call bookkeeping (`voicehook-agent next/listen/status/...`, listen/wait wrappers,
+task output reads, descriptions that only talk about the call) is never logged
+(activityfilter.py; ignore list VOICEHOOK_ACTIVITY_IGNORE / ~/.voicehook/activity-ignore.txt).
+
 This module stays stdlib-only (no livekit/httpx) so the hook starts fast.
 """
 from __future__ import annotations
@@ -690,6 +694,13 @@ def _handle(raw: str, phase: str, now: float | None) -> bool:
         event = json.loads(raw) if raw and raw.strip() else {}
         if not isinstance(event, dict):
             return False
+        from . import activityfilter
+        sub = activityfilter.subagent(event)
+        if sub:  # 0.21.5: a subagent's tool calls are not the operator's own work
+            return _subagent_once(event, sub, now) \
+                if activityfilter.subagent_mode() == "bundle" else False
+        if activityfilter.skip(event):
+            return False  # 0.21.5: call bookkeeping (next/listen/status ...) is no activity
         tid = _tool_use_id(event)
         done = False
         sess_key = _event_session(event)
@@ -713,6 +724,23 @@ def _handle(raw: str, phase: str, now: float | None) -> bool:
         return done
     except Exception:  # noqa: BLE001 - a hook must never disturb Claude Code
         return False
+
+
+def _subagent_once(event: dict, agent: str, now: float | None) -> bool:
+    """0.21.5 VOICEHOOK_SUBAGENT_ACTIVITY=bundle: one line per subagent in this join's log
+    ("Hintergrund-Agent für <agent_type> arbeitet"), nothing of its single steps."""
+    from . import activityfilter
+    dir_ = target_dir()
+    if dir_ is None or _foreign(dir_owner(dir_), _event_session(event)):
+        return False
+    key = "agent:" + re.sub(r"[^A-Za-z0-9_.-]", "_", agent)[:80]
+    ids = dir_ / IDS_NAME
+    if _take_id(ids, key):  # already announced: put the marker back, write nothing
+        _remember_id(ids, key)
+        return False
+    append_line(dir_, note_line(activityfilter.subagent_line(event), now))
+    _remember_id(ids, key)
+    return True
 
 
 def pre_tool_use(raw: str, now: float | None = None) -> bool:
