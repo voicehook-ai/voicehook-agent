@@ -15,6 +15,13 @@ operators, so the join keeps its own ledger of what passes through it:
   boards with sub + state, other operators), newest per sender.
 
 In memory of the join only, for the duration of the call; nothing is written to disk.
+
+Router-Fund 21.10.: the server lists them after all (RPC vh.decisions, bridge
+GET /api/bridge/decisions): every open question of the call, the last decided ones (`recent`)
+and every helper board of the room (`boards`). `merged` puts that listing over this ledger:
+the server wins for questions it knows, the ledger adds what only it saw (own board, boards of
+other operators, answers of the last seconds). Without the server listing: the ledger alone
+plus `note`.
 """
 from __future__ import annotations
 
@@ -26,6 +33,18 @@ BOARDS_KEEP = 40
 NOTE = ("open questions of remote helpers (relay from another machine, MCP, bridge) are not "
         "visible here before they are answered: the server has no decision listing for "
         "operators (delta.decisions goes to the humans only)")
+
+
+SERVER_NOTE = "server listing unavailable ({why}), showing what this join saw itself: " + NOTE
+
+
+def _rows(v: object) -> list[dict]:
+    return [r for r in v if isinstance(r, dict)] if isinstance(v, list) else []
+
+
+def _cleared(b: dict) -> bool:
+    """An emptied board (helper removed it) is gone on the server too."""
+    return not (b.get("doing") or b.get("open") or b.get("done"))
 
 
 class Ledger:
@@ -112,4 +131,38 @@ class Ledger:
             out["own_board"] = self.own_board
             out["boards"] = list(reversed(list(self.boards.values())))
         out["note"] = NOTE
+        return out
+
+    def merged(self, server: dict | None, only_open: bool = False) -> dict:
+        """Router-Fund 21.10.: the server's listing ({ok, open, recent?, boards?}) over this ledger."""
+        local = self.listing(only_open=only_open)
+        if not isinstance(server, dict) or not server.get("ok"):
+            why = "?"
+            if isinstance(server, dict):
+                why = str(server.get("status") or server.get("error") or server.get("detail") or "?")
+            local["note"] = SERVER_NOTE.format(why=why[:80])
+            local["source"] = "join"
+            return local
+        srv_open = _rows(server.get("open"))
+        srv_recent = _rows(server.get("recent"))
+        seen_recent = {str(r.get("id")) for r in srv_recent}
+        # decided here a moment ago, the server row may still say open: the answer wins
+        done_here = {it["id"] for it in local.get("recent") or [] if it.get("state") == "decided"}
+        srv_open = [r for r in srv_open if str(r.get("id")) not in done_here]
+        out: dict = {"ok": True, "type": "board", "source": "server", "open": srv_open}
+        if server.get("truncated"):
+            out["truncated"] = True
+        if only_open:
+            return out
+        recent = srv_recent + [it for it in local.get("recent") or [] if it["id"] not in seen_recent]
+        recent.sort(key=lambda r: r.get("decided_age_s") if isinstance(r.get("decided_age_s"), int)
+                    else 0)
+        out["recent"] = recent[:RECENT_DECIDED]
+        out["own_board"] = local.get("own_board")
+        srv_boards = _rows(server.get("boards"))
+        names = {str(b.get("from")) for b in srv_boards}
+        now = self.clock()
+        extra = [{**b, "age_s": max(0, int(now - b["at"]))} for b in local.get("boards") or []
+                 if str(b.get("from")) not in names and not _cleared(b)]
+        out["boards"] = srv_boards + extra
         return out

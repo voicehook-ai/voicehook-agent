@@ -3,6 +3,21 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## Unreleased (version set at rebase)
+
+Router-Fund (Oliver 21.10.): the main join (WebRTC) saw neither the boards nor the open
+questions of its helpers; `voicehook-agent board` gave boards=[], recent=[], open=[] with "server
+has no decision listing for operators". The server had a listing for open questions since
+voicehook-v4 #519 (RPC `vh.decisions`), the CLI never asked it; helper boards the join itself
+published (local relay, server hub) never came back to its own ledger.
+
+- **`board` / `decide --list`:** asks the server (RPC `vh.decisions`, bridge
+  `GET /api/bridge/decisions`) and merges it with the join's ledger: `open` (all helpers),
+  `recent`, `boards` (every helper board of the room with `name` and `age_s`), `source`.
+  Server unreachable or refused: the ledger as before, `note` names the reason.
+- **Ledger:** helper boards and questions the join publishes for the server hub (pump) and
+  the local relay are recorded too (fallback without the server listing).
+
 ## 0.22.1 (2026-10-21)
 
 Live-Bug (Call onyx-calm-lumen-P6PG): the main agent got `helper_decision` #21 as from
