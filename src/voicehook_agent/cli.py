@@ -3003,7 +3003,10 @@ async def _join(
                                            "identity": ident, "api_base": api_base,
                                            "started": time.time(),
                                            # 0.15.0: hash only; hooks of other sessions skip this join
-                                           "owner_session": vmulti.own_session_hash()})
+                                           "owner_session": vmulti.own_session_hash(),
+                                           # 0.22.2: the agent process that started us; only
+                                           # its hooks get mid-turn events (listenguard)
+                                           "owner_agent_pid": vboardpid()})
             vactivity.write_pointer(sess_dir)  # 0.13.0: hook finds us under any home
             # 0.21.5: durable event spool in the session dir (0600); a restart of this join
             # (self-update) picks up what was not acked yet, an old one is deleted
@@ -3637,6 +3640,15 @@ def _meta_faq_n(meta: object) -> int:
         return 0
     items = [meta.get("doing")] + list(meta.get("open") or []) + list(meta.get("done") or [])
     return sum(len(m.get("faq") or []) for m in items if isinstance(m, dict))
+
+
+def vboardpid() -> int:
+    """0.22.2: board.agent_pid() of this join (0 when unknown, never raises)."""
+    try:
+        from . import board
+        return board.agent_pid()
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 def vrelay_meta(req: dict) -> dict:

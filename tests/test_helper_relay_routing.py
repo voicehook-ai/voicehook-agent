@@ -41,6 +41,7 @@ class _Fake:
     def __init__(self):
         self.calls: list[dict] = []
         self.replies: dict[str, dict] = {}
+        self.queue: dict[str, list] = {}  # name -> [(status, body)] answered first, in order
 
 
 @pytest.fixture
@@ -58,9 +59,11 @@ def server():
             name = u.path.rsplit("/", 1)[-1]
             fake.calls.append({"method": self.command, "path": u.path, "body": body,
                                "auth": self.headers.get("authorization")})
-            out = fake.replies.get(name) or ({"events": []} if name == "next" else {"ok": True})
+            q = fake.queue.get(name)
+            status, out = q.pop(0) if q else (200, fake.replies.get(name) or (
+                {"events": []} if name == "next" else {"ok": True}))
             data = json.dumps(out).encode()
-            self.send_response(200)
+            self.send_response(status)
             self.send_header("content-type", "application/json")
             self.send_header("content-length", str(len(data)))
             self.end_headers()
@@ -311,3 +314,66 @@ def test_dead_marks_are_per_token(server):
     ms.mark_dead("tok.a")
     ms.mark_dead("tok.b")
     assert ms._is_dead("tok.a") and ms._is_dead("tok.b") and not ms._is_dead("tok.c")
+
+
+# --------------------------------------------------------------------------- #
+# 0.22.2 nachtrag: 503 = wait and retry, never a dead credential (v4 #586)
+# --------------------------------------------------------------------------- #
+def test_503_is_retried_with_backoff_never_dead(monkeypatch, server, capsys):
+    waits = []
+    monkeypatch.setattr(ro, "_sleep", waits.append)
+    ms.write_helper("Strategie", server.url, TOKEN, "room-a", 3600, owner_session="")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "helper-1")
+    for name, argv in (("status", ["status", "--doing", "Tests"]), ("relay", ["activity", "x"]),
+                       ("decide", ["decide", "--question", "Merge?", "--context", "c"]),
+                       ("next", ["relay-next", "--timeout", "0"])):
+        server.queue[name] = [(503, {"detail": "main agent away"})] * 2
+        rc, lines, _ = _cli(argv, capsys)
+        assert rc == 0 and lines[0].get("ok", True) is not False, (name, lines)
+    assert waits == list(ro.RETRY_503_S[:2]) * 4 and not ms._is_dead(TOKEN)
+    server.queue["status"] = [(503, {"detail": "away"})] * 9  # stays away: an error, not dead
+    rc, lines, _ = _cli(["status", "--doing", "Tests"], capsys)
+    assert rc == 1 and lines[0]["status"] == 503 and not ms._is_dead(TOKEN)
+    assert ms.load_relay()["token"] == TOKEN
+
+
+# --------------------------------------------------------------------------- #
+# 0.22.2 nachtrag (Oliver): only routed call events reach a session
+# --------------------------------------------------------------------------- #
+def _hook(name, sid, **kw):
+    from voicehook_agent import board
+    ev = {"hook_event_name": name, "session_id": sid, "cwd": "/work/x", **kw}
+    if name == "PostToolUse":
+        ev.setdefault("tool_name", "Read")
+        ev.setdefault("tool_input", {"file_path": "/x"})
+        ev.setdefault("tool_response", {})
+    return board.handle(json.dumps(ev), now=None)
+
+
+def test_helper_sees_only_its_routed_events_bystander_nothing(monkeypatch, server):
+    from voicehook_agent import board
+    monkeypatch.setattr(board, "_spawn_post", lambda job: None)
+    monkeypatch.setattr(board, "_spawn_sleeper", lambda skey: None)
+    monkeypatch.setattr(board, "_ensure_watcher", lambda: None)
+    inbox: dict = {}
+    monkeypatch.setattr(board, "fetch_answers", lambda rel, frm: inbox.pop(frm, []))
+    ms.write_relay(server.url, TOKEN, "room-a", 3600, owner_pid=os.getpid(),
+                   owner_session=ms.session_hash("ROUTER"))
+    ms.write_helper("A", server.url, "tok.a", "room-a", 3600, owner_session=ms.session_hash("s-a"))
+    ms.write_helper("B", server.url, "tok.b", "room-a", 3600, owner_session=ms.session_hash("s-b"))
+    for sid, label in (("s-a", "Helfer A"), ("s-b", "Helfer B")):  # both set their board
+        monkeypatch.setenv(ms.LABEL_ENV, label)
+        _hook("PostToolUse", sid, tool_name="Bash",
+              tool_input={"command": 'voicehook-agent status "Arbeit"', "description": "x"})
+    inbox["Helfer A"] = [{"type": "user_turn", "text": "A, schick die Belege", "to": "Helfer A",
+                          "to_kind": "helper", "ts": 1}]
+    monkeypatch.setenv(ms.LABEL_ENV, "Helfer B")
+    out_b = _hook("UserPromptSubmit", "s-b")
+    monkeypatch.setenv(ms.LABEL_ENV, "Helfer A")
+    out_a = _hook("UserPromptSubmit", "s-a")
+    ctx_a = json.dumps(out_a or {}, ensure_ascii=False)
+    assert "schick die Belege" in ctx_a                       # routed to A by name
+    assert "schick die Belege" not in json.dumps(out_b or {}, ensure_ascii=False)
+    monkeypatch.delenv(ms.LABEL_ENV)
+    for name in ("PostToolUse", "UserPromptSubmit", "Stop"):  # a bystander: nothing at all
+        assert _hook(name, "bystander") is None, name

@@ -26,6 +26,17 @@ in `meta`, and capped a call at 6 pairs although 3 per item are mandatory.
 - **`status --faq`:** per item (max 3 each, `meta`), no cap per call; the false relay warning
   is gone (a warning only when a pair really stays behind). Help and `[hint]` say "3x directly
   after the item, max 3 per item".
+- **Only routed call events reach a session** (Oliver: "Warum lesen alle Sessions den
+  Call-Log mit?"): mid-turn events and Stop hints with his sentences only for the router, the
+  session that owns the join: session id AND agent process (the join records
+  `owner_agent_pid`, the hook compares; a second process with the same session id, e.g.
+  `claude --continue`, gets nothing). Board reminders ("Du hast kein Board", "Dein Board ist N
+  Min alt") only for a session that takes part: its own helper credential, its own board, or
+  a subagent of the router. Helpers keep getting what is routed to them (user_turn by name,
+  answers to their questions, question_check). A session without join and credential gets
+  nothing; its outgoing feed lines are unchanged.
+- **503 from the relay** (v4 #586: main agent briefly away) = wait and retry with backoff
+  (0.5/1/2 s; the hook's child 1/2 s), never a dead credential (dead: 401/403/410).
 ## 0.22.1 (2026-10-21)
 
 Live-Bug (Call onyx-calm-lumen-P6PG): the main agent got `helper_decision` #21 as from

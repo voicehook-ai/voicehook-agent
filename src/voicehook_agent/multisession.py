@@ -824,8 +824,11 @@ def _admit(skey: str, kind: str, text: str, event: dict, t: float) -> str | None
     return _with_state(step)
 
 
+POST_RETRY_503_S = (1.0, 2.0)  # 0.22.2: the detached child retries a 503 (never dead)
+
+
 def post_line(text: str, timeout: float = POST_TIMEOUT_S, *,
-              session: str | None = None) -> int | None:
+              session: str | None = None, retry_503: tuple = ()) -> int | None:
     """POST {text} to the relay of this session (load_relay: own helper entry, else
     relay.json; Bearer, never in the URL). HTTP status (None: no relay / network error).
     401/403/410 mark the token dead."""
@@ -834,18 +837,22 @@ def post_line(text: str, timeout: float = POST_TIMEOUT_S, *,
     rel = load_relay(session=session)
     if rel is None or _is_local(rel):
         return None
-    req = urllib.request.Request(
-        rel["url"], method="POST",
-        data=json.dumps({"text": text}, ensure_ascii=False).encode("utf-8"),
-        headers={"authorization": f"Bearer {rel['token']}", "content-type": "application/json",
-                 "user-agent": "voicehook-agent-hook"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:  # url from our own 0600 file
-            status = r.status
-    except urllib.error.HTTPError as e:
-        status = e.code
-    except Exception:  # noqa: BLE001
-        return None
+    for wait in (*retry_503, None):
+        req = urllib.request.Request(
+            rel["url"], method="POST",
+            data=json.dumps({"text": text}, ensure_ascii=False).encode("utf-8"),
+            headers={"authorization": f"Bearer {rel['token']}", "content-type": "application/json",
+                     "user-agent": "voicehook-agent-hook"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:  # url from our own 0600 file
+                status = r.status
+        except urllib.error.HTTPError as e:
+            status = e.code
+        except Exception:  # noqa: BLE001
+            return None
+        if status != 503 or wait is None:
+            break
+        time.sleep(wait)  # 0.22.2: 503 = main agent briefly away (v4 #586): wait, retry
     if status in (401, 403, 410):
         mark_dead(rel["token"])
     return status
@@ -893,10 +900,10 @@ def relay_post_main(raw: str) -> int:
         d = json.loads(raw or "{}")
         text = str(d.get("text") or "") if isinstance(d, dict) else ""
         skey = str(d.get("session") or "") if isinstance(d, dict) else ""
-        if text and skey:
-            post_line(text, session=skey)  # 0.22.2: the helper entry of that session
+        if text and skey:  # 0.22.2: the helper entry of that session
+            post_line(text, session=skey, retry_503=POST_RETRY_503_S)
         elif text:
-            post_line(text)
+            post_line(text, retry_503=POST_RETRY_503_S)
     except Exception:  # noqa: BLE001, S110 - detached child, nobody to tell
         pass
     return 0

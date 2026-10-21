@@ -573,6 +573,10 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
         t = time.time() if now is None else now
         room = _room(rel)
         local = vmulti._is_local(rel)
+        # 0.22.2: this session takes part in the call: its own helper credential (entry, or
+        # a legacy helper relay.json), or a subagent of the router (0.21.1 own boards)
+        helper = bool(rel.get("helper")) or vmulti.is_legacy_helper(rel) or bool(
+            agent and base_key(skey) == str(rel.get("owner_session") or ""))
         got = asked = doing_set = None
         seen_answers = 0
         recorded = None
@@ -668,7 +672,10 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
                     me["sleeper_until"] = t + IDLE_CLEAR_S
                     out["spawn"] = True
             me.setdefault("first_at", t)
-            if got is None and name_ev in REMIND_EVENTS:
+            # 0.22.2 (Oliver): reminders only for a session that takes part: its own helper
+            # credential (helpers/<name>.json), or a board of its own; never for a session
+            # that only happens to run on the machine of the call
+            if got is None and name_ev in REMIND_EVENTS and (helper or me.get("from")):
                 at = _float(me.get("at"))
                 age = None if not at else t - at
                 # a subagent without a board is reminded only once it works for 3 min (a
@@ -1192,6 +1199,30 @@ def session_pid(env=None, proc=_proc) -> int:
         pid = ppid
         if pid <= 1:
             return 0
+    return 0
+
+
+AGENT_COMMS = ("claude", "codex", "node")  # 0.22.2: the agent process (Claude Code, Codex CLI)
+AGENT_DEPTH = 12
+
+
+def agent_pid(start: int | None = None, proc=_proc) -> int:
+    """0.22.2: pid of the nearest ancestor that is an agent process (AGENT_COMMS: Claude Code,
+    Codex CLI, or the node running one), walking up through shells, sandboxes and wrappers;
+    0 = none found. Ignores $CLAUDE_PID (a child process inherits it). The join records it
+    (session.json owner_agent_pid), the hook compares it: two agent processes that share one
+    session id (`claude --continue` in a second terminal, an inherited env) are not the same
+    session."""
+    pid = os.getppid() if start is None else start
+    for _ in range(AGENT_DEPTH):
+        if pid <= 1:
+            return 0
+        comm, ppid = proc(pid)
+        if not comm:
+            return 0
+        if comm.rsplit("/", 1)[-1].lstrip("-").lower() in AGENT_COMMS:
+            return pid
+        pid = ppid
     return 0
 
 

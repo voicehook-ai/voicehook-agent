@@ -434,7 +434,24 @@ def endpoint(rel: dict, name: str) -> str:
     return f"{parts.scheme}://{parts.netloc}{prefix}{RELAY_PATH}/{name}"
 
 
+RETRY_503_S = (0.5, 1.0, 2.0)  # 0.22.2: backoff while the server answers 503 (v4 #586)
+_sleep = time.sleep
+
+
 def _http(rel: dict, method: str, url: str, body: dict | None, timeout: float) -> tuple[int, dict]:
+    """One relay request. 503 (v4 #586: the main agent is briefly away) = wait and retry
+    (RETRY_503_S), never a dead credential; only 401 marks the token dead here (the hook's
+    post_line also 403/410)."""
+    for wait in (*RETRY_503_S, None):
+        status, out = _http_once(rel, method, url, body, timeout)
+        if status != 503 or wait is None:
+            return status, out
+        _sleep(wait)
+    return status, out  # pragma: no cover
+
+
+def _http_once(rel: dict, method: str, url: str, body: dict | None,
+               timeout: float) -> tuple[int, dict]:
     import urllib.error
     import urllib.request
     data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None

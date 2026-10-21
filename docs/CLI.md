@@ -188,6 +188,16 @@ all): import again per session. `relay.dead` keeps the last 20 dead token hashes
 Over the relay there is no false "`--faq` is not sent" warning any more; a warning comes only
 when a pair really stays behind (the 4th of one item).
 
+**Who sees call events (0.22.2, Oliver).** Mid-turn events and Stop hints that carry what the
+human said go only to the router: the session that owns the join, by session id AND agent
+process (session.json `owner_agent_pid` = the nearest `claude`/`codex`/`node` ancestor of the
+join, compared with the hook's; a second process with the same session id gets nothing).
+Board reminders go only to a session that takes part (own helper credential, own board, or a
+subagent of the router). Helpers get only what is routed to them (`user_turn` by name, answers
+to their questions, `question_check`). Any other session of the machine gets nothing from the
+call; its hook still posts its own feed lines. A relay `503` (main agent briefly away) is
+retried with backoff (0.5/1/2 s), never a dead credential (dead: 401/403/410).
+
 ### Stale says come back, never spoken (0.21.9)
 
 **Veraltet heißt: nicht wiederholen.** The server drops your queued, not yet spoken says older
