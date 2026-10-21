@@ -132,6 +132,17 @@ class Pump:
             return None
         return out if isinstance(out, dict) else None
 
+    async def user_turn(self, http, to: str, to_key: str, text: str, speaker: str = "") -> bool:
+        """0.22.0: the human spoke to a helper of this hub by name: into its inbox on the
+        server (POST <pump>/user_turn). False = not delivered (unknown helper, network)."""
+        try:
+            r = await http.post(self.url + "/user_turn",
+                                json={"to": to, "to_key": to_key, "text": text, "speaker": speaker},
+                                headers=self._auth(), timeout=HTTP_TIMEOUT_S)
+        except Exception:  # noqa: BLE001  best effort: the main agent gets the info copy
+            return False
+        return r.status_code == 200
+
     async def credential(self, http, label: str, rotate: bool = False) -> dict | None:
         out = await mint(http, self.api_base, self.token, label, rotate=rotate)
         if out is not None and out.get("pump"):

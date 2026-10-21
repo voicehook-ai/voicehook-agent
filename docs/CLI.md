@@ -672,6 +672,15 @@ agent joined (WebRTC, bridge, MCP); it ends with the call (410). Helpers use it 
   routing hint only: never say it, never act on it yourself. **On helper_decision: send
   the answer to that session (e.g. Claude Code SendMessage / your harness's session
   messaging) so it continues**; helpers are often idle and do not poll `relay-next`.
+- **Spoken to by name (0.22.0):** a human's user turn that addresses a helper as a vocative
+  ("Steuern, schick mir die Belege", "Hey Armin-Box ...") arrives stamped by the server
+  (`to`, `to_kind: "helper"`, `to_key`, `to_op`). The join named in `to_op` puts it into
+  that helper's inbox (local relay: answer file; else `POST /api/helper/pump/user_turn
+  {to, to_key, text, speaker}`); its own `next` keeps the user event as info only
+  (`info_only: true`, `addressed_to_you: false`): wake that session, never do it yourself.
+  The helper gets `{"type":"user_turn","text","to","to_kind","speaker?","ts"}` from
+  `relay-next`, MCP `next` and its hooks ("Auftrag von Oliver an dich (im Call)", data
+  marked). `to_kind: "helper_ambiguous"`: Delta asks which helper, nobody acts.
 - Another machine: the credential travels over ssh, never through a chat or a transcript:
   `voicehook-agent helper-credential --label crown | ssh crown 'voicehook-agent helper-import'`
   (on the main agent's machine; `--rotate` invalidates every earlier credential of the

@@ -16,7 +16,9 @@ Remote relay (relay.json kind remote {url, token}, url = <base>/api/activity/rel
 * POST <url>/decide  {from, question?, options?, recommend?, id?, delete?, context?, recent?}
   -> {ok, id, number} (0.21.0: context/recent = background for Delta)
 * POST <url>/status  {from, doing?, open?, done?, project?} -> {ok}; all empty removes the card
-* GET  <url>/next?from=<label>&timeout=<0..25> -> {events: [{type: "decision", ...}]}
+* GET  <url>/next?from=<label>&timeout=<0..25> -> {events: [{type: "decision", ...}]}; 0.22.0
+  also {type: "user_turn", text, to, to_kind: "helper", speaker?, ts}: the human spoke to
+  this helper by name in the call (a request to it)
 Bearer relay token, never in the URL. 401 marks the token dead (relay.dead) like the hook.
 Events fetched while `decide --wait` waits for another id are kept in a local inbox
 (state dir, `relay-inbox-<hash of from>.jsonl`, 0600) and handed out by the next
@@ -530,8 +532,13 @@ def _is_stale(o: dict) -> bool:
     return vrelay.is_stale(o)
 
 
+def _is_user_turn(o: dict) -> bool:
+    """0.22.0: the human spoke to this helper by name in the call (server: to_kind helper)."""
+    return o.get("type") == "user_turn"
+
+
 def _wanted(o: dict) -> bool:
-    return _is_decision(o) or _is_stale(o)
+    return _is_decision(o) or _is_stale(o) or _is_user_turn(o)
 
 
 def view(ev: dict) -> dict:

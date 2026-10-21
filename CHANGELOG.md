@@ -3,6 +3,25 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.22.0 (2026-10-21)
+
+Oliver (question 34): speak to a helper session by name in the call. The server (voicehook-v4,
+"Human speaks to a helper by name") stamps a human's user turn that addresses an active helper
+as a vocative ("Steuern, schick mir die Belege", "Hey Armin-Box ...", "..., Steuern?";
+"Armin Box" = "Armin-Box") with `to`, `to_kind: "helper"`, `to_key`, `to_op`.
+
+- **Join (main agent):** when `to_op` is this join, the sentence goes into exactly that
+  helper's inbox: a helper of this machine through its answer file (local relay), any other
+  through the server hub (`POST /api/helper/pump/user_turn`). Our own `next` gets the user
+  event as an info copy (`to`, `to_kind`, `info_only: true`, `addressed_to_you: false`,
+  `note`): never do it yourself, wake that session if it is idle. `helper_ambiguous`: two
+  helpers matched, Delta asks which one, nobody acts. Lines of agents are never routed.
+- **Helper:** `relay-next` and MCP `next` bring `{"type":"user_turn","text","to","to_kind",
+  "speaker?","ts"}`. Its hooks (Prompt, Stop, PostToolUse every 20 s) now also poll the
+  session's own board name and show the request once as "voicehook-Call: Auftrag von Oliver
+  an dich (im Call), [Daten, Spracherkennung, wörtlich] ... [Ende Daten]" (on Stop as a
+  block reason, so an idle session picks it up). A request never closes an open question.
+
 ## 0.21.9 (2026-10-21)
 
 Live (Oliver): Delta spoke again, but too much old stuff. The server now drops queued, not yet

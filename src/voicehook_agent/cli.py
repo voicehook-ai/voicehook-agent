@@ -1841,6 +1841,33 @@ def _route_helper_decision(ctl: _Control, payload: dict) -> bool:
     return True
 
 
+def _route_helper_user_turn(ctl: _Control, payload: dict, own: set[str]) -> bool:
+    """0.22.0 (server 21.10.2026): a user turn addressed to a helper session by name
+    (to_kind helper, to_op = us). A helper of this machine (to_key = our sender for it) gets
+    it in its answer file (local relay: its `relay-next`, MCP `next` and hooks bring it);
+    otherwise the server hub's inbox (POST /api/helper/pump/user_turn). Never logs content."""
+    if payload.get("role") != "user" or payload.get("to_kind") != "helper":
+        return False
+    to = payload.get("to") if isinstance(payload.get("to"), list) else []
+    text = " ".join(str(payload.get("text") or "").split())
+    if len(to) != 1 or not text or str(payload.get("to_op") or "") not in own:
+        return False
+    name, key = str(to[0])[:80], str(payload.get("to_key") or "")
+    speaker = str(payload.get("speaker") or "")
+    frm = key.split(": ", 1)[1] if ": " in key else ""
+    if frm and ctl.activity_path is not None and key == vrelayops.sender_for(frm):
+        try:
+            vrelayops.append_jsonl(vrelayops.answer_path(ctl.activity_path.parent, frm),
+                                   relay.helper_user_turn_event(text, name, speaker))
+            return True
+        except (OSError, vrelayops.RelayError) as e:
+            print(f"[warn] relay user turn not written ({type(e).__name__})", file=sys.stderr, flush=True)
+    if ctl.helper_pump is not None and ctl.helper_http is not None:
+        asyncio.ensure_future(ctl.helper_pump.user_turn(ctl.helper_http, name, key, text, speaker))
+        return True
+    return False
+
+
 def _route_helper_stale(ctl: _Control, ev: dict) -> bool:
     """0.21.9: a stale event whose `sender` names a local helper session also goes into that
     helper's answer file (its `relay-next` / MCP `next` brings it); our own `next` keeps it."""
@@ -2387,6 +2414,10 @@ async def _connect_and_listen(
             if ctl is not None:
                 ev = relay.user_turn_event(role, text, payload)
                 if ev is not None:
+                    hf = relay.helper_turn_fields(payload)
+                    if hf:  # 0.22.0: the human spoke to a helper by name: info copy for us
+                        ev.update(hf)
+                        _route_helper_user_turn(ctl, payload, _own_ids())
                     ctl.events.put_nowait(ev)
                     ctl.clock.user()
                     _print_stale(ctl, json_mode)  # 0.13.0
@@ -4190,7 +4221,8 @@ def main(argv: list[str] | None = None) -> None:
     # 0.16.0: answers for a helper session (decide over relay.json)
     p_rn = sub.add_parser(
         "relay-next", help="0.16.0 helper session (not itself in the call): print the answers "
-        "to your own decide questions as JSON lines (type decision); {\"type\":\"timeout\"} if none")
+        "to your own decide questions as JSON lines (type decision; 0.22.0 also type user_turn: the "
+        "human spoke to you by name in the call); {\"type\":\"timeout\"} if none")
     p_rn.add_argument("--timeout", type=float, default=25.0, metavar="SEC",
                       help="wait up to SEC seconds for an answer (default 25; 0 = only what is there)")
     # 0.17.0 helper access (server /api/helper/*): data only, no voice, no join
