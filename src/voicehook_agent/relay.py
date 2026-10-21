@@ -419,6 +419,35 @@ def user_turn_event(role: str, text: str, payload: dict | None = None,
     return ev
 
 
+USER_TURN_MAX = 2000   # same cap as the server (bridge.USER_TURN_MAX)
+
+
+def helper_turn_fields(payload: dict | None) -> dict:
+    """0.22.0 (server 21.10.2026): a user turn the worker stamped as addressed to a helper
+    session by name (to_kind helper / helper_ambiguous). The fields for our own `next` event:
+    an info copy, never ours to do (the sentence goes to that helper's inbox)."""
+    p = payload or {}
+    kind = p.get("to_kind")
+    if kind == "helper":
+        to = [str(x)[:80] for x in (p.get("to") or []) if x][:1]
+        name = to[0] if to else ""
+        return {"to": to, "to_kind": "helper", "info_only": True, "addressed_to_you": False,
+                "note": f"addressed to helper {name}, info only (the sentence is in its relay inbox)"}
+    if kind == "helper_ambiguous":
+        return {"to": [], "to_kind": "helper_ambiguous", "info_only": True, "addressed_to_you": False,
+                "note": "several helpers match, Delta asks which one; do not act"}
+    return {}
+
+
+def helper_user_turn_event(text: str, name: str, speaker: str = "", now: float | None = None) -> dict:
+    """The inbox event of a helper the human spoke to by name (same shape as the server's)."""
+    ev = {"type": "user_turn", "role": "user", "text": " ".join(str(text or "").split())[:USER_TURN_MAX],
+          "to": [name], "to_kind": "helper", "ts": now if now is not None else time.time()}
+    if speaker:
+        ev["speaker"] = " ".join(str(speaker).split())[:80]
+    return ev
+
+
 def foreign_owner(payload: dict, own: set[str] | str | None, key: str = "owner") -> bool:
     """0.11.0 (multi-operator): True if `payload[key]` names another operator.
 

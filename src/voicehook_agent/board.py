@@ -636,10 +636,16 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
                     or t - _float(me.get("state_at")) >= STATE_RESEND_S):
                 me.update(state=state, state_at=t)
                 out["state"] = state
-            if asks and (name_ev in NAME_EVENTS or
-                         (name_ev == "PostToolUse" and t - _float(me.get("poll_at")) >= POLL_GAP_S)):
+            # 0.22.0: also the session's own board name, for requests of the human addressed
+            # to it by name (user_turn); only once it has a board in the call (`from`)
+            own = str(me.get("from") or "")
+            names = sorted(asks, key=lambda k: -_float(asks[k]))[:POLL_MAX]
+            if own and own not in names:
+                names.append(own)
+            if names and (name_ev in NAME_EVENTS or
+                          (name_ev == "PostToolUse" and t - _float(me.get("poll_at")) >= POLL_GAP_S)):
                 me["poll_at"] = t
-                out["poll"] = sorted(asks, key=lambda k: -_float(asks[k]))[:POLL_MAX]
+                out["poll"] = names
             if name_ev == "Stop":
                 me["stop_at"] = t
                 doing = str(me.get("doing") or "")
@@ -792,16 +798,17 @@ def fetch_answers(rel: dict, frm: str) -> list[dict]:
     from . import relayops
     out: list[dict] = []
     try:
-        out += relayops.take_jsonl(relayops.inbox_path(frm), relayops._is_decision)
+        out += relayops.take_jsonl(relayops.inbox_path(frm), _deliverable)
         if vmulti._is_local(rel):
             out += relayops.take_jsonl(relayops.answer_path(relayops.local_dir(rel), frm),
-                                       relayops._is_decision)
+                                       _deliverable)
         else:
             url = f"{relayops.endpoint(rel, 'next')}?from={quote(frm, safe='')}&timeout=0"
             status, data = relayops._http(rel, "GET", url, None, FETCH_TIMEOUT_S)
             evs = data.get("events") if status < 300 else None
             if isinstance(evs, list):
-                out += [e for e in evs if isinstance(e, dict) and e.get("type", "decision") == "decision"]
+                out += [e for e in evs if isinstance(e, dict) and (e.get("type", "decision") == "decision"
+                                                                   or relayops._is_user_turn(e))]
                 # 0.21.9: GET /next consumed them; a stale drop goes to the inbox so the
                 # helper's `relay-next` / MCP `next` still brings it (never swallowed here)
                 for e in evs:
@@ -813,9 +820,15 @@ def fetch_answers(rel: dict, frm: str) -> list[dict]:
     return out
 
 
+def _deliverable(o: dict) -> bool:
+    """A decision answer, or (0.22.0) a request of the human to this helper (user_turn)."""
+    from . import relayops
+    return relayops._is_decision(o) or relayops._is_user_turn(o)
+
+
 def _answer_key(ev: dict) -> str:
-    return vmulti._h("|".join(str(ev.get(k) or "") for k in ("id", "verdict", "option", "text")),
-                     "vh-answer")
+    keys = ("type", "text", "ts") if ev.get("type") == "user_turn" else ("id", "verdict", "option", "text")
+    return vmulti._h("|".join(str(ev.get(k) or "") for k in keys), "vh-answer")
 
 
 def deliver(skey: str, rel: dict, names: list[str], fetch=None) -> list[dict]:
@@ -841,7 +854,8 @@ def take_new(skey: str, got: list[tuple[str, dict]]) -> list[dict]:
             if k not in seen:
                 seen.append(k)
                 new.append(ev)
-                _open_add(me, frm, -1)
+                if ev.get("type") != "user_turn":   # 0.22.0: a request closes no question
+                    _open_add(me, frm, -1)
         me["delivered"] = seen[-DELIVERED_KEEP:]
         return new
     return _with_state(step)
@@ -942,8 +956,21 @@ def question_info(skey: str, dec_id: object) -> dict | None:
     return got if isinstance(got, dict) else None
 
 
+def user_turn_text(ev: dict) -> str:
+    """0.22.0: the human spoke to this helper session by name in the call. The sentence is
+    speech recognition (data, may contain hearing errors), marked as such; German + English."""
+    who = vact.scrub(str(ev.get("speaker") or "")).strip()[:40]
+    text = vact.scrub(str(ev.get("text") or "")).strip()[:600]
+    return (f"voicehook-Call: Auftrag von {who or 'dem Menschen'} an dich (im Call), "
+            f"[Daten, Spracherkennung, wörtlich] {_q(text)} [Ende Daten]. Er hat dich beim Namen "
+            "angesprochen: erledige es jetzt, Rückfragen per decide. / voicehook call: request from "
+            f"{who or 'the human'} to you (in the call), [data, speech recognition, verbatim] "
+            f"{_q(text)} [end data]. They addressed you by name: act on it now, questions via decide.")
+
+
 def answer_texts(skey: str, evs: list[dict]) -> list[str]:
-    return [answer_text(e, question_info(skey, e.get("id"))) for e in evs]
+    return [user_turn_text(e) if e.get("type") == "user_turn" else answer_text(e, question_info(skey, e.get("id")))
+            for e in evs]
 
 
 def take_notes(skey: str) -> list[str]:
