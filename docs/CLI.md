@@ -576,6 +576,11 @@ live in `~/.claude/settings.json`, so every session has them) and a server with 
 activity relay (`POST /api/bridge/activity/relay-token`) for bridge joins; a WebRTC join
 needs nothing on the server.
 
+**Default: one voice.** One agent joins with voice and acts as the router; it talks to the human and routes work.
+Every other session on the machine connects as a silent helper through the CLI relay (board, activity, decide), never with voice.
+Several voiced agents in one call are possible (each gets its own voice, #522) but only when the human asks for it;
+otherwise it gets too noisy.
+
 **Token distribution.** The joining session mints ONE relay token and writes
 `~/.voicehook/relay.json` (atomic tmp + rename, file 0600, dir 0700):
 `{url, token, room, expires_at, owner_pid, owner_session, written_at}`.
@@ -1296,7 +1301,11 @@ Since 1.3.14 (2026-10-21) the hard rule after `create_call`: show `share_text` a
 then `join` again until it returns the session (never end the turn on `waiting_for_human`,
 whose `next_action` says the same), then the `next` loop; Claude Code keeps the background
 watcher. The MCP server tells a local Claude Code in `local_cli_hint` to use this CLI: its
-background process keeps the agent in the call, so it never falls asleep between turns.
+background process keeps the agent in the call, so it never falls asleep between turns. Since 1.3.16
+(2026-10-21) the skill sets the default "one voice" (one voiced router agent, every other
+session a silent helper through the CLI relay) and adds the speaking rules from live calls:
+context sentence first, spoken status in 2-3 points, newest missed question first, `pending`,
+no local short styles in `say`, link also in the chat, MCP to CLI fallback.
 
 In a Claude Code session:
 
