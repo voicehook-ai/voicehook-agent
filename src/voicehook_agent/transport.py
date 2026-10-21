@@ -443,6 +443,13 @@ class BridgeRoom:
         r = await self._post_retry("/api/bridge/decide", body, "decide")
         return _json(r)
 
+    async def send_delta(self, body: dict) -> dict:
+        """0.23.0: POST /api/bridge/delta {kind: rule|note, op: add|list|rm, text?, id?,
+        persist?} -> {ok, kind, op, items, count, max, id?}; BridgeError with the status
+        otherwise (403/404/422/503). Over WebRTC: the vh.delta_notes RPC."""
+        r = await self._post_retry("/api/bridge/delta", body, "delta")
+        return _json(r)
+
     async def _post_retry(self, path: str, body: dict, topic: str) -> httpx.Response:
         if self._http is None or not self._session or self._closed:
             raise BridgeError("bridge not connected")
