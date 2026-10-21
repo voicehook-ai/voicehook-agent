@@ -21,7 +21,9 @@ he waits for minutes. The productive behavior now lives in the product:
   queued says were older than the server's limit and never spoken) is shown here too.
   Other events (status_request, a normal revise, voicebot_left,
   ...) stay for `listen` only.
-* Never for subagents (agent_id), other sessions (owner_session) or without a live join.
+* Never for subagents (agent_id), other sessions (owner_session), another agent process
+  with the same session id (0.22.2: owner_agent_pid, listenguard.own_join_dirs) or without
+  a live join.
 
 VOICEHOOK_MIDTURN_EVENTS=0 turns it off. Stdlib only (runs inside the hook), never raises.
 """

@@ -459,6 +459,15 @@ def output(event_name: str, text: str) -> dict:
 # --------------------------------------------------------------------------- #
 # hook entry
 # --------------------------------------------------------------------------- #
+_SUB_RX = re.compile(r"^(.+)-a[0-9a-f]{8}$")
+
+
+def base_key(skey: str) -> str:
+    """Session hash of a board key (a subagent's key is `<session hash>-a<8 hex>`)."""
+    m = _SUB_RX.match(str(skey or ""))
+    return m.group(1) if m else str(skey or "")
+
+
 def _session_key(event: dict) -> str:
     return vmulti.session_hash(event.get("session_id")) or vmulti.own_session_hash()
 
@@ -551,18 +560,23 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
         if not isinstance(event, dict):
             return None
         name_ev = str(event.get("hook_event_name") or "")
-        rel = vmulti.load_relay(now)
+        rel = vmulti.load_relay(now, session=_session_key(event))  # 0.22.2: own helper entry
         if rel is None:
             return None
         skey = _session_key(event)
         agent = str(event.get("agent_id") or "").strip()
-        if not skey or (skey == str(rel.get("owner_session") or "") and not agent):
+        if not skey or (skey == str(rel.get("owner_session") or "") and not agent
+                        and not rel.get("helper")):
             return None  # the joining session: own board (status_due), own `next`
         if agent:  # 0.21.1: a subagent (Agent tool) has its own board, name, state, answers
             skey = f"{skey}-a{vmulti._h(agent, 'vh-agent')[:8]}"
         t = time.time() if now is None else now
         room = _room(rel)
         local = vmulti._is_local(rel)
+        # 0.22.2: this session takes part in the call: its own helper credential (entry, or
+        # a legacy helper relay.json), or a subagent of the router (0.21.1 own boards)
+        helper = bool(rel.get("helper")) or vmulti.is_legacy_helper(rel) or bool(
+            agent and base_key(skey) == str(rel.get("owner_session") or ""))
         got = asked = doing_set = None
         seen_answers = 0
         recorded = None
@@ -658,7 +672,10 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
                     me["sleeper_until"] = t + IDLE_CLEAR_S
                     out["spawn"] = True
             me.setdefault("first_at", t)
-            if got is None and name_ev in REMIND_EVENTS:
+            # 0.22.2 (Oliver): reminders only for a session that takes part: its own helper
+            # credential (helpers/<name>.json), or a board of its own; never for a session
+            # that only happens to run on the machine of the call
+            if got is None and name_ev in REMIND_EVENTS and (helper or me.get("from")):
                 at = _float(me.get("at"))
                 age = None if not at else t - at
                 # a subagent without a board is reminded only once it works for 3 min (a
@@ -1083,8 +1100,10 @@ def run_job(job: dict, rel: dict | None = None) -> bool:
     never overwrites a newer state: no sticky `arbeitet`). `gone`: clear the board and
     post `leerlauf`. True when something was sent."""
     from . import relayops
-    rel = rel if rel is not None else vmulti.load_relay()
-    if not isinstance(job, dict) or rel is None:
+    if not isinstance(job, dict):
+        return False
+    rel = rel if rel is not None else vmulti.load_relay(session=base_key(str(job.get("skey") or "")))
+    if rel is None:
         return False
     frm = relayops.check_from(str(job.get("from") or ""))
     vact._private_dir(vact.state_root())
@@ -1183,6 +1202,30 @@ def session_pid(env=None, proc=_proc) -> int:
     return 0
 
 
+AGENT_COMMS = ("claude", "codex", "node")  # 0.22.2: the agent process (Claude Code, Codex CLI)
+AGENT_DEPTH = 12
+
+
+def agent_pid(start: int | None = None, proc=_proc) -> int:
+    """0.22.2: pid of the nearest ancestor that is an agent process (AGENT_COMMS: Claude Code,
+    Codex CLI, or the node running one), walking up through shells, sandboxes and wrappers;
+    0 = none found. Ignores $CLAUDE_PID (a child process inherits it). The join records it
+    (session.json owner_agent_pid), the hook compares it: two agent processes that share one
+    session id (`claude --continue` in a second terminal, an inherited env) are not the same
+    session."""
+    pid = os.getppid() if start is None else start
+    for _ in range(AGENT_DEPTH):
+        if pid <= 1:
+            return 0
+        comm, ppid = proc(pid)
+        if not comm:
+            return 0
+        if comm.rsplit("/", 1)[-1].lstrip("-").lower() in AGENT_COMMS:
+            return pid
+        pid = ppid
+    return 0
+
+
 def _stop_waits(event: dict, skey: str, t: float) -> bool:
     """Stop of a session that waits for the human: an own question is still open, or the
     reply ends with a question (asks.stop_question)."""
@@ -1223,17 +1266,26 @@ def watch_step(now: float | None = None, alive=None) -> tuple[list[dict], int] |
     (Claude Code sends no Stop after Esc)."""
     t = time.time() if now is None else now
     alive = alive or vact._pid_alive
-    rel = vmulti.load_relay(t)
-    if rel is None:
+    rooms: dict[str, str | None] = {}
+
+    def room_of(skey: str) -> str | None:
+        """Room of the relay of that session (0.22.2: each helper has its own entry)."""
+        b = base_key(skey)
+        if b not in rooms:
+            r = vmulti.load_relay(t, session=b)
+            rooms[b] = _room(r) if r is not None else None
+        return rooms[b]
+
+    if vmulti.load_relay(t) is None and not vmulti._helper_entries():
         return None
-    room = _room(rel)
 
     def step(st: dict):
         jobs: list[dict] = []
         live = 0
         for skey, me in st["sessions"].items():
             name = str(me.get("from") or me.get("name") or "")
-            if me.get("room") != room or me.get("gone") or not name:
+            room = room_of(skey)
+            if room is None or me.get("room") != room or me.get("gone") or not name:
                 continue
             quiet = t - _float(me.get("seen"))
             pid = int(_float(me.get("pid")))
@@ -1336,7 +1388,7 @@ def clear_board(rel: dict, frm: str) -> bool:
 def idle_step(skey: str, now: float | None = None, clear=clear_board) -> float | None:
     """One sleeper check: seconds to sleep on, or None (done: cleared, resumed or gone)."""
     t = time.time() if now is None else now
-    rel = vmulti.load_relay(t)
+    rel = vmulti.load_relay(t, session=base_key(skey))
 
     def step(st: dict):
         me = st["sessions"].get(skey)

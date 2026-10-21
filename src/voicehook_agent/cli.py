@@ -52,7 +52,7 @@ Status board (0.7.0):
     status [TEXT] [--doing T] [--open T]... [--done T]... [--faq 'F::A']... [-f board.json]
                                      send operator.status {doing, open[], done[]};
                                      replaces the last board, never spoken; '' clears.
-                                     0.10.0: --faq 'Frage::Antwort' (max 6) adds faq[{q, a}]:
+                                     0.10.0: --faq 'Frage::Antwort' (max 3 per item, after it):
                                      the user's likely next questions, answered in advance.
     next                             also yields {type:"status_request"} (the user asked
                                      what you are doing: send `status` at once) and adds
@@ -455,7 +455,7 @@ ONBOARDING_INVITE = [
     "voicehook-agent hook install",
     "voicehook-agent hook install --agent codex",
     "voicehook-agent join <invite-url> --name <Name> --model <Model> --json",
-    "voicehook-agent helper-credential --label <host> | ssh <host> 'voicehook-agent helper-import'",
+    "voicehook-agent helper-credential --label <host> | ssh <host> 'voicehook-agent helper-import --as <host>'",
 ]
 ONBOARDING_SHARE = [
     'voicehook-agent status --doing "<step + ETA>" --open "<task>"',
@@ -3003,7 +3003,10 @@ async def _join(
                                            "identity": ident, "api_base": api_base,
                                            "started": time.time(),
                                            # 0.15.0: hash only; hooks of other sessions skip this join
-                                           "owner_session": vmulti.own_session_hash()})
+                                           "owner_session": vmulti.own_session_hash(),
+                                           # 0.22.2: the agent process that started us; only
+                                           # its hooks get mid-turn events (listenguard)
+                                           "owner_agent_pid": vboardpid()})
             vactivity.write_pointer(sess_dir)  # 0.13.0: hook finds us under any home
             # 0.21.5: durable event spool in the session dir (0600); a restart of this join
             # (self-update) picks up what was not acked yet, an old one is deleted
@@ -3460,7 +3463,10 @@ def _client_request(args) -> dict:
                 file_obj = json.load(fh)
         def warn(m: str) -> None:
             print(m, file=sys.stderr, flush=True)
-        faq = relay.parse_faq(faq_raw, warn=warn)
+        # 0.22.2: every --faq belongs to the item it follows (meta, max ITEM_FAQ_MAX per item,
+        # warned there); the flat board field faq keeps the first FAQ_MAX pairs silently, so
+        # doing + several open/done items with 3 pairs each is never cut at 6 any more
+        faq = relay.parse_faq(faq_raw, limit=len(faq_raw))[:relay.FAQ_MAX]
         board = relay.build_board(args.text, args.doing, args.open, args.done, file_obj, faq=faq)
         # 0.21.6: waiting for the human is a decision, never only a status (waitcheck.py)
         vwait.check(board.get("doing"), "status --doing")
@@ -3532,14 +3538,21 @@ def _relay_owner_pid() -> int | None:
     return None
 
 
-def _run_helper_import() -> int:
-    """`helper-import`: credential JSON on stdin (over ssh, never a chat) -> relay.json."""
+def _run_helper_import(args=None) -> int:
+    """`helper-import [--as NAME]`: credential JSON on stdin (over ssh, never a chat) ->
+    ~/.voicehook/helpers/<name>.json (0.22.2: one per helper session, vhelp.import_credential)."""
     try:
-        path = vhelp.import_credential(sys.stdin.read())
+        got = vhelp.import_credential(sys.stdin.read(), getattr(args, "as_name", None))
     except (OSError, ValueError) as e:
         print(json.dumps({"ok": False, "type": "error", "error": str(e)}), flush=True)
         return 1
-    print(json.dumps({"ok": True, "type": "helper-import", "path": path}), flush=True)
+    if got.pop("legacy", False):
+        print(vmulti.LEGACY_WARN, file=sys.stderr, flush=True)
+    if not got["bound"]:
+        print(f"[info] helper {got['name']!r} is bound to no session: start the helper session "
+              f"with VOICEHOOK_SESSION_LABEL={got['name']} (or keep it the only unbound one)",
+              file=sys.stderr, flush=True)
+    print(json.dumps({"ok": True, "type": "helper-import", **got}), flush=True)
     return 0
 
 
@@ -3559,10 +3572,11 @@ def _run_client(args) -> int:
     except (OSError, ValueError) as e:
         print(json.dumps({"ok": False, "type": "error", "error": str(e)}, ensure_ascii=False), flush=True)
         return 1
-    if req.get("cmd") in ("decide", "board"):
+    if req.get("cmd") in RELAY_CMDS:
         # 0.16.0: a Claude Code session without its own join, while another session of
         # this machine is in the call: decide/board go over relay.json as a helper.
-        rel = vrelayops.client_relay(args.session)
+        # 0.22.2: activity, next and show too, with the same rule (relayops.client_relay).
+        rel = _helper_relay(args.session)
         if rel is not None:
             return _run_relay_client(args, req, rel)
     wait_answer = req.get("cmd") == "decide" and getattr(args, "wait", None) == WAIT_ANSWER
@@ -3574,12 +3588,12 @@ def _run_client(args) -> int:
             req = {**req, "lease": True}  # 0.21.5: acked below, after the print (spool.py)
         reply = vsession.request(sock, req, timeout=sock_timeout)
     except vsession.SessionError as e:
-        print(json.dumps({"ok": False, "type": "no-session", "error": str(e)},
-                         ensure_ascii=False), flush=True)
+        print(json.dumps({"ok": False, "type": "no-session", "error": str(e),
+                          **_no_session_hint(args, req)}, ensure_ascii=False), flush=True)
         return 3
     except OSError as e:
-        print(json.dumps({"ok": False, "type": "no-session", "error": repr(e)},
-                         ensure_ascii=False), flush=True)
+        print(json.dumps({"ok": False, "type": "no-session", "error": repr(e),
+                          **_no_session_hint(args, req)}, ensure_ascii=False), flush=True)
         return 3
     if wait_answer and reply.get("ok"):
         reply["hint"] = "own join: the answer comes as a `next` event type decision"
@@ -3594,6 +3608,47 @@ def _run_client(args) -> int:
     if reply.get("type") == "ended":
         return 3
     return 0 if reply.get("ok") else 1
+
+
+# 0.22.2: the requests a helper session (no own join) sends over the relay; one routing rule
+# for all of them (relayops.client_relay). `status` without a board, `ui`, `say` & co. never.
+RELAY_CMDS = ("decide", "board", "activity", "next", "visual", "card")
+NO_SESSION_HINT = ("no own join and no helper credential for this session: pass --session "
+                   "<slug>/<identity>, or import one per session: `voicehook-agent "
+                   "helper-credential --label <name> | voicehook-agent helper-import --as <name>`")
+SHOW_HELPER = ("show (ring shapes, cards) is only for the session in the call: the relay has no "
+               "route for it. As a helper use status/activity/decide, or ask the main agent")
+
+
+def _helper_relay(explicit_session: str | None) -> dict | None:
+    """The relay of this session (relayops.client_relay), with the legacy warning (0.22.2)."""
+    rel = vrelayops.client_relay(explicit_session)
+    if rel is not None and vmulti.is_legacy_helper(rel):
+        print(vmulti.LEGACY_WARN, file=sys.stderr, flush=True)
+    return rel
+
+
+def _no_session_hint(args, req: dict) -> dict:
+    """{hint} for a no-session answer of a helper-capable command (0.22.2), else {}."""
+    if req.get("cmd") not in RELAY_CMDS or getattr(args, "session", None):
+        return {}
+    return {"hint": NO_SESSION_HINT}
+
+
+def _meta_faq_n(meta: object) -> int:
+    if not isinstance(meta, dict):
+        return 0
+    items = [meta.get("doing")] + list(meta.get("open") or []) + list(meta.get("done") or [])
+    return sum(len(m.get("faq") or []) for m in items if isinstance(m, dict))
+
+
+def vboardpid() -> int:
+    """0.22.2: board.agent_pid() of this join (0 when unknown, never raises)."""
+    try:
+        from . import board
+        return board.agent_pid()
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 def vrelay_meta(req: dict) -> dict:
@@ -3670,10 +3725,24 @@ def _print_json(obj: dict) -> None:
 def _run_relay_client(args, req: dict, rel: dict) -> int:
     """0.16.0 helper session: decide / status board over relay.json (remote: HTTP,
     local: request file of the join). One JSON line, plus "via":"relay"."""
+    if req["cmd"] in ("visual", "card"):
+        _print_json({"ok": False, "type": "helper-unsupported", "via": "relay", "error": SHOW_HELPER})
+        return 1
     local = vmulti._is_local(rel)
     try:
         frm = vrelayops.check_from(vrelayops.session_label())
-        if req["cmd"] == "decide":
+        if req["cmd"] == "next":
+            return _relay_next_out(rel, frm, getattr(args, "timeout", 0.0))
+        if req["cmd"] == "activity":
+            body = {"text": req["text"], **vrelay_meta(req)}
+            if local:
+                ok = vmulti.append_local(rel, f"{frm}: {req['text']}")
+                res = {"ok": True} if ok else {"ok": False, "status": 503,
+                                               "error": "join of the relay is gone"}
+            else:
+                res = vrelayops.remote_activity(rel, frm, body)
+            out = {**res, "type": "activity", "via": "relay"}
+        elif req["cmd"] == "decide":
             body = vrelayops.decide_body(req)
             res = (vrelayops.local_request(rel, frm, "decide", body) if local
                    else vrelayops.remote_decide(rel, frm, body))
@@ -3686,10 +3755,12 @@ def _run_relay_client(args, req: dict, rel: dict) -> int:
                     out["timeout"] = True
         else:
             board = req.get("board") or {}
-            if board.get("faq"):
-                print("[warn] --faq is not sent over the relay (helper board: doing/open/done)",
-                      file=sys.stderr, flush=True)
             body = vrelayops.status_body(board)
+            # 0.22.2: --faq goes per item in meta; warn only when a pair really stays behind
+            if board.get("faq") and _meta_faq_n(body.get("meta")) < max(
+                    1, _meta_faq_n(board.get("meta"))):
+                print("[warn] --faq: not every pair reached the relay (meta per item, "
+                      f"max {relay.ITEM_FAQ_MAX} per item)", file=sys.stderr, flush=True)
             res = (vrelayops.local_request(rel, frm, "status", body) if local
                    else vrelayops.remote_status(rel, frm, body))
             out = {**res, "type": "board", **({"board": body} if res.get("ok") else {}),
@@ -3725,7 +3796,7 @@ def _run_waiting(args) -> int:
         return _waiting_out({"ok": False, "type": "invalid", "error": "--waiting needs a text"}, 2)
     if bool(q) == bool(ref):
         return _waiting_out({"ok": False, "type": "invalid", "error": WAITING_NEEDS}, 2)
-    rel = vrelayops.client_relay(args.session)
+    rel = _helper_relay(args.session)
     frm = vrelayops.check_from(vrelayops.session_label()) if rel is not None else ""
     sock = None
     if rel is None:
@@ -3792,15 +3863,28 @@ def _run_waiting(args) -> int:
 
 def _run_relay_next(args) -> int:
     """0.16.0 `relay-next [--timeout S]`: the answers to this helper session's decisions,
-    one JSON line per event; {"type":"timeout"} when none came. Exit 3: no relay."""
+    one JSON line per event; {"type":"timeout"} when none came. Exit 3: no relay.
+    0.22.2: the relay of this session (own helper entry first, multisession.load_relay)."""
     rel = None if vmulti.relay_disabled() else vmulti.load_relay()
     if rel is None:
         _print_json({"ok": False, "type": "no-relay", "via": "relay",
-                     "error": "no usable ~/.voicehook/relay.json (no call on this machine)"})
+                     "error": "no helper credential for this session and no usable "
+                              "~/.voicehook/relay.json (no call on this machine)"})
         return 3
+    if vmulti.is_legacy_helper(rel):
+        print(vmulti.LEGACY_WARN, file=sys.stderr, flush=True)
     try:
         frm = vrelayops.check_from(vrelayops.session_label())
-        evs = vrelayops.next_events(rel, frm, max(0.0, float(args.timeout)))
+    except vrelayops.RelayError as e:
+        _print_json({"ok": False, "status": e.status or 503, "error": str(e), "via": "relay"})
+        return 1
+    return _relay_next_out(rel, frm, args.timeout)
+
+
+def _relay_next_out(rel: dict, frm: str, timeout) -> int:
+    """The events of one relay-next round, one JSON line each (or one timeout line)."""
+    try:
+        evs = vrelayops.next_events(rel, frm, max(0.0, float(timeout or 0)))
     except vrelayops.RelayError as e:
         _print_json({"ok": False, "status": e.status or 503, "error": str(e), "via": "relay"})
         return 1
@@ -4044,11 +4128,12 @@ def main(argv: list[str] | None = None) -> None:
     p_status.add_argument("--open", action=_SeqAction, default=[], metavar="TASK", help="open task (repeatable)")
     p_status.add_argument("--done", action=_SeqAction, default=[], metavar="TASK", help="finished task (repeatable)")
     p_status.add_argument("--faq", action=_SeqAction, default=[], metavar="'FRAGE::ANTWORT'",
-                          help="0.10.0: a question the user will likely ask next + your answer, "
-                          "split on the first '::' (repeatable, max 6, 200 chars each). Sent as "
-                          "board field faq[{q, a}]; refresh it on every board update. 0.21.4: also "
-                          "attached to the item it follows (--doing/--open/--done, else TEXT), max "
-                          f"{relay.ITEM_FAQ_MAX} per item, in board field meta")
+                          help="a question the user will likely ask next + your answer, split on "
+                          "the first '::' (repeatable, 200 chars each). It belongs to the item it "
+                          "follows (--doing/--open/--done, else TEXT): max "
+                          f"{relay.ITEM_FAQ_MAX} per item, in board field meta (0.22.2: no cap "
+                          "per call, e.g. doing + 2 open + 1 done with 3 each). Refresh it on "
+                          "every board update")
     p_status.add_argument("--context", default=None, action=_SeqAction, metavar="TEXT",
                           help=f"0.21.4: hidden background of the item it follows (--doing/--open/"
                                f"--done, else TEXT), max {relay.ITEM_CONTEXT_MAX} chars: never shown, "
@@ -4265,7 +4350,7 @@ def main(argv: list[str] | None = None) -> None:
     p_hc = sub.add_parser(
         "helper-credential", help="print a helper credential of the running join as JSON for "
         "ANOTHER machine; pipe it into ssh: `voicehook-agent helper-credential --label crown | "
-        "ssh crown 'voicehook-agent helper-import'` (never paste it into a chat)")
+        "ssh crown 'voicehook-agent helper-import --as crown'` (never paste it into a chat)")
     p_hc.add_argument("--label", default=None, metavar="NAME",
                       help="the helper machine, shown as 'Helfer NAME: ...' (max 22 chars)")
     p_hc.add_argument("--rotate", action="store_true", default=False,
@@ -4295,9 +4380,16 @@ def main(argv: list[str] | None = None) -> None:
         p_ph.add_argument("--message", default=None, metavar="TEXT",
                           help=f"optional short text, max {PHONE_MESSAGE_MAX[kind]} chars")
         _add_session(p_ph)
-    sub.add_parser("helper-import", help="read a helper credential (JSON) from stdin and write "
-                   "~/.voicehook/relay.json (0600): then `decide`, `status` and `relay-next` "
-                   "and the Claude Code hooks of this machine feed the call")
+    p_hi = sub.add_parser(
+        "helper-import", help="read a helper credential (JSON) from stdin and write it for ONE "
+        "helper session: ~/.voicehook/helpers/<name>.json (0600, 0.22.2; was the shared "
+        "relay.json). Then `status`, `activity`, `decide`, `next`/`relay-next` and the hooks "
+        "of that session feed the call under its own sender")
+    p_hi.add_argument("--as", dest="as_name", default=None, metavar="NAME",
+                      help="name of the entry, bound to no session: a session uses it when its "
+                      "VOICEHOOK_SESSION_LABEL is NAME (or it is the only unbound entry). "
+                      "Without --as: name = VOICEHOOK_SESSION_LABEL or the credential's label, "
+                      "bound to the agent session that runs the import")
     # 0.13.0: bridge session for the hook (Quickstart A, curl bridge join)
     p_bs = sub.add_parser(
         "bridge-session", help="store {base, session} of a curl bridge join (Quickstart A) in "
@@ -4361,7 +4453,7 @@ def main(argv: list[str] | None = None) -> None:
             rc = 1  # only reached when the exec failed
         sys.exit(rc)
     if args.cmd == "helper-import":
-        sys.exit(_run_helper_import())
+        sys.exit(_run_helper_import(args))
     if args.cmd in ("say", "next", "says", "leave", "status", "activity", "decide", "helper-credential",
                     "vocab", "ui", "notify-me", "call-me", "board", "send-data"):
         sys.exit(_run_client(args))
