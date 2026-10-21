@@ -122,11 +122,19 @@ def test_big_diagram_svg_is_fine():
 
 # ----- join side -----------------------------------------------------------------------------
 class _Local:
+    """Fake local participant. 0.21.10: an image card is answered by the call page of `host`
+    (vh.card_ack) with `ack` (True loaded, False failed, None = page never answers)."""
+
     def __init__(self) -> None:
         self.published: list[tuple[str, dict, list | None]] = []
+        self.ctl = None
+        self.ack: bool | None = True
 
     async def publish_data(self, data, reliable=True, topic="", destination_identities=None):
-        self.published.append((topic, json.loads(data), destination_identities))
+        obj = json.loads(data)
+        self.published.append((topic, obj, destination_identities))
+        if topic == "operator.card" and "url" in obj and self.ctl is not None and self.ack is not None:
+            asyncio.get_running_loop().call_soon(self.ctl.card_acks.note, {"id": obj["id"], "ok": self.ack}, "host")
 
 
 def _peer(identity, kind=0, attrs=None):
@@ -143,6 +151,8 @@ def _ctl(room) -> cli._Control:
     ctl = cli._Control("blau-tiger", "claude-x", relay.SayTracker(), relay.EchoSuppressor(False), 0.0)
     ctl.attach(room)
     ctl.api_base, ctl.lk_jwt = "http://vh.test", "LK.JWT.TOKEN"
+    if isinstance(getattr(room, "local_participant", None), _Local):
+        room.local_participant.ctl = ctl
     return ctl
 
 
@@ -199,7 +209,7 @@ def test_webrtc_image_uploaded_with_own_token_then_published(monkeypatch):
     room = _room()
     res = asyncio.run(cli._control_handler(_ctl(room), {"cmd": "card", "kind": "image", "image": SVG,
                                                         "title": "Plan", "large": True}))
-    assert res["ok"] and res["id"] == CID
+    assert res["ok"] and res["id"] == CID and res["shown"] == 1
     assert seen == [("/api/card/image", "Bearer LK.JWT.TOKEN", {"image": SVG})]
     (t, card, _), (_, ui, _) = room.local_participant.published
     assert t == "operator.card" and card["url"] == URL and card["mime"] == "image/svg+xml"
@@ -309,3 +319,76 @@ def test_is_svg_head_without_backtracking():
 def test_external_refs_with_spaces_rejected(svg):
     with pytest.raises(vc.CardError, match="nothing external"):
         vc.image_kind(svg)
+
+
+# ----- 0.21.10: ok only when a call page loaded the image (live 21.10.2026) ------------------
+def _img_ok(monkeypatch):
+    _mock_http(monkeypatch, lambda req: httpx.Response(200, json={"ok": True, "id": CID, "url": URL,
+                                                                 "mime": "image/png"}))
+
+
+def test_image_not_loaded_in_page_is_never_ok(monkeypatch):
+    _img_ok(monkeypatch)
+    room = _room()
+    room.local_participant.ack = False   # the page could not load it (server restarted)
+    res = asyncio.run(cli._control_handler(_ctl(room), {"cmd": "card", "kind": "image", "image": SVG}))
+    assert res["ok"] is False and res["type"] == "not_shown" and "did not load" in res["error"]
+    assert res["id"] == CID   # the card went out, the answer says it was not seen
+
+
+def test_image_without_page_answer_is_never_ok(monkeypatch):
+    _img_ok(monkeypatch)
+    monkeypatch.setattr(vc, "ACK_WAIT_S", 0.3)
+    room = _room()
+    room.local_participant.ack = None   # old page or offline: nobody answers
+    ctl = _ctl(room)
+
+    async def go():
+        return await ctl.card_acks.wait("x" * 16, {"host"}, timeout=0.2)
+    assert asyncio.run(go()) == (set(), set())
+    res = asyncio.run(cli._control_handler(ctl, {"cmd": "card", "kind": "image", "image": SVG}))
+    assert res["ok"] is False and res["type"] == "not_shown"
+
+
+def test_image_without_human_is_never_ok(monkeypatch):
+    _img_ok(monkeypatch)
+    room = SimpleNamespace(local_participant=_Local(), remote_participants={
+        "voice-ai": _peer("voice-ai", kind=4)})
+    res = asyncio.run(cli._control_handler(_ctl(room), {"cmd": "card", "kind": "image", "image": SVG}))
+    assert res["ok"] is False and res["type"] == "no_human"
+
+
+def test_ack_waits_for_all_humans_or_grace():
+    async def go():
+        acks = vc.Acks()
+        acks.expect("a" * 16)
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.05, acks.note, {"id": "a" * 16, "ok": True}, "h1")
+        loop.call_later(0.1, acks.note, {"id": "a" * 16, "ok": False}, "h2")
+        loop.call_later(0.1, acks.note, {"id": "b" * 16, "ok": True}, "h3")   # other card: ignored
+        t0 = loop.time()
+        got = await acks.wait("a" * 16, {"h1", "h2"}, timeout=5.0, grace=3.0)
+        return got, loop.time() - t0
+    (loaded, failed), took = asyncio.run(go())
+    assert loaded == {"h1"} and failed == {"h2"} and took < 1.0   # both answered: no waiting
+
+
+def test_ack_result_texts():
+    assert vc.ack_result({"ok": True}, {"a"}, {"b"}, 2) == {"ok": True, "shown": 1, "not_loaded": 1}
+    assert vc.ack_result({"ok": True}, set(), set(), 0)["type"] == "no_human"
+
+
+def test_helper_card_from_pump_is_checked_and_confirmed():
+    room = _room()
+    ctl = _ctl(room)
+    card = {"id": CID, "kind": "image", "title": "Plan", "text": "", "from": "Mac: Scout", "url": URL,
+            "mime": "image/png", "at": 1.0}
+    res = asyncio.run(cli._publish_helper_card(ctl, room, card))
+    assert res == {"ok": True, "shown": 1}
+    (t, pkt, _), = room.local_participant.published
+    assert t == "operator.card" and pkt["from"] == "Mac: Scout" and pkt["seq"] == 1 and pkt["url"] == URL
+    bad = asyncio.run(cli._publish_helper_card(ctl, room, {**card, "url": "https://evil.example/x.png"}))
+    assert bad["ok"] is False and bad["status"] == 422 and len(room.local_participant.published) == 1
+    room.local_participant.ack = False
+    gone = asyncio.run(cli._publish_helper_card(ctl, room, {**card, "id": "b" * 16, "url": URL.replace(CID, "b" * 16)}))
+    assert gone["ok"] is False and gone["status"] == 409

@@ -3,6 +3,25 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.21.10 (2026-10-21)
+
+Live (Oliver, call 21.10. morning): the router put screenshots into the call with
+`show --card image --file <png>`, the CLI said ok, Oliver saw nothing.
+
+- **Real screenshots work:** the join's control socket read one request line with asyncio's
+  default limit of 64 KB. A screenshot (base64 in that line) overran it, the join dropped the
+  connection and `show` printed `no-session` ("session ended?"). Now up to 4 MB, and a too
+  large request gets an answer instead of a dropped connection.
+- **Never ok without the image in the browser:** every call page loads an image card and
+  answers on `vh.card_ack` `{id, ok}`. `show --card image` answers `ok:true` with `shown` only
+  after at least one page loaded it; otherwise `ok:false` with `type` `not_shown` (did not load,
+  e.g. the server restarted, or no page answered) or `no_human`, exit 1.
+- **Cards from helper sessions:** `show --card ...` of a session without its own join goes over
+  the helper relay (`POST /api/activity/relay/show`); the card names the helper as sender. Same
+  checks and limits, image only as file data, no `--panel`/`--large`. A WebRTC main agent gets
+  such cards over its helper pump (kind `card`), publishes them as itself and confirms them like
+  its own.
+
 ## 0.21.9 (2026-10-21)
 
 Live (Oliver): Delta spoke again, but too much old stuff. The server now drops queued, not yet

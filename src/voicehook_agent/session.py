@@ -396,6 +396,11 @@ class IdleWatchdog:
 # --------------------------------------------------------------------------- #
 Handler = Callable[[dict], Awaitable[dict]]
 
+# 0.21.10: one request line may carry an image card (PNG/JPEG/WebP max 1 MB -> base64
+# ~1.4 MB, SVG max 300 KB). asyncio's default line limit is 64 KiB: a real screenshot
+# overran it, the join dropped the connection without an answer (live 21.10.2026).
+REQUEST_MAX = 4 * 1024 * 1024
+
 
 class ControlServer:
     """asyncio Unix-socket server; one JSON request, one JSON reply.
@@ -422,7 +427,8 @@ class ControlServer:
                     f"a join with this identity is already running in this room "
                     f"({self.sock_path})")
             self.sock_path.unlink()
-        self._server = await asyncio.start_unix_server(self._serve, path=str(self.sock_path))
+        self._server = await asyncio.start_unix_server(self._serve, path=str(self.sock_path),
+                                                       limit=REQUEST_MAX)
         try:
             os.chmod(self.sock_path, 0o600)
         except OSError:
@@ -434,13 +440,18 @@ class ControlServer:
             self._tasks.add(task)
         self._clients.add(writer)
         try:
-            raw = await asyncio.wait_for(reader.readline(), timeout=self.read_timeout)
             try:
+                raw = await asyncio.wait_for(reader.readline(), timeout=self.read_timeout)
+            except ValueError:  # line over REQUEST_MAX: answer, never drop the client silently
+                raw = None
+            try:
+                if raw is None:
+                    raise ValueError(f"request too large (max {REQUEST_MAX // (1024 * 1024)} MB)")
                 req = json.loads(raw.decode("utf-8") or "{}")
                 if not isinstance(req, dict):
                     raise ValueError("request must be a JSON object")
             except ValueError as e:
-                reply = {"ok": False, "error": f"bad request: {e}"}
+                reply = {"ok": False, "type": "invalid", "error": f"bad request: {e}"}
             else:
                 try:
                     reply = await self.handler(req)

@@ -1054,6 +1054,27 @@ expired: the helper pump token; no new credential, max 10 per minute), the answe
 an older server without `/api/card/image` answers image cards with a clear error (text, code
 and link still work).
 
+Image arrived (0.21.10, live 21.10.2026: the CLI said ok, the human saw nothing): every call
+page loads the image and answers the sender on topic `vh.card_ack` `{id, ok}`. The join waits
+up to 15 s (2 s after the first page that loaded it) and answers `ok:true` with `shown` (pages
+that loaded it, `not_loaded` when some failed) only then. Otherwise `ok:false`, exit 1:
+`type:"not_shown"` (a page could not load it, e.g. the server restarted, or no page answered:
+old page, ask the human to reload) or `type:"no_human"` (nobody in the call; the card is kept
+and shows up when someone opens the page). Never tell the human an image is there without
+`ok:true`. Since 0.21.10 the control socket takes requests up to 4 MB (before: 64 KB, a real
+screenshot dropped the connection with `no-session`).
+
+Helper sessions (0.21.10): a session without its own join, while `~/.voicehook/relay.json` of
+the main agent exists (same machine, or `helper-import` on another one), sends the same
+`show --card ...` over the helper relay (`POST /api/activity/relay/show`, answer
+`{"ok":true,"type":"card","via":"relay","id","kind","from","shown"?}`). The card names the
+helper as sender (`Helfer <machine>: <name>`, name = the session label, e.g.
+`VOICEHOOK_SESSION_LABEL`). Same checks and limits, at most 10 images a minute per helper, an
+image only as file data (never a URL), no `--panel`/`--large` (they belong to the main agent:
+exit 1). Main agent joined over WebRTC: the server hands the card to this join (helper pump,
+kind `card`), the join publishes it as itself and waits for the pages like for its own cards.
+A local relay (older server) takes text, code and link cards only.
+
 ## Speech recognition vocabulary (`vocab add`, 0.21.0)
 
 The call keeps mishearing a word (a product, a name, jargon)? Teach it:
@@ -1280,6 +1301,8 @@ then `join` again until it returns the session (never end the turn on `waiting_f
 whose `next_action` says the same), then the `next` loop; Claude Code keeps the background
 watcher. The MCP server tells a local Claude Code in `local_cli_hint` to use this CLI: its
 background process keeps the agent in the call, so it never falls asleep between turns.
+Since 1.3.15 (2026-10-21) the skill lists `helper_show` (cards of helper sessions, with the
+helper as sender).
 
 In a Claude Code session:
 

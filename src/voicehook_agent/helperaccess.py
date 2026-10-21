@@ -30,6 +30,7 @@ from collections.abc import Awaitable, Callable
 from . import multisession as vmulti
 
 CREDENTIAL_PATH = "/api/helper/credential"
+_BG: set = set()   # 0.21.10: running helper cards (kept referenced)
 PUMP_WAIT_S = 25.0
 HTTP_TIMEOUT_S = 10.0
 _CLOCK = re.compile(r"^\d{2}:\d{2}:\d{2} ")
@@ -77,7 +78,8 @@ class Pump:
 
     async def run(self, http, *, publish_status: Callable[[dict], Awaitable[None]],
                   decide: Callable[[dict], Awaitable[dict]],
-                  append_activity: Callable[[str], None], stop: asyncio.Event) -> None:
+                  append_activity: Callable[[str], None], stop: asyncio.Event,
+                  show_card: Callable[[dict], Awaitable[dict]] | None = None) -> None:
         """Long-poll until `stop` or the hub ended; a network error waits 2 s and retries."""
         while not stop.is_set() and not self.ended:
             try:
@@ -100,7 +102,8 @@ class Pump:
                 continue
             for item in data.get("items") or []:
                 try:
-                    await self._apply(http, item, publish_status, decide, append_activity)
+                    await self._apply(http, item, publish_status, decide, append_activity,
+                                      show_card)
                 except asyncio.CancelledError:
                     raise
                 except Exception:  # noqa: BLE001, S112  one bad packet never stops the pump
@@ -109,7 +112,8 @@ class Pump:
                 self.ended = True
                 return
 
-    async def _apply(self, http, item: dict, publish_status, decide, append_activity) -> None:
+    async def _apply(self, http, item: dict, publish_status, decide, append_activity,
+                     show_card=None) -> None:
         kind = item.get("kind") if isinstance(item, dict) else None
         if kind == "activity" and isinstance(item.get("line"), str):
             # server line `HH:MM:SS relay: Helfer <label>: ...`: local time like every line
@@ -120,6 +124,23 @@ class Pump:
             res = await decide(item["body"])
             await http.post(self.url + "/result", json={"id": str(item.get("id") or ""), "result": res},
                             headers=self._auth(), timeout=HTTP_TIMEOUT_S)
+        elif kind == "card" and show_card is not None and isinstance(item.get("card"), dict):
+            # 0.21.10 helper card: publish as ourselves, wait for the call pages (image), answer.
+            # In the background: waiting for the pages must not hold up the other helpers.
+            t = asyncio.ensure_future(self._card(http, str(item.get("id") or ""), item["card"], show_card))
+            _BG.add(t)
+            t.add_done_callback(_BG.discard)
+
+    async def _card(self, http, rid: str, card: dict, show_card) -> None:
+        try:
+            res = await show_card(card)
+        except Exception as e:  # noqa: BLE001
+            res = {"ok": False, "status": 502, "detail": f"card not sent: {type(e).__name__}"}
+        try:
+            await http.post(self.url + "/result", json={"id": rid, "result": res},
+                            headers=self._auth(), timeout=HTTP_TIMEOUT_S)
+        except Exception:  # noqa: BLE001, S110  the server answers the helper 503 after its wait
+            pass
 
     async def answer(self, http, sender: str, event: dict) -> dict | None:
         """The human answered a helper's question: into that helper's inbox on the server.

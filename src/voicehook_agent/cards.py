@@ -12,6 +12,12 @@ An image is too large for the data channel: the join stores it on the server fir
 (POST /api/card/image, Bearer = its own LiveKit token, no new credential) and puts the
 signed, room-bound URL into the card. Bridge join: POST /api/bridge/show, same body.
 
+Image arrived (0.21.10, live 21.10.2026: the CLI said ok, the human saw nothing): every call
+page loads an image card and answers the sender on topic vh.card_ack {id, ok} (ok false: the
+image did not load). The join waits up to ACK_WAIT_S for the humans in the call and answers
+ok only when at least one browser loaded the image; otherwise ok false with the reason
+(not_shown: no browser confirmed or the image did not load; no_human: nobody in the call).
+
 Limits (checked here before anything is sent, again in the join, and by the server):
 text max 4000 chars, title max 80, SVG max 300 KB (draws anything, but no <script>,
 <foreignObject>, on* attributes or external references), PNG/JPEG/WebP max 1 MB, link one
@@ -39,6 +45,9 @@ TITLE_MAX = 80
 SVG_MAX = 300 * 1024
 RASTER_MAX = 1024 * 1024
 PACKET_MAX = 14_000
+ACK_TOPIC = "vh.card_ack"
+ACK_WAIT_S = 15.0      # a phone may need a while for a 1 MB image
+ACK_GRACE_S = 2.0      # after the first ok: wait this long for the other humans
 
 _SVG_TAG = re.compile(rb"<svg[\s>]", re.IGNORECASE)
 
@@ -260,6 +269,107 @@ def ui_packets(panel: str, *, large: bool = False, cid: str | None = None) -> li
         if cid:
             pkt["id"] = cid
     return [pkt]
+
+
+class Acks:
+    """vh.card_ack answers of the call pages per image card id (only ids we wait for)."""
+
+    def __init__(self) -> None:
+        self._w: dict[str, dict] = {}
+
+    def expect(self, cid: str) -> None:
+        import asyncio
+
+        self._w[cid] = {"ok": set(), "bad": set(), "ev": asyncio.Event()}
+
+    def note(self, payload: object, who: str) -> None:
+        cid = payload.get("id") if isinstance(payload, dict) else None
+        w = self._w.get(cid) if isinstance(cid, str) else None
+        if w is None or not who:
+            return
+        (w["ok"] if payload.get("ok") is True else w["bad"]).add(who)
+        w["ev"].set()
+
+    async def wait(self, cid: str, humans: set[str], timeout: float | None = None,
+                   grace: float | None = None) -> tuple[set[str], set[str]]:
+        """-> (loaded, failed) identities, once every human answered, `grace` s after the first
+        ok, or after `timeout`. Forgets the id."""
+        import asyncio
+
+        w = self._w.get(cid)
+        if w is None or not humans:   # nobody in the call who could load it
+            self._w.pop(cid, None)
+            return set(), set()
+        loop = asyncio.get_running_loop()
+        timeout = ACK_WAIT_S if timeout is None else timeout
+        grace = ACK_GRACE_S if grace is None else grace
+        end = loop.time() + timeout
+        first_ok: float | None = None
+        try:
+            while True:
+                if (w["ok"] | w["bad"]) >= humans:
+                    break
+                now = loop.time()
+                if w["ok"] & humans and first_ok is None:
+                    first_ok = now
+                stop = end if first_ok is None else min(end, first_ok + grace)
+                if now >= stop:
+                    break
+                w["ev"].clear()
+                try:
+                    await asyncio.wait_for(w["ev"].wait(), timeout=stop - now)
+                except asyncio.TimeoutError:
+                    pass
+            return set(w["ok"]) & humans, set(w["bad"]) & humans
+        finally:
+            self._w.pop(cid, None)
+
+
+def ack_result(res: dict, loaded: set[str], failed: set[str], humans: int) -> dict:
+    """The join's answer for an image card after waiting for the call pages."""
+    if loaded:
+        out = {**res, "shown": len(loaded)}
+        if failed:
+            out["not_loaded"] = len(failed)
+        return out
+    if humans == 0:
+        return {**res, "ok": False, "type": "no_human",
+                "error": "no human in the call: the image was not shown to anyone (the card is kept "
+                         "and shows up when someone opens the call page)"}
+    if failed:
+        return {**res, "ok": False, "type": "not_shown",
+                "error": "the image did not load in the call page (server lost it, e.g. after a "
+                         "restart): send it again"}
+    return {**res, "ok": False, "type": "not_shown",
+            "error": f"no call page confirmed the image within {int(ACK_WAIT_S)} s (page not "
+                     "reloaded since the update, or offline): ask the human to reload, then send again"}
+
+
+FROM_MAX = 80
+
+
+def relay_card(card: object, seq: int) -> dict | None:
+    """0.21.10 helper card from the server hub (pump kind card): checked again before we publish
+    it as ourselves -> the operator.card packet with our seq, or None (dropped)."""
+    if not isinstance(card, dict):
+        return None
+    cid, kind = card.get("id"), card.get("kind")
+    if not isinstance(cid, str) or not re.fullmatch(r"[0-9a-f]{16}", cid) or kind not in KINDS:
+        return None
+    frm = card.get("from")
+    if not isinstance(frm, str) or not frm.strip() or len(frm) > FROM_MAX:
+        return None
+    out = {"id": cid, "seq": seq, "kind": kind, "title": str(card.get("title") or "")[:TITLE_MAX],
+           "text": str(card.get("text") or "")[:TEXT_MAX], "from": frm,
+           "at": card.get("at") if isinstance(card.get("at"), (int, float)) else round(time.time(), 3)}
+    if kind == "image":
+        if not image_url_ok(card.get("url"), cid):
+            return None
+        out["url"] = card["url"]
+        out["mime"] = str(card.get("mime") or "")[:40]
+    if len(json.dumps(out, ensure_ascii=False).encode("utf-8")) > PACKET_MAX:
+        return None
+    return out
 
 
 def image_url_ok(url: object, cid: object) -> bool:

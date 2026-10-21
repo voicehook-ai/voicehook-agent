@@ -503,3 +503,51 @@ def test_local_answer_file_stale_is_taken(tmp_path):
     got = ro.take_jsonl(p, ro._wanted)
     assert [g.get("stale") for g in got] == [True]
     assert ro.take_jsonl(p, lambda o: True) == [{"type": "revise", "text": "kein stale"}]
+
+
+# --------------------------------------------------------------------------- #
+# 0.21.10: show --card of a helper session (POST <relay>/show)
+# --------------------------------------------------------------------------- #
+PNG1 = (b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+
+
+def test_helper_show_image_goes_over_relay(monkeypatch, server, tmp_path, capsys):
+    _remote(server)
+    _helper(monkeypatch, label="Scout")
+    f = tmp_path / "shot.png"
+    f.write_bytes(PNG1)
+    server.reply("show", 200, {"ok": True, "type": "card", "id": "a" * 16, "kind": "image",
+                               "from": "Mac: Scout", "shown": 1})
+    code, lines, _ = _cli(["show", "--card", "image", "--title", "Bild", "--file", str(f)], capsys)
+    assert code == 0 and lines[-1]["ok"] and lines[-1]["via"] == "relay" and lines[-1]["shown"] == 1
+    call = server.calls[-1]
+    assert call["path"].endswith("/api/activity/relay/show") and call["auth"] == f"Bearer {TOKEN}"
+    assert call["body"]["from"] == "Scout" and call["body"]["kind"] == "image" and call["body"]["title"] == "Bild"
+    assert "?" not in call["raw_path"]   # token never in the URL
+
+
+def test_helper_show_not_shown_is_an_error(monkeypatch, server, tmp_path, capsys):
+    _remote(server)
+    _helper(monkeypatch, label="Scout")
+    f = tmp_path / "shot.png"
+    f.write_bytes(PNG1)
+    server.reply("show", 409, {"detail": "the image did not load in the call page"})
+    code, lines, _ = _cli(["show", "--card", "image", "--file", str(f)], capsys)
+    assert code == 1 and lines[-1]["ok"] is False and lines[-1]["status"] == 409
+
+
+def test_helper_show_no_panels(monkeypatch, server, capsys):
+    _remote(server)
+    _helper(monkeypatch, label="Scout")
+    code, lines, _ = _cli(["show", "--card", "text", "--text", "hallo", "--panel", "board"], capsys)
+    assert code == 1 and lines[-1]["ok"] is False and "main agent" in lines[-1]["error"]
+    assert not server.calls
+
+
+def test_local_relay_card_only_text_kinds():
+    ok = ro.parse_request({"rid": "a" * 16, "from": "Scout", "op": "card",
+                           "body": {"kind": "link", "text": "https://voicehook.ai"}})
+    assert ok[3] == {"kind": "link", "text": "https://voicehook.ai", "title": ""}
+    for body in ({"kind": "image", "image": "x"}, {"kind": "link", "text": "javascript:x"},
+                 {"kind": "text", "text": ""}, {"kind": "text", "text": "x" * 4001}):
+        assert ro.parse_request({"rid": "a" * 16, "from": "Scout", "op": "card", "body": body})[3] is None
