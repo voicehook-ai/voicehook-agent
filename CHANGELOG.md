@@ -3,6 +3,21 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.23.0 (2026-10-21)
+
+Oliver: "Für Delta brauchen wir auch einen Data Channel, so wie die CLI untereinander Data
+Channel haben", so the agent in the call can give Delta new conversation rules and facts while
+the call runs. Delta should know as much as possible and answer himself.
+
+- **`delta-rule add|list|rm` and `delta-note add|list|rm`:** standing rules (how Delta talks or
+  behaves) and facts (what he knows) for the rest of the call. Silent, never spoken: the server
+  puts them at the end of Delta's context, from his next turn; his core rules win on conflict.
+  Max 20 rules and 30 facts, 300 characters each (checked here and by the server, 422, never
+  cut). WebRTC: RPC `vh.delta_notes` to the voicebot; bridge: `POST /api/bridge/delta`. Only
+  the session in the call, never over the helper relay. `--persist` is accepted for a later
+  account memory and has no effect yet. Needs voicehook-v4 with `deltanotes` (older server:
+  `delta rpc failed`).
+
 ## 0.22.2 (2026-10-21)
 
 Live findings with 0.22.1 as a helper (`helper-import`): `status` went over the relay,
