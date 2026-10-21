@@ -3,7 +3,7 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
-## Unreleased (version set at rebase)
+## 0.22.3 (2026-10-21)
 
 Router-Fund (Oliver 21.10.): the main join (WebRTC) saw neither the boards nor the open
 questions of its helpers; `voicehook-agent board` gave boards=[], recent=[], open=[] with "server
