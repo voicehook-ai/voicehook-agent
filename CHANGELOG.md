@@ -17,6 +17,8 @@ the call runs. Delta should know as much as possible and answer himself.
   the session in the call, never over the helper relay. `--persist` is accepted for a later
   account memory and has no effect yet. Needs voicehook-v4 with `deltanotes` (older server:
   `delta rpc failed`).
+- **Plugin 1.3.17:** skill copy synced with the live https://voicehook.ai/agent/mcp/SKILL.md
+  (`context` as short `What:` / `Why:` / `If yes:` / `If no:` lines, shown on the card).
 
 ## 0.22.3 (2026-10-21)
 
