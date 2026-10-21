@@ -147,6 +147,14 @@ turn) is shown anyway, marked `kam auch über listen`. PostToolUse, not PreToolU
 additionalContext reliably reaches the running turn. Never for subagents or other sessions.
 `VOICEHOOK_MIDTURN_EVENTS=0` turns it off.
 
+### Question check reaches the helper (0.22.1)
+
+The server checks board and feed lines for hidden questions (`question_check`). `next` brings
+your own as `{"type":"question_check","id","quote","kind","wait_s","text"}`; a helper's goes to
+that helper (`relay-next`, hook context). Ask it with `decide` within `wait_s` (90 s), else the
+server puts it on the board itself; that answer comes with `"auto": true` and the `question`
+(also in the `helper_decision` copy), so nobody mistakes it for a question the helper asked.
+
 ### Stale says come back, never spoken (0.21.9)
 
 **Veraltet heißt: nicht wiederholen.** The server drops your queued, not yet spoken says older
