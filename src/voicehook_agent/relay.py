@@ -559,7 +559,7 @@ FAQ_HINT = ("Welche 3 Fragen stellt der Nutzer wahrscheinlich als Nächstes? "
 # every decision and every status entry. The CLI warns (never refuses, a call is live).
 MANDATORY_HINT = ("[hint] Pflicht: zu jeder Entscheidung und jedem Status-Eintrag --context "
                   '"<was, warum, Stand>" und die 3 wahrscheinlichsten Rückfragen mit Antwort '
-                  '(--faq "Frage::Antwort", 3x). Ohne Antwort bisher: sag es mit Bearbeiter und '
+                  '(--faq "Frage::Antwort", 3x direkt nach dem Eintrag, max 3 je Eintrag). Ohne Antwort bisher: sag es mit Bearbeiter und '
                   'ETA ("In Arbeit bei <Name>, Ergebnis ca. 10 Min"). Der Voicebot braucht immer '
                   "Material. / Mandatory: context + the 3 likely follow-up questions with answers "
                   "(unknown yet: who works on it + ETA).")
@@ -593,7 +593,7 @@ STATUS_HINTS = {
 }
 SAY_PROGRESS_HINT = ("Fortschritt angesagt, Board ist aelter: Delta kennt ihn sonst nicht. "
                      "Jetzt: " + STATUS_CMD + ". " + FAQ_HINT)
-FAQ_MAX = 6          # pairs per board
+FAQ_MAX = 6          # pairs in the flat board field faq (per item: ITEM_FAQ_MAX in meta)
 FAQ_CHARS = 200      # per question and per answer
 _PROGRESS_RX = re.compile(
     r"\b(fertig|erledigt|abgeschlossen|live|deploy\w*|gemerged|merged|done|finished|shipped)\b",

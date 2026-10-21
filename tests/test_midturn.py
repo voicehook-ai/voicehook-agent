@@ -156,3 +156,31 @@ def test_rule_in_help_onboarding_and_mcp(capsys):
     with pytest.raises(SystemExit):
         cli.main(["listen", "--help"])
     assert "Arbeit über 2 Tool-Calls" in " ".join(capsys.readouterr().out.split())
+
+
+# ----- 0.22.2: only the router (the session that owns the join) sees the call -------------
+def test_only_the_router_agent_process_sees_mid_turn_events(owned, monkeypatch):
+    """Oliver 21.10.: every session of the machine read his sentences. A second agent process
+    with the router's session id (`claude --continue` elsewhere, an inherited env) is not the
+    router: the join records its agent pid, the hook compares it."""
+    from voicehook_agent import board, listenguard
+    monkeypatch.setattr(board, "agent_pid", lambda *a, **k: 4242)  # join: started by 4242
+
+    async def run():
+        join = asyncio.create_task(_join(idle_timeout=0))
+        await _call({"cmd": "say", "text": "Hallo"})
+        room = _FakeRoom.instances[0]
+        room.emit("transcript", {"role": "user", "text": "Erst die Tests!", "speaker": "Oliver"})
+        await asyncio.sleep(0.05)
+        monkeypatch.setattr(listenguard, "_hook_agent_pid", lambda: 777)   # same sid, other process
+        twin = await asyncio.to_thread(midturn.handle, _post())
+        other = await asyncio.to_thread(midturn.handle, _post(sid="bystander"))
+        monkeypatch.setattr(listenguard, "_hook_agent_pid", lambda: 4242)  # the router itself
+        router = await asyncio.to_thread(midturn.handle, _post())
+        await _call({"cmd": "leave"})
+        await asyncio.wait_for(join, 10)
+        return twin, other, router
+
+    twin, other, router = asyncio.run(run())
+    assert twin is None and other is None
+    assert 'Oliver hat im Call gesagt' in _ctx(router)  # positive control: the router as before

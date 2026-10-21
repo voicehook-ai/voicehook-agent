@@ -39,6 +39,12 @@ def _relay(room="prime-solar", owner="owner-hash", local_dir=None):
                           owner_session=owner, now=T0 - 10)
 
 
+def _helper(sid="sess-1"):
+    """0.22.2: reminders only for a session that takes part (own helper credential)."""
+    return ms.write_helper("Helfer-" + sid, URL, TOKEN, "prime-solar", 3600 * 24 * 365 * 10,
+                           owner_session=ms.session_hash(sid), now=T0 - 10)
+
+
 def ev(name="PostToolUse", sid="sess-1", cwd="/work/salesengine", **kw):
     d = {"hook_event_name": name, "session_id": sid, "cwd": cwd}
     if name.startswith("PostToolUse"):
@@ -95,6 +101,7 @@ def test_status_command_not_detected(cmd):
 # ----- reminder ------------------------------------------------------------------
 def test_never_set_reminds_once_per_window_with_name():
     _relay()
+    _helper()
     out = ctx(board.handle(ev(), now=T0))
     assert out["hookEventName"] == "PostToolUse"
     text = out["additionalContext"]
@@ -118,12 +125,14 @@ def test_fresh_board_silent_then_stale_reminds_with_age_and_used_name():
 
 def test_user_prompt_submit_reminds_with_its_event_name():
     _relay()
+    _helper()
     out = ctx(board.handle(ev("UserPromptSubmit", prompt="bitte deploy"), now=T0))
     assert out["hookEventName"] == "UserPromptSubmit"
 
 
 def test_failed_status_command_does_not_count():
     _relay()
+    _helper()
     out = board.handle(bash('vh-helper status "A" "x"', tool_response={"exit_code": 1}), now=T0)
     assert "kein Board" in ctx(out)["additionalContext"]
 
@@ -144,7 +153,10 @@ def test_owner_session_no_relay_and_opt_out_are_silent(monkeypatch):
     assert board.handle(ev(), now=T0) is None                    # no relay.json
     _relay(owner=ms.session_hash("sess-1"))
     assert board.handle(ev(), now=T0) is None                    # the joining session
-    assert board.handle(ev(sid="other"), now=T0) is not None
+    # 0.22.2 (Oliver): a session that only runs on this machine gets nothing
+    assert board.handle(ev(sid="other"), now=T0) is None
+    _helper("other")
+    assert board.handle(ev(sid="other"), now=T0) is not None     # its own helper credential
     monkeypatch.setenv(board.ENV_OFF, "0")
     assert board.handle(ev(sid="third"), now=T0) is None
     monkeypatch.delenv(board.ENV_OFF)
@@ -169,6 +181,7 @@ def test_cleared_board_reminds_as_missing_after_window():
 
 def test_name_is_scrubbed_and_quoted_safely(monkeypatch):
     _relay()
+    _helper()
     monkeypatch.setenv(ms.LABEL_ENV, 'x"; rm -rf $HOME `id` token=fakefakefakefake')
     text = ctx(board.handle(ev(), now=T0))["additionalContext"]
     assert "fakefakefakefake" not in text and "`id`" not in text and "$HOME" not in text
@@ -179,13 +192,15 @@ def test_local_relay_hint_is_cli(tmp_path):
     d.mkdir()
     (d / "session.json").write_text(json.dumps({"pid": os.getpid()}))
     _relay(local_dir=d)
-    text = ctx(board.handle(ev(), now=T0))["additionalContext"]
+    board.handle(bash('voicehook-agent status "Tests"'), now=T0)  # 0.22.2: its own board
+    text = ctx(board.handle(ev(), now=T0 + board.REMIND_AFTER_S + 1))["additionalContext"]
     assert "voicehook-agent status" in text and "vh-helper" not in text
 
 
 # ----- hook main: stdout only for Post/Prompt, exit 0 ----------------------------
 def test_main_prints_context_json_and_exits_zero(monkeypatch, capsys):
     _relay()
+    _helper()
     monkeypatch.setattr(board.time, "time", lambda: T0)
     monkeypatch.setattr(ms, "_spawn_post", lambda text: None)
     monkeypatch.setattr("sys.stdin", io.StringIO(ev()))

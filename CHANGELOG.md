@@ -18,6 +18,41 @@ published (local relay, server hub) never came back to its own ledger.
 - **Ledger:** helper boards and questions the join publishes for the server hub (pump) and
   the local relay are recorded too (fallback without the server listing).
 
+## 0.22.2 (2026-10-21)
+
+Live findings with 0.22.1 as a helper (`helper-import`): `status` went over the relay,
+`activity` did not ("no running join found" on crown, "several joins running" on a Mac); on
+the MacBook three `helper-import`s one after another made every helper post as the last one
+("Helfer Zapmail"); `status --faq` warned "not sent over the relay" although the faq arrived
+in `meta`, and capped a call at 6 pairs although 3 per item are mandatory.
+
+- **One routing rule** for `status`, `activity`, `decide`, `next`, `show` (`relayops.client_relay`):
+  `--session` wins, then the own join of this session, then its own helper credential, then a
+  join's relay.json on this machine, else `no-session` with a `hint`. As a helper, `activity`
+  posts under its session name (with `--context`/`--faq`), `next` returns the relay events
+  like `relay-next`, `show` answers `helper-unsupported` (no relay route for ring/cards).
+- **One helper credential per session:** `helper-import [--as NAME]` writes
+  `~/.voicehook/helpers/<name>.json` (0600), never the shared relay.json. Without `--as` the
+  entry is named by `VOICEHOOK_SESSION_LABEL` or the credential's label and bound to the
+  importing session; `--as NAME` (over ssh) is used by the session with
+  `VOICEHOOK_SESSION_LABEL=NAME` or as the only unbound entry. Commands and hooks take only
+  their own entry, never one of another session. The main join's relay.json (multi-session
+  hook feed) is unchanged; an old helper relay.json still works, with a warning.
+- **`status --faq`:** per item (max 3 each, `meta`), no cap per call; the false relay warning
+  is gone (a warning only when a pair really stays behind). Help and `[hint]` say "3x directly
+  after the item, max 3 per item".
+- **Only routed call events reach a session** (Oliver: "Warum lesen alle Sessions den
+  Call-Log mit?"): mid-turn events and Stop hints with his sentences only for the router, the
+  session that owns the join: session id AND agent process (the join records
+  `owner_agent_pid`, the hook compares; a second process with the same session id, e.g.
+  `claude --continue`, gets nothing). Board reminders ("Du hast kein Board", "Dein Board ist N
+  Min alt") only for a session that takes part: its own helper credential, its own board, or
+  a subagent of the router. Helpers keep getting what is routed to them (user_turn by name,
+  answers to their questions, question_check). A session without join and credential gets
+  nothing; its outgoing feed lines are unchanged.
+- **503 from the relay** (v4 #586: main agent briefly away) = wait and retry with backoff
+  (0.5/1/2 s; the hook's child 1/2 s), never a dead credential (dead: 401/403/410).
+
 ## 0.22.1 (2026-10-21)
 
 Live-Bug (Call onyx-calm-lumen-P6PG): the main agent got `helper_decision` #21 as from
