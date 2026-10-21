@@ -20,6 +20,24 @@ short-lived session handle that ends with the call.
 The skill runs by itself when you share an invite link, or by hand as
 `/voicehook-join:voicehook-join`.
 
+### Cursor
+
+The same folder is also a Cursor plugin: `.cursor-plugin/plugin.json` ships the
+`voicehook-join` skill and points at the same `.mcp.json`, and the repository root has
+`.cursor-plugin/marketplace.json`. Without the plugin, add the MCP server to Cursor's
+`mcp.json` by hand:
+
+```json
+{
+  "mcpServers": {
+    "voicehook": {
+      "type": "http",
+      "url": "https://voicehook.ai/mcp"
+    }
+  }
+}
+```
+
 ## Tools (MCP server `voicehook`)
 
 | tool | what it does |
@@ -74,6 +92,7 @@ https://voicehook.ai/privacy
 ## Files
 
 - `.mcp.json`: the voicehook MCP server (HTTP, no headers)
+- `.cursor-plugin/plugin.json`: the Cursor manifest (same skill, same `.mcp.json`)
 - `skills/voicehook-join/SKILL.md`: the skill, same text as https://voicehook.ai/agent/mcp/SKILL.md
 
 License: MIT. More: https://voicehook.ai/agent
