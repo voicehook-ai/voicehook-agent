@@ -459,6 +459,15 @@ def output(event_name: str, text: str) -> dict:
 # --------------------------------------------------------------------------- #
 # hook entry
 # --------------------------------------------------------------------------- #
+_SUB_RX = re.compile(r"^(.+)-a[0-9a-f]{8}$")
+
+
+def base_key(skey: str) -> str:
+    """Session hash of a board key (a subagent's key is `<session hash>-a<8 hex>`)."""
+    m = _SUB_RX.match(str(skey or ""))
+    return m.group(1) if m else str(skey or "")
+
+
 def _session_key(event: dict) -> str:
     return vmulti.session_hash(event.get("session_id")) or vmulti.own_session_hash()
 
@@ -551,12 +560,13 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
         if not isinstance(event, dict):
             return None
         name_ev = str(event.get("hook_event_name") or "")
-        rel = vmulti.load_relay(now)
+        rel = vmulti.load_relay(now, session=_session_key(event))  # 0.22.2: own helper entry
         if rel is None:
             return None
         skey = _session_key(event)
         agent = str(event.get("agent_id") or "").strip()
-        if not skey or (skey == str(rel.get("owner_session") or "") and not agent):
+        if not skey or (skey == str(rel.get("owner_session") or "") and not agent
+                        and not rel.get("helper")):
             return None  # the joining session: own board (status_due), own `next`
         if agent:  # 0.21.1: a subagent (Agent tool) has its own board, name, state, answers
             skey = f"{skey}-a{vmulti._h(agent, 'vh-agent')[:8]}"
@@ -1083,8 +1093,10 @@ def run_job(job: dict, rel: dict | None = None) -> bool:
     never overwrites a newer state: no sticky `arbeitet`). `gone`: clear the board and
     post `leerlauf`. True when something was sent."""
     from . import relayops
-    rel = rel if rel is not None else vmulti.load_relay()
-    if not isinstance(job, dict) or rel is None:
+    if not isinstance(job, dict):
+        return False
+    rel = rel if rel is not None else vmulti.load_relay(session=base_key(str(job.get("skey") or "")))
+    if rel is None:
         return False
     frm = relayops.check_from(str(job.get("from") or ""))
     vact._private_dir(vact.state_root())
@@ -1223,17 +1235,26 @@ def watch_step(now: float | None = None, alive=None) -> tuple[list[dict], int] |
     (Claude Code sends no Stop after Esc)."""
     t = time.time() if now is None else now
     alive = alive or vact._pid_alive
-    rel = vmulti.load_relay(t)
-    if rel is None:
+    rooms: dict[str, str | None] = {}
+
+    def room_of(skey: str) -> str | None:
+        """Room of the relay of that session (0.22.2: each helper has its own entry)."""
+        b = base_key(skey)
+        if b not in rooms:
+            r = vmulti.load_relay(t, session=b)
+            rooms[b] = _room(r) if r is not None else None
+        return rooms[b]
+
+    if vmulti.load_relay(t) is None and not vmulti._helper_entries():
         return None
-    room = _room(rel)
 
     def step(st: dict):
         jobs: list[dict] = []
         live = 0
         for skey, me in st["sessions"].items():
             name = str(me.get("from") or me.get("name") or "")
-            if me.get("room") != room or me.get("gone") or not name:
+            room = room_of(skey)
+            if room is None or me.get("room") != room or me.get("gone") or not name:
                 continue
             quiet = t - _float(me.get("seen"))
             pid = int(_float(me.get("pid")))
@@ -1336,7 +1357,7 @@ def clear_board(rel: dict, frm: str) -> bool:
 def idle_step(skey: str, now: float | None = None, clear=clear_board) -> float | None:
     """One sleeper check: seconds to sleep on, or None (done: cleared, resumed or gone)."""
     t = time.time() if now is None else now
-    rel = vmulti.load_relay(t)
+    rel = vmulti.load_relay(t, session=base_key(skey))
 
     def step(st: dict):
         me = st["sessions"].get(skey)

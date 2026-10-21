@@ -205,7 +205,7 @@ def test_helper_import_writes_relay_without_foreign_owner(monkeypatch, capsys):
 def test_helper_import_accepts_relay_json_copy_and_rejects_garbage(monkeypatch):
     src = {"url": URL, "token": TOKEN, "room": "room-a", "expires_at": 9_999_999_999,
            "owner_pid": 424242, "owner_session": "abc"}
-    path = vhelp.import_credential(json.dumps(src))
+    path = vhelp.import_credential(json.dumps(src))["path"]  # 0.22.2: {path, name, bound}
     d = json.loads(Path(path).read_text())
     assert d["owner_pid"] == 0 and d["room"] == "room-a"
     for bad in ("", "nope", json.dumps({"url": URL})):

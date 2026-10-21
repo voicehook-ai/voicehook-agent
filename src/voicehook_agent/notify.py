@@ -335,13 +335,18 @@ def _skey(event: dict) -> str:
         "cwd-" + vmulti._h(str(event.get("cwd") or ""), "vh-cwd")
 
 
+def _base(skey: str) -> str:
+    from . import board
+    return board.base_key(skey)
+
+
 def route(skey: str) -> tuple[str, Path | None, dict | None]:
     """('own', join dir, None) | ('relay', None, relay) | ('bridge', None, None) | ('', ...)."""
     from . import multisession as vmulti
-    rel = None if vmulti.relay_disabled() else vmulti.load_relay()
+    rel = None if vmulti.relay_disabled() else vmulti.load_relay(session=_base(skey))
     owner = str(rel.get("owner_session") or "") if rel else ""
-    if rel is not None and owner and owner != skey:
-        return "relay", None, rel
+    if rel is not None and (rel.get("helper") or (owner and owner != skey)):
+        return "relay", None, rel  # 0.22.2: an own helper entry is always the relay
     env_session = bool((os.environ.get("VOICEHOOK_SESSION") or "").strip())
     d = vact.target_dir()
     if d is not None and (env_session or not vact._foreign(vact.dir_owner(d), skey)):
@@ -582,7 +587,7 @@ def _decide(job: dict, body: dict) -> dict:
         if job.get("route") == "relay":
             from . import multisession as vmulti
             from . import relayops as vrelayops
-            rel = vmulti.load_relay()
+            rel = vmulti.load_relay(session=_base(str(job.get("skey") or "")))
             if rel is None:
                 return {"ok": False}
             frm = vrelayops.check_from(str(job.get("from") or ""))

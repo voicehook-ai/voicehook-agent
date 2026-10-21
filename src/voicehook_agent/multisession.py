@@ -62,6 +62,7 @@ from pathlib import Path
 from . import activity as vact
 
 RELAY_NAME = "relay.json"
+HELPERS_DIR = "helpers"  # 0.22.2: helpers/<name>.json, one helper credential per session
 DEAD_NAME = "relay.dead"
 STATE_NAME = "relay-state.json"
 MINT_PATH = "/api/bridge/activity/relay-token"
@@ -211,10 +212,10 @@ def _is_local(d: dict) -> bool:
     return d.get("kind") == LOCAL
 
 
-def _read_raw() -> dict | None:
-    """relay.json as dict, or None when missing, a symlink, not ours, readable by others
-    or not valid."""
-    path = relay_path()
+def _read_raw(path: Path | None = None) -> dict | None:
+    """relay.json (or a 0.22.2 helper entry) as dict, or None when missing, a symlink, not
+    ours, readable by others or not valid."""
+    path = relay_path() if path is None else path
     try:
         st = os.lstat(path)
     except OSError:
@@ -238,24 +239,30 @@ def _read_raw() -> dict | None:
     return d
 
 
-def _is_dead(token: str) -> bool:
+DEAD_KEEP = 20  # 0.22.2: relay.dead keeps the hashes of the last dead tokens, one per line
+
+
+def _dead_hashes() -> list[str]:
     try:
-        return (vact.state_root() / DEAD_NAME).read_text(encoding="utf-8").strip() == _token_hash(token)
+        raw = (vact.state_root() / DEAD_NAME).read_text(encoding="utf-8")
     except OSError:
-        return False
+        return []
+    return [x.strip() for x in raw.splitlines() if x.strip()]
 
 
-def load_relay(now: float | None = None) -> dict | None:
-    """A usable relay.json (see _read_raw), not expired, owner alive, not marked dead."""
-    d = _read_raw()
+def _is_dead(token: str) -> bool:
+    return _token_hash(token) in _dead_hashes()
+
+
+def _usable(d: dict | None, path: Path, t: float) -> dict | None:
+    """d when not expired, its owner pid alive and its token not marked dead."""
     if d is None:
         return None
-    t = time.time() if now is None else now
     if "expires_at" not in d and d.get("expires_in") is not None:
         # 0.21.1: a raw `helper-credential` answer copied into relay.json by hand (instead
         # of `helper-import`): valid for expires_in from the file's mtime, no owner
         try:
-            d = {**d, "expires_at": os.lstat(relay_path()).st_mtime + float(d["expires_in"])}
+            d = {**d, "expires_at": os.lstat(path).st_mtime + float(d["expires_in"])}
         except (OSError, TypeError, ValueError):
             return None
     try:
@@ -271,11 +278,139 @@ def load_relay(now: float | None = None) -> dict | None:
     return d
 
 
+def load_main_relay(now: float | None = None) -> dict | None:
+    """The machine's relay.json (the multi-session relay of a join, or a legacy pre-0.22.2
+    `helper-import`): usable (see _read_raw), not expired, owner alive, not marked dead."""
+    t = time.time() if now is None else now
+    return _usable(_read_raw(), relay_path(), t)
+
+
+def load_relay(now: float | None = None, *, session: str | None = None) -> dict | None:
+    """The relay this session uses (0.22.2): its OWN helper entry (helpers/<name>.json, see
+    load_helper) first, else relay.json (load_main_relay). `session` = session hash of the
+    caller (the hook passes the one of its event); default the calling agent session."""
+    h = load_helper(now, session=session)
+    return h if h is not None else load_main_relay(now)
+
+
+def is_legacy_helper(d: object) -> bool:
+    """A pre-0.22.2 `helper-import` in relay.json: ONE credential for every session of the
+    machine (the last import won for all). Remote, no owner pid, no owner session."""
+    return (isinstance(d, dict) and not d.get("helper") and not _is_local(d)
+            and not int(d.get("owner_pid") or 0) and not d.get("owner_session"))
+
+
+LEGACY_WARN = ("[warn] ~/.voicehook/relay.json is a shared helper credential (helper-import "
+               "before 0.22.2): every helper session of this machine posts under its one "
+               "sender. Import one per session: `... | voicehook-agent helper-import --as <name>`")
+
+
+# --------------------------------------------------------------------------- #
+# 0.22.2 helper entries: one helper credential per session
+# --------------------------------------------------------------------------- #
+def helpers_dir() -> Path:
+    return vact.state_root() / HELPERS_DIR
+
+
+def helper_key(name: object) -> str:
+    """File name of a helper entry: [A-Za-z0-9._-], max 40 chars, '' when nothing is left."""
+    k = re.sub(r"[^A-Za-z0-9._-]+", "-", str(name or "").strip()).strip("-.")
+    return k[:SESSION_LABEL_MAX].strip("-.")
+
+
+def _helper_entries() -> list[tuple[Path, dict]]:
+    """All valid helper entries (path, data), sorted by name. Never raises."""
+    d = helpers_dir()
+    try:
+        st = os.lstat(d)
+        if not stat.S_ISDIR(st.st_mode) or (hasattr(os, "getuid") and st.st_uid != os.getuid()):
+            return []
+        names = sorted(os.listdir(d))
+    except OSError:
+        return []
+    out: list[tuple[Path, dict]] = []
+    for n in names:
+        if not n.endswith(".json"):
+            continue
+        p = d / n
+        e = _read_raw(p)
+        if e is not None and not _is_local(e) and e.get("helper") == n[:-5]:
+            out.append((p, e))
+    return out
+
+
+def write_helper(name: str, url: str, token: str, room: str, expires_in: float | None, *,
+                 owner_session: str | None = None, label: str = "",
+                 now: float | None = None) -> Path:
+    """helpers/<key>.json (0600, dir 0700, atomic): the credential of ONE helper session.
+    owner_session (default: the calling agent session, '' outside one) binds it to that
+    session; another entry bound to the same session is removed. ValueError on bad input."""
+    key = helper_key(name)
+    if not key:
+        raise ValueError("helper-import: no name (pass --as <name>)")
+    url = str(url or "").strip()
+    if not _url_ok(url):
+        raise ValueError("relay url must be https (http only for localhost)")
+    if not isinstance(token, str) or not token.strip() or any(c.isspace() for c in token.strip()):
+        raise ValueError("relay token missing")
+    t = time.time() if now is None else now
+    try:
+        ttl = float(expires_in) if expires_in is not None else 12 * 3600.0
+    except (TypeError, ValueError):
+        ttl = 12 * 3600.0
+    owner = own_session_hash() if owner_session is None else str(owner_session or "")
+    data = {"helper": key, "url": url, "token": token.strip(), "room": str(room or ""),
+            "label": str(label or "")[:MACHINE_LABEL_MAX], "expires_at": int(t + max(0.0, ttl)),
+            "owner_pid": 0, "owner_session": owner, "written_at": int(t)}
+    vact._private_dir(vact.state_root())
+    vact._private_dir(helpers_dir())
+    path = helpers_dir() / f"{key}.json"
+    if owner:
+        for other, e in _helper_entries():
+            if other != path and e.get("owner_session") == owner:
+                try:
+                    other.unlink()
+                except OSError:
+                    pass
+    vact._write_private(path, json.dumps(data))
+    return path
+
+
+def load_helper(now: float | None = None, *, session: str | None = None) -> dict | None:
+    """The helper entry of THIS session, never the one of another session:
+    1. $VOICEHOOK_SESSION_LABEL names an entry (helpers/<key of the label>.json),
+    2. else an entry bound to this session (owner_session = session hash: `helper-import`
+       ran inside this session),
+    3. else the only entry bound to no session (imported over ssh, outside any session:
+       `helper-import --as <name>`); with several unbound entries: none (ambiguous).
+    None otherwise (load_relay then takes relay.json)."""
+    entries = _helper_entries()
+    if not entries:
+        return None
+    t = time.time() if now is None else now
+    skey = own_session_hash() if session is None else str(session or "")
+    want = helper_key(os.environ.get(LABEL_ENV))
+    if want:
+        for p, e in entries:
+            if e.get("helper") == want:
+                return _usable(e, p, t)
+    if skey:
+        for p, e in entries:
+            if e.get("owner_session") == skey:
+                return _usable(e, p, t)
+    free = [(p, e) for p, e in entries if not e.get("owner_session")]
+    if len(free) == 1:
+        return _usable(free[0][1], free[0][0], t)
+    return None
+
+
 def mark_dead(token: str) -> None:
     """401/403/410 from the relay: readers skip this token. The file stays (not ours)."""
     try:
         vact._private_dir(vact.state_root())
-        vact._write_private(vact.state_root() / DEAD_NAME, _token_hash(token))
+        h = _token_hash(token)
+        keep = [x for x in _dead_hashes() if x != h][-(DEAD_KEEP - 1):] + [h]
+        vact._write_private(vact.state_root() / DEAD_NAME, "\n".join(keep))
     except OSError:
         pass
 
@@ -689,12 +824,14 @@ def _admit(skey: str, kind: str, text: str, event: dict, t: float) -> str | None
     return _with_state(step)
 
 
-def post_line(text: str, timeout: float = POST_TIMEOUT_S) -> int | None:
-    """POST {text} to the relay of the current relay.json (Bearer, never in the URL).
-    HTTP status (None: no file / network error). 401/403/410 mark the token dead."""
+def post_line(text: str, timeout: float = POST_TIMEOUT_S, *,
+              session: str | None = None) -> int | None:
+    """POST {text} to the relay of this session (load_relay: own helper entry, else
+    relay.json; Bearer, never in the URL). HTTP status (None: no relay / network error).
+    401/403/410 mark the token dead."""
     import urllib.error
     import urllib.request
-    rel = load_relay()
+    rel = load_relay(session=session)
     if rel is None or _is_local(rel):
         return None
     req = urllib.request.Request(
@@ -714,7 +851,7 @@ def post_line(text: str, timeout: float = POST_TIMEOUT_S) -> int | None:
     return status
 
 
-def _spawn_post(text: str) -> None:
+def _spawn_post(text: str, session: str = "") -> None:
     """Detached `voicehook-agent-hook relay-post` (text on stdin, never argv), isolated
     from the cwd of the reporting session (vact.child_argv: -I, cwd = state dir)."""
     import subprocess
@@ -724,7 +861,8 @@ def _spawn_post(text: str) -> None:
                              stderr=subprocess.DEVNULL, start_new_session=True,
                              cwd=vact.child_cwd())
         assert p.stdin is not None
-        p.stdin.write(json.dumps({"text": text}).encode("utf-8"))
+        p.stdin.write(json.dumps({"text": text, **({"session": session} if session else {})})
+                      .encode("utf-8"))
         p.stdin.close()
     except Exception:  # noqa: BLE001
         return
@@ -754,7 +892,10 @@ def relay_post_main(raw: str) -> int:
     try:
         d = json.loads(raw or "{}")
         text = str(d.get("text") or "") if isinstance(d, dict) else ""
-        if text:
+        skey = str(d.get("session") or "") if isinstance(d, dict) else ""
+        if text and skey:
+            post_line(text, session=skey)  # 0.22.2: the helper entry of that session
+        elif text:
             post_line(text)
     except Exception:  # noqa: BLE001, S110 - detached child, nobody to tell
         pass
@@ -765,17 +906,16 @@ def handle_event(raw: str, now: float | None = None, post=None) -> str | None:
     """Hook entry: the line handed to `post` (default: detached POST) or None. Silent
     without relay.json, for the joining session itself, and on anything unexpected."""
     try:
-        rel = load_relay(now)
-        if rel is None:
-            return None
         event = json.loads(raw) if raw and raw.strip() else {}
         if not isinstance(event, dict):
             return None
-        skey = session_hash(event.get("session_id")) or own_session_hash()
-        if not skey:
-            skey = "cwd-" + _h(str(event.get("cwd") or ""), "vh-cwd")
+        sess = session_hash(event.get("session_id")) or own_session_hash()
+        rel = load_relay(now, session=sess)  # 0.22.2: own helper entry first
+        if rel is None:
+            return None
+        skey = sess or "cwd-" + _h(str(event.get("cwd") or ""), "vh-cwd")
         own = str(rel.get("owner_session") or "")
-        if own and own == skey:
+        if own and own == skey and not rel.get("helper"):
             return None  # the joining session: its own hook already feeds the call
         got = classify(event)
         if got is None:
@@ -788,6 +928,8 @@ def handle_event(raw: str, now: float | None = None, post=None) -> str | None:
             post(line)
         elif _is_local(rel):
             append_local(rel, line)
+        elif rel.get("helper"):
+            _spawn_post(line, sess)  # 0.22.2: the child loads the same helper entry
         else:
             _spawn_post(line)
         return line

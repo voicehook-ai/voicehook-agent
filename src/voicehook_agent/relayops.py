@@ -141,17 +141,29 @@ def _socket_answers() -> bool:
 
 
 def client_relay(explicit_session: str | None) -> dict | None:
-    """The relay.json a helper command should use, or None (talk to the own join)."""
+    """The relay a command of this session uses, or None (talk to the own join). ONE rule
+    for every helper-capable command (decide, status board, activity, next, show; 0.22.2):
+    1. `--session` given, or VOICEHOOK_NO_RELAY=1: never the relay (own join).
+    2. This agent session runs its own join (session.json names its session hash): own join.
+    3. Its own helper credential (helpers/<name>.json, multisession.load_helper:
+       $VOICEHOOK_SESSION_LABEL names it, or it was imported in this session, or the only
+       unbound one): the relay.
+    4. relay.json of a join on this machine (or a legacy pre-0.22.2 helper-import): the
+       relay, except for the session that wrote it; outside an agent session only when no
+       join control socket answers.
+    5. Nothing: None (the caller then reports no-session with a hint)."""
     if explicit_session or vmulti.relay_disabled():
+        return None
+    own = vmulti.own_session_hash()
+    if own and _own_join_running(own):
         return None
     rel = vmulti.load_relay()
     if rel is None:
         return None
-    own = vmulti.own_session_hash()
-    if own:
-        if own == str(rel.get("owner_session") or "") or _own_join_running(own):
-            return None
+    if rel.get("helper"):
         return rel
+    if own:
+        return None if own == str(rel.get("owner_session") or "") else rel
     return None if _socket_answers() else rel
 
 
@@ -466,6 +478,19 @@ def remote_status(rel: dict, frm: str, body: dict, timeout: float = HTTP_TIMEOUT
     if status >= 300 or out.get("ok") is False:
         return _err(status, out)
     return {"ok": True}
+
+
+def base_url(rel: dict) -> str:
+    """<base>/api/activity/relay (the activity line endpoint) from the relay url."""
+    return endpoint(rel, "x")[:-2]
+
+
+def remote_activity(rel: dict, frm: str, body: dict, timeout: float = HTTP_TIMEOUT_S) -> dict:
+    """0.22.2: one activity line of a helper {text, context?, faq?} under `from`."""
+    status, out = _http(rel, "POST", base_url(rel), {"from": frm, **body}, timeout)
+    if status >= 300 or out.get("ok") is False:
+        return _err(status, out)
+    return {"ok": True, **({"line": out["line"]} if isinstance(out.get("line"), str) else {})}
 
 
 def remote_next(rel: dict, frm: str, timeout: float) -> list[dict]:
