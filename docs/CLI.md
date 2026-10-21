@@ -1078,13 +1078,16 @@ The call keeps mishearing a word (a product, a name, jargon)? Teach it:
 ```sh
 voicehook-agent vocab add "Trello" --wrong "Erzähli"   # --wrong is repeatable
 voicehook-agent vocab add "Zapmail"                    # plain word, no known mishearing
+voicehook-agent vocab add Trello Lemlist "Sales Engine" # several words: ONE request (0.22.2)
 ```
 
 The running join POSTs `/api/bridge/vocab` (server voicehook-v4) with its own operator
 credential (WebRTC: its LiveKit token, bridge transport: its session), never as the user.
 The server adds to the vocabulary of the account that pays for the call: add only, the
 agent can neither read nor delete the list (the user manages it on https://voicehook.ai/konto).
-Max 20 entries per request, 100 per call, 50 characters each. Output: one JSON line
+Max 50 entries per request (several words = one batch; the server counts 10 requests per call
+in 10 minutes, so never add words one by one), 100 per call, 50 characters each; `--wrong`
+only with a single word. Output: one JSON line
 `{"ok": true, "type": "vocab", "added": {"terms", "fixes"}, "total", "call_left", "reloaded"}`;
 errors `{"ok": false, "type": "vocab", "status", "error"}` (409 = guest call without an
 account, 429 = limit, 410 = call ended). Corrections apply right away; in normal mode the
