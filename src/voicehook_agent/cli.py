@@ -889,14 +889,19 @@ async def _run_helper_pump(room, ctl: _Control, stop: asyncio.Event) -> None:
     async def publish_status(payload: dict) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         await room.local_participant.publish_data(data, reliable=True, topic="operator.status")
+        ctl.ledger.board(ctl.ident, payload)  # `board` (Router-Fund 21.10.): our own packets never come back
+
+    async def decide(body: dict) -> dict:
+        out = await _decide_rpc(ctl, body)
+        ctl.ledger.created(body, out, frm=str(body.get("sender") or ""))  # `board` (Router-Fund 21.10.)
+        return out
 
     def append_activity(line: str) -> None:
         if ctl.activity_path is not None:
             vactivity.append_line(ctl.activity_path.parent, vactivity.scrub_line(line))
 
     await pump.run(http, publish_status=publish_status,
-                   decide=lambda body: _decide_rpc(ctl, body),
-                   append_activity=append_activity, stop=stop)
+                   decide=decide, append_activity=append_activity, stop=stop)
 
 
 def _quit_signals() -> list:
@@ -1257,6 +1262,7 @@ Examples:
 _SAY_MODES = ("append", "overwrite", "revise")
 SAY_DEFAULT_MODE = "append"
 _DECIDE_RPC = "vh.decide"  # decisions.RPC_METHOD on the worker (Decision Board)
+_LIST_RPC = "vh.decisions"  # decisions.RPC_LIST: open/recent decisions + helper boards
 DECIDE_CONTEXT_MAX = 1500  # 0.21.0 decisions.CONTEXT_MAX: background for Delta, never shown
 DECIDE_RECENT_MAX = 600    # 0.21.0 decisions.RECENT_MAX: last turn of the asking session
 
@@ -1403,6 +1409,37 @@ async def _delta_rpc(ctl: _Control, req: dict) -> dict:
             if not out.get("ok") and "detail" in out:
                 out = {**out, "error": out.pop("detail")}
             return {**out, "type": "delta"}
+        await asyncio.sleep(0.25)
+
+
+async def _list_rpc(ctl: _Control) -> dict:
+    """Router-Fund 21.10.: the call's decisions and helper boards from the server, read-only: WebRTC =
+    RPC vh.decisions to the voicebot, bridge = GET /api/bridge/decisions. Never logs content."""
+    room = await ctl.wait_room(10.0)
+    if room is None:
+        return {"ok": False, "error": "not connected to the room (yet)"}
+    list_decisions = getattr(room, "list_decisions", None)
+    if list_decisions is not None:  # bridge
+        try:
+            return await list_decisions()
+        except vtransport.BridgeError as e:
+            return {"ok": False, "status": e.status or 503, "error": str(e)}
+    worker = next((p.identity for p in room.remote_participants.values()
+                   if _kind_label(p) == "agent"), None)
+    if worker is None:
+        return {"ok": False, "status": 503, "error": "voicebot not in the call, try again shortly"}
+    deadline = time.monotonic() + 8.0
+    while True:
+        try:
+            raw = await room.local_participant.perform_rpc(
+                destination_identity=worker, method=_LIST_RPC, payload="{}", response_timeout=8.0)
+            out = json.loads(raw or "{}")
+        except Exception as e:  # noqa: BLE001  RPC error/timeout/bad JSON: only the class
+            return {"ok": False, "status": 503, "error": f"decisions rpc failed: {type(e).__name__}"}
+        if not isinstance(out, dict):
+            return {"ok": False, "status": 502, "error": "bad answer"}
+        if out.get("status") != 425 or time.monotonic() >= deadline:
+            return out
         await asyncio.sleep(0.25)
 
 
@@ -1564,7 +1601,8 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         ctl.watchdog.touch()
         return await _send_data(ctl, req)
     if cmd == "board_list":  # 0.21.4 `voicehook-agent board` / `decide --list`
-        return ctl.ledger.listing(only_open=bool(req.get("open")))
+        # Router-Fund 21.10.: the server's listing (all helpers of the room) merged with our own ledger
+        return ctl.ledger.merged(await _list_rpc(ctl), only_open=bool(req.get("open")))
     if cmd == "vocab":
         # 0.21.0: teach the call's speech recognition (server adds to the payer's account)
         ctl.watchdog.touch()
@@ -2046,6 +2084,9 @@ async def _serve_relay_request(ctl: _Control, dir_: Path, obj: dict) -> None:
                 payload["state"] = helper["state"]
             data = json.dumps({**payload, "sub": sender}, ensure_ascii=False).encode("utf-8")
             await room.local_participant.publish_data(data, reliable=True, topic="operator.status")
+            ledger = getattr(ctl, "ledger", None)  # `board` (Router-Fund 21.10.)
+            if ledger is not None:
+                ledger.board(ctl.ident, {**payload, "sub": sender})
             res = {"ok": True}
     vrelayops.append_jsonl(vrelayops.answer_path(dir_, frm), {"type": "result", "rid": rid, **res})
 
@@ -4423,9 +4464,10 @@ def main(argv: list[str] | None = None) -> None:
                           help="mark for a later account memory (accepted, no effect yet)")
         _add_session(p_dn)
     p_board = sub.add_parser(
-        "board", help="0.21.4: what is on the call's boards, as seen by your join: open and "
-        "recent decisions (number, asking label, question, options, hidden context/faq, "
-        "answer) plus your own board and the boards of helpers / other operators")
+        "board", help="0.21.4: what is on the call's boards (read-only overview for the main "
+        "agent): open and recent decisions of every agent and helper (number, asking label, "
+        "question, options, hidden context, answer, age) from the server, plus your own board "
+        "and every helper board of the room (name, doing/open/done, age of the last update)")
     p_board.add_argument("--open-only", action="store_true", default=False,
                          help="only the open decisions")
     _add_session(p_board)

@@ -18,6 +18,21 @@ the call runs. Delta should know as much as possible and answer himself.
   account memory and has no effect yet. Needs voicehook-v4 with `deltanotes` (older server:
   `delta rpc failed`).
 
+## 0.22.3 (2026-10-21)
+
+Router-Fund (Oliver 21.10.): the main join (WebRTC) saw neither the boards nor the open
+questions of its helpers; `voicehook-agent board` gave boards=[], recent=[], open=[] with "server
+has no decision listing for operators". The server had a listing for open questions since
+voicehook-v4 #519 (RPC `vh.decisions`), the CLI never asked it; helper boards the join itself
+published (local relay, server hub) never came back to its own ledger.
+
+- **`board` / `decide --list`:** asks the server (RPC `vh.decisions`, bridge
+  `GET /api/bridge/decisions`) and merges it with the join's ledger: `open` (all helpers),
+  `recent`, `boards` (every helper board of the room with `name` and `age_s`), `source`.
+  Server unreachable or refused: the ledger as before, `note` names the reason.
+- **Ledger:** helper boards and questions the join publishes for the server hub (pump) and
+  the local relay are recorded too (fallback without the server listing).
+
 ## 0.22.2 (2026-10-21)
 
 Live findings with 0.22.1 as a helper (`helper-import`): `status` went over the relay,
@@ -52,6 +67,7 @@ in `meta`, and capped a call at 6 pairs although 3 per item are mandatory.
   nothing; its outgoing feed lines are unchanged.
 - **503 from the relay** (v4 #586: main agent briefly away) = wait and retry with backoff
   (0.5/1/2 s; the hook's child 1/2 s), never a dead credential (dead: 401/403/410).
+
 ## 0.22.1 (2026-10-21)
 
 Live-Bug (Call onyx-calm-lumen-P6PG): the main agent got `helper_decision` #21 as from
