@@ -25,10 +25,10 @@ MCP/bridge = one agent in the call; activity lines are only what that agent writ
 
 ## Hard rules (read first, always)
 
-- **`create_call`: the link is the LAST line of your turn; a background watcher joins for you.** **Never delegate `create_call` to a subagent, a fork or a background job.** Create the call in the main thread of the session your user is talking to and give `share_text` as the last message of that thread; a link produced in a subthread never reaches your user.
-  - Never block in a foreground `join` after the link: while a tool call runs, many clients (Claude Code too) do not show the text before it, and once your turn ends you sleep until something wakes you. The call starts only once your user has opened the link (no agent sits alone in an empty room).
-  - Client with background commands that wake you when they exit (Claude Code: Bash with `run_in_background: true`): FIRST start the background watcher from https://voicehook.ai/agent/REFERENCE.md ("Background watcher after create_call"), THEN end your turn with share_text, verbatim, as its very last line. The watcher joins as soon as your user is in the call (up to the 30 min link expiry) and exits; that wakes you: continue with its session (file `$D/s`) as `session` in every tool, or call `join` with `operator_invite_url` and `greet: false` (returns at once, replaces the watcher's session).
-  - Client without background commands (claude.ai chat, remote apps): end your turn with share_text, verbatim, as its very last line; when your user says the link is open, call `join` (waits up to 50 s; `waiting_for_human` = not yet: call it again).
+- **HARD RULE after `create_call`: join again until connected, never end your turn before, then keep `next` going.** (In Claude Code the background watcher below does the joining and wakes you; only there you end the turn with the link.) (Oliver 21.10.2026: agents ended their turn after one `waiting_for_human` and fell asleep; the call had no brain.) **Never delegate `create_call` to a subagent, a fork or a background job.** Create the call in the main thread of the session your user is talking to; a link produced in a subthread never reaches your user.
+  - **Client without background commands (claude.ai chat, Claude Desktop, remote apps, Cursor, ChatGPT):** in the SAME answer, FIRST write `share_text`, verbatim, as text to your user (text you write before a tool call is shown before it runs), THEN call `join` with `operator_invite_url` and repeat it at once after every `waiting_for_human` (it waits up to 200 s in Claude clients, else 50 s, and its `next_action` says the same) until it returns `session`. Never end your turn while the answer is `waiting_for_human`. Then the Hard rules checklist and the `next` loop. Only `410` (link expired after 30 min) ends the joining: tell your user and ask whether to start a new call.
+  - **Client with background commands that wake you when they exit (Claude Code: Bash with `run_in_background: true`):** FIRST start the background watcher from https://voicehook.ai/agent/REFERENCE.md ("Background watcher after create_call"), THEN end your turn with share_text, verbatim, as its very last line. Never block in a foreground `join` after the link there: in Claude Code the watcher does the joining, and its exit wakes you. The watcher joins as soon as your user is in the call (up to the 30 min link expiry) and exits: continue with its session (file `$D/s`) as `session` in every tool, or call `join` with `operator_invite_url` and `greet: false` (returns at once, replaces the watcher's session).
+  - **`local_cli_hint` in `create_call` or `join`** (only a local Claude Code gets it): the CLI from "Which path" keeps you in the call from a background process, so you never fall asleep between turns. Offer it to your user; install only with their OK (command in the hint). Cloud and sandbox sessions stay on MCP.
   - Until they have joined, end EVERY message to your user with share_text as the last line. If your client can send a file or a push (e.g. Claude Code SendUserFile / PushNotification), also send the link that way. On 5xx, 503 or a network error call the tool again after 2 s.
 - **Right after `join`, at once** (also with `quiet: true`: quiet only suppresses `notice`, nothing audible). You lead: never wait silently until the human says something.
   1. Greet: `greet` (true by default in `join`) speaks the default greeting in the call language. With greet, skip the greeting `say`. Without greet: right after join, `say` one short greeting in the call language: who you are and that you are listening ("Hi, this is <your label>, I'm in and listening. What's up?" / "Hallo, <your label> hier, ich bin drin und höre zu. Worum geht's?"). If you stay silent, the voicebot announces you after 3 seconds.
@@ -50,13 +50,15 @@ MCP/bridge = one agent in the call; activity lines are only what that agent writ
 1. `create_call` (main agent only, never a subagent): set `lang` to the language of the person you are calling (`de` or `en`, default `de`). One-agent call is the default (`solo` left out or `true`); `solo: false` lets several agents join.
    You get `human_url`, `share_text`, `operator_invite_url`, `room` and `expires_in` (seconds; an unopened link expires, 30 min).
 2. Give your user `share_text` verbatim (it holds `human_url` and the hint to use a normal
-   browser; an app's built-in browser blocks the mic) as the very last line of your turn (Hard rules). The opener
+   browser; an app's built-in browser blocks the mic) as text FIRST, before any join (Hard rules). The opener
    pays from THEIR free allowance or credit, you pay nothing. Never send `operator_invite_url` to anyone.
-3. `join` with `invite_url` = `operator_invite_url`, as the Hard rules say: from the background
-   watcher (started before the link, ends when the person is in), or, without background commands,
-   when your user says the link is open. It waits up to 50 s and returns status `waiting_for_human`
-   (not an error, with `share_text` again) until the person opens the link: join again, until it
-   succeeds or answers `410` (link expired after 30 min: ask your user whether to start a new call).
+3. `join` with `invite_url` = `operator_invite_url`, as the Hard rules say: without background
+   commands right after the link in the same answer, repeated until it returns `session`; in Claude
+   Code from the background watcher (started before the link, ends when the person is in). It waits
+   up to 200 s in Claude clients (else 50 s) and returns status `waiting_for_human` (not an error,
+   with `share_text` again and `next_action`) until the person opens the link: join again at once,
+   never end your turn in between, until it succeeds or answers `410` (link expired after 30 min:
+   ask your user whether to start a new call).
 4. Then the Hard rules checklist and `next` as below.
 
 ## The work cycle: say -> next -> say
@@ -174,7 +176,7 @@ Compare A and B:
 | tool error | do |
 |---|---|
 | `403: operator invite required` / `invalid invite` | ask the user for the full, fresh invite link incl. `?invite=` |
-| status `waiting_for_human` (after `create_call`, not an error) | your user has not opened `human_url` yet: end your message with `share_text`, `join` again at once |
+| status `waiting_for_human` (after `create_call`, not an error) | your user has not opened `human_url` yet: `join` again at once (`next_action`), never end your turn in between; repeat `share_text` in every message to your user |
 | `410: call link expired` | nobody opened `human_url` in time: `create_call` again if the user still wants to talk |
 | `409` (`no human in room`: room empty) / `410` (call over) | 409: tell the user in the chat, call `join` again every 15 s for at most 2 min, then tell the user nobody is in the call and stop; never create a new room, do not ask; 410: tell the user, never rejoin with the old handle |
 | `429` (too many sessions or joins) | wait a minute or ask for a fresh link |

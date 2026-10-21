@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
@@ -12,6 +13,7 @@ import pytest
 from voicehook_agent import cli
 
 JWT = "fake.lk.jwt"  # fake, low entropy (gitleaks)
+PUMP = "hp|fake.pump"  # fake, low entropy (gitleaks)
 
 
 class Resp:
@@ -27,6 +29,7 @@ class Resp:
 
 class FakeClient:
     calls: ClassVar[list] = []
+    answers: ClassVar[list] = []  # optional queue, else `answer`
     answer = Resp(200, {"ok": True, "added": {"terms": 1, "fixes": 1}, "total": {"terms": 3, "fixes": 1},
                         "call_left": 98, "reloaded": True})
 
@@ -41,12 +44,13 @@ class FakeClient:
 
     async def post(self, url, json=None, headers=None, timeout=None):
         FakeClient.calls.append((url, json, headers, self.headers))
-        return FakeClient.answer
+        return FakeClient.answers.pop(0) if FakeClient.answers else FakeClient.answer
 
 
 @pytest.fixture(autouse=True)
 def _fake_http(monkeypatch):
     FakeClient.calls = []
+    FakeClient.answers = []
     FakeClient.answer = Resp(200, {"ok": True, "added": {"terms": 1, "fixes": 1}, "total": {"terms": 3, "fixes": 1},
                                    "call_left": 98, "reloaded": True})
     monkeypatch.setattr(cli.httpx, "AsyncClient", FakeClient)
@@ -107,6 +111,33 @@ def test_bridge_join_uses_its_session():
     ctl.room = Bridge()
     out = asyncio.run(cli._vocab_add(ctl, {"terms": ["Trello"], "fixes": []}))
     assert out["ok"] and sent == [{"terms": ["Trello"], "fixes": []}] and FakeClient.calls == []
+
+
+def test_expired_livekit_token_falls_back_to_pump_token():
+    """Call 20.10.: `vocab add` after >1 h of a WebRTC join -> 404 "unknown or expired
+    session" (LiveKit token expired) while say/status/next still worked. Like notify-me and
+    image cards: on 404 retry once with the helper pump token of this join."""
+    ctl = _ctl()
+    ctl.helper_pump = SimpleNamespace(token=PUMP)
+    FakeClient.answers = [Resp(404, {"detail": "unknown or expired session"}),
+                          Resp(200, {"ok": True, "added": {"terms": 1, "fixes": 0}})]
+    out = asyncio.run(cli._vocab_add(ctl, {"terms": ["Trello"], "fixes": []}))
+    assert out["ok"] is True and out["added"] == {"terms": 1, "fixes": 0}
+    assert [c[2]["authorization"] for c in FakeClient.calls] == [f"Bearer {JWT}", f"Bearer {PUMP}"]
+    assert PUMP not in json.dumps(out) and JWT not in json.dumps(out)
+
+
+def test_valid_livekit_token_sends_once_and_404_without_pump_is_passed_on():
+    ctl = _ctl()
+    ctl.helper_pump = SimpleNamespace(token=PUMP)
+    assert asyncio.run(cli._vocab_add(ctl, {"terms": ["T"], "fixes": []}))["ok"] is True
+    assert len(FakeClient.calls) == 1  # positive control: no second request when the first works
+    ctl.helper_pump = None
+    FakeClient.calls = []
+    FakeClient.answer = Resp(404, {"detail": "unknown or expired session"})
+    out = asyncio.run(cli._vocab_add(ctl, {"terms": ["T"], "fixes": []}))
+    assert out == {"ok": False, "type": "vocab", "status": 404, "error": "unknown or expired session"}
+    assert len(FakeClient.calls) == 1
 
 
 def test_not_connected():

@@ -1275,6 +1275,11 @@ byte-identical copy of https://voicehook.ai/agent/mcp/SKILL.md): Claude joins a 
 as you paste an invite link (`https://voicehook.ai/r/<slug>?invite=...`), or calls you
 itself with `create_call`. Since 1.3.0 the skill also covers `show`, `decide`, explanatory
 images, the call context (`context`, multi-agent rules), `share_text` and retry on 5xx/503.
+Since 1.3.14 (2026-10-21) the hard rule after `create_call`: show `share_text` as text first,
+then `join` again until it returns the session (never end the turn on `waiting_for_human`,
+whose `next_action` says the same), then the `next` loop; Claude Code keeps the background
+watcher. The MCP server tells a local Claude Code in `local_cli_hint` to use this CLI: its
+background process keeps the agent in the call, so it never falls asleep between turns.
 
 In a Claude Code session:
 
