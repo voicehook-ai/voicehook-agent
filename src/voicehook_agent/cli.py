@@ -90,6 +90,10 @@ Several operators (0.11.0): one shared say queue for all agents in the call.
                                      the server picks one per identity, never Delta's
     revise / say_status              only for the say's owner (field owner); transcript
                                      lines carry speaker (display name) + op (identity)
+    revise stale=true (0.21.9)       your queued says older than 60 s (server env
+                                     VOICEHOOK_SAY_STALE_S) were dropped unspoken: items
+                                     [{seq,text}] + hint. Never repeat them; still relevant:
+                                     ONE short current summary (say --mode overwrite)
 
 Shapes in the ring (show): draw when a picture explains better than words.
     show --preset check              preset: arrow_up arrow_right check cross question
@@ -1558,6 +1562,11 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         if ev.get("type") == "user":
             ctl.clock.delivered()
         out = {"ok": True, **ev, "pending": len(ctl.events), **hints}
+        if ev.get("stale") is True and "hint" in ev:
+            # 0.21.9: the stale event's own hint wins; the board hint moves to status_hint
+            if "hint" in hints and hints["hint"] != ev["hint"]:
+                out["status_hint"] = hints["hint"]
+            out["hint"] = ev["hint"]
         if seq is not None:
             out["seq"] = seq  # 0.21.5: the consumer sends {"cmd":"ack","seq":N} once it has it
         return out
@@ -1829,6 +1838,21 @@ def _route_helper_decision(ctl: _Control, payload: dict) -> bool:
     label = snd[: -len(frm) - 2] if snd.endswith(": " + frm) else ""
     ctl.events.put_nowait(relay.helper_decision_event(
         payload, frm=frm, label=label, question=ctl.relay_questions.get(str(payload.get("id") or ""), "")))
+    return True
+
+
+def _route_helper_stale(ctl: _Control, ev: dict) -> bool:
+    """0.21.9: a stale event whose `sender` names a local helper session also goes into that
+    helper's answer file (its `relay-next` / MCP `next` brings it); our own `next` keeps it."""
+    snd = str(ev.get("sender") or "")
+    frm = ctl.relay_senders.get(snd)
+    if not frm or ctl.activity_path is None:
+        return False
+    try:
+        vrelayops.append_jsonl(vrelayops.answer_path(ctl.activity_path.parent, frm), ev)
+    except (OSError, vrelayops.RelayError) as e:
+        print(f"[warn] relay stale event not written ({type(e).__name__})", file=sys.stderr, flush=True)
+        return False
     return True
 
 
@@ -2398,7 +2422,13 @@ async def _connect_and_listen(
                     payload, _own_ids()):
                 return  # 0.11.0: belongs to another operator (server routes per owner)
             if topic == "operator.revise" and ctl is not None:
-                ctl.events.put_nowait(relay.revise_event(payload))
+                ev = relay.revise_event(payload)
+                if ev.get("stale"):
+                    # 0.21.9: one clear line on stdout (count/age only, never the texts);
+                    # the texts go to the agent via next/listen and the mid-turn hook
+                    _emit_meta(relay.stale_meta(ev), stale=True, n=len(ev.get("items") or []))
+                    _route_helper_stale(ctl, ev)
+                ctl.events.put_nowait(ev)
             elif topic == "operator.say_status":
                 if ctl is not None:
                     ctl.say_status.update(payload)
@@ -2438,6 +2468,8 @@ async def _connect_and_listen(
             line = payload.get("text", "")
             if topic == "operator.say_status":
                 line = f"seq={payload.get('seq')} state={payload.get('state')}"
+            elif topic == "operator.revise" and relay.is_stale(payload):
+                line = "stale=true"  # 0.21.9: the dropped texts only via next, never on stdout
             _print_event(json_mode, "system", f"({topic} from {sender}) {line}", topic=topic)
 
     room.on("data_received", _on_data)
@@ -3711,7 +3743,7 @@ def _run_relay_next(args) -> int:
     if not evs:
         _print_json({"ok": True, "type": "timeout", "via": "relay"})
     for ev in evs:
-        _print_json({**ev, "via": "relay"})
+        _print_json({**vrelayops.view(ev), "via": "relay"})
     return 0
 
 

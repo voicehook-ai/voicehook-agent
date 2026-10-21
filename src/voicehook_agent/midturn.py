@@ -17,7 +17,9 @@ he waits for minutes. The productive behavior now lives in the product:
   is shown anyway, marked "kam auch über listen": better once twice than minutes late.
   The hook's additionalContext is the delivery; PostToolUse is used because Claude Code
   reliably shows its additionalContext in the running turn (PreToolUse is not used: an
-  event taken there could get lost). Other events (status_request, revise, voicebot_left,
+  event taken there could get lost). 0.21.9: a stale drop (revise with stale=true: our
+  queued says were older than the server's limit and never spoken) is shown here too.
+  Other events (status_request, a normal revise, voicebot_left,
   ...) stay for `listen` only.
 * Never for subagents (agent_id), other sessions (owner_session) or without a live join.
 
@@ -30,7 +32,8 @@ import os
 import time
 
 ENV_OFF = "VOICEHOOK_MIDTURN_EVENTS"
-TYPES = ("user", "decision", "helper_decision", "onboarding")  # 0.21.8: onboarding
+# 0.21.9: "revise:stale" = only the stale drops (a normal revise stays for `listen`)
+TYPES = ("user", "decision", "helper_decision", "onboarding", "revise:stale")
 WAIT_S = 20.0
 TIMEOUT_S = 1.0
 TEXT_MAX = 400
@@ -57,6 +60,13 @@ def _line(ev: dict, now: float, last_say: float | None) -> str:
     age = _age(ev.get("ts"), now)
     when = f" (vor {age} s)" if age is not None else ""
     typ = ev.get("type")
+    if ev.get("stale") is True:  # 0.21.9: our queued says were dropped unspoken (too old)
+        items = [i for i in (ev.get("items") or []) if isinstance(i, dict)]
+        texts = " ".join(f"\"{str(i.get('text') or '').strip()[:160]}\"" for i in items[:5])
+        more = f" (+{len(items) - 5})" if len(items) > 5 else ""
+        return (f"Veraltet, nicht gesprochen ({len(items)} Aussage(n)): {texts}{more}. "
+                "Nicht wiederholen; falls noch relevant, EINE kurze aktuelle Zusammenfassung "
+                "neu senden (`voicehook-agent say --mode overwrite`).")
     if typ == "onboarding":  # 0.21.8: offer the human to bring in the other sessions
         cmds = ev.get("commands") if isinstance(ev.get("commands"), dict) else {}
         inv = "; ".join(f"`{c}`" for c in (cmds.get("invite") or [])[:4])
@@ -92,8 +102,9 @@ def text_for(reply: dict) -> str | None:
     has_user = any(e.get("type") in ("user", "onboarding") for e in evs)
     tail = ("Antworte ZUERST per `voicehook-agent say \"...\"`, delegiere längere Arbeit an einen "
             "Hintergrund-Agenten, dann weiter." if has_user else
+            "" if all(e.get("stale") is True for e in evs) else
             "Bestätige kurz per `voicehook-agent say`, dann handle danach.")
-    return ("voicehook-Call (neu, während du arbeitest): " + " ".join(lines) + " " + tail
+    return ("voicehook-Call (neu, während du arbeitest): " + " ".join(lines) + (" " + tail if tail else "")
             + f" {RULE} (Neue Ereignisse sind damit gelesen, `listen` bringt sie nicht noch einmal.)")
 
 

@@ -560,3 +560,19 @@ def test_post_state_wartet_falls_back_to_leerlauf_on_old_server(monkeypatch):
     monkeypatch.setattr(relayops, "_http", lambda *a: calls.append(a[3]["state"]) or (200, {}))
     assert board.post_state(ms.load_relay(T0), "T", "wartet") is True and calls == ["wartet"]
     assert "wartet" in board.STATES
+
+
+def test_fetch_answers_remote_keeps_stale_for_relay_next(monkeypatch):
+    """0.21.9: the board hook's GET /next consumes the relay queue; a stale drop must land in
+    the inbox (relay-next / MCP next bring it), not vanish."""
+    _relay()
+    from voicehook_agent import relayops
+    stale = {"type": "revise", "stale": True, "items": [{"seq": 4, "text": "alt"}]}
+
+    def http(rel, m, url, body, to):
+        return 200, {"events": [ANS, stale]}
+    monkeypatch.setattr(relayops, "_http", http)
+    got = REAL_FETCH(ms.load_relay(T0), "A")
+    assert [e.get("id") for e in got] == [ANS["id"]]
+    kept = relayops.take_jsonl(relayops.inbox_path("A"), relayops._is_stale)
+    assert [k["items"][0]["text"] for k in kept] == ["alt"]

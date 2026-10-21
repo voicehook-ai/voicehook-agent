@@ -523,12 +523,31 @@ def _is_decision(o: dict) -> bool:
     return o.get("type") == "decision"
 
 
+def _is_stale(o: dict) -> bool:
+    """0.21.9: the server dropped this helper's queued updates as stale (operator.revise
+    stale=true); `relay-next` / MCP `next` bring it like a decision answer."""
+    from . import relay as vrelay
+    return vrelay.is_stale(o)
+
+
+def _wanted(o: dict) -> bool:
+    return _is_decision(o) or _is_stale(o)
+
+
+def view(ev: dict) -> dict:
+    """An inbox event as the helper sees it: a stale drop gets its clear text and hint."""
+    if not _is_stale(ev):
+        return ev
+    from . import relay as vrelay
+    return {**ev, "type": "revise", **vrelay.stale_fields(ev)}
+
+
 def next_events(rel: dict, frm: str, timeout: float, *, match_id: str | None = None,
                 match_ids: set | None = None, sleep=time.sleep) -> list[dict]:
-    """Decision events for this helper; with match_id (or match_ids, 0.21.3) only those
-    (others stay queued). Waits up to `timeout` seconds; [] on timeout."""
+    """Decision events for this helper (0.21.9: and stale drops of its updates); with
+    match_id (or match_ids, 0.21.3) only those decisions (others stay queued). Waits up to `timeout` seconds; [] on timeout."""
     ids = set(match_ids or ()) | ({match_id} if match_id else set())
-    want = (lambda o: _is_decision(o) and o.get("id") in ids) if ids else _is_decision
+    want = (lambda o: _is_decision(o) and o.get("id") in ids) if ids else _wanted
     match_id = match_id or (next(iter(ids)) if ids else None)
     deadline = time.monotonic() + max(0.0, timeout)
     inbox = inbox_path(frm)

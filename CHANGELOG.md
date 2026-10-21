@@ -3,6 +3,28 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.21.9 (2026-10-21)
+
+Live (Oliver): Delta spoke again, but too much old stuff. The server now drops queued, not yet
+spoken says older than `VOICEHOOK_SAY_STALE_S` (default 60 s, 0 = off; operator says, helper
+updates, catch-up lines; a sentence being spoken is never cut) and sends them back to their
+sender as `operator.revise` with `stale: true` (rule VH-R1: outdated goes back to the steering
+agent, which summarizes and overwrites the queue).
+
+- **Stale event:** `next` / `listen` bring `{"type":"revise","stale":true,"items":[{seq,text}],
+  "hint":...,"text":"VERALTET: N eingereihte Aussage(n) älter als 60 s nicht gesprochen: ..."}`
+  (English when the call is). It wakes `listen` like every revise; the event's `hint` wins over
+  the board hint, which moves to `status_hint`.
+- **Mid-turn:** the PostToolUse hook (0.21.7) shows a stale drop inside the running turn:
+  "Veraltet, nicht gesprochen (N Aussage(n)): ... Nicht wiederholen; falls noch relevant, EINE
+  kurze aktuelle Zusammenfassung neu senden". A normal revise stays for `listen`.
+- **Join stdout:** one `_meta` line `stale-dropped n=N max_age=Ns`, metadata only; the dropped
+  texts never land on stdout.
+- **Helpers:** `relay-next` and MCP `next` bring a stale drop of their updates (remote inbox,
+  and locally via the join when the event names a helper as `sender`).
+- `say_status` `dropped` with `reason: "stale"` gets its own note (never resend unchanged).
+- A normal revise now also carries the server's `reason` (e.g. `user_stop`).
+
 ## 0.21.8 (2026-10-20)
 
 Bug: joined with `join --json --keep-alive --quiet`, stdout into a file: nobody read the

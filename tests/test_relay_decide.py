@@ -480,3 +480,26 @@ def test_join_cleans_relay_files(tmp_path):
     (tmp_path / "keep.txt").write_text("x")
     ro.clear_dir(tmp_path)
     assert sorted(p.name for p in tmp_path.iterdir()) == ["keep.txt"]
+
+
+# ----- 0.21.9: stale drops of a helper's queued updates reach the helper ------------------
+def test_relay_next_brings_stale_drop(monkeypatch, server, capsys):
+    _remote(server)
+    _helper(monkeypatch)
+    stale = {"type": "revise", "stale": True, "items": [{"seq": 7, "text": "Refill bei 40 %"}],
+             "threshold_s": 60}
+    server.reply("next", 200, {"events": [stale]})
+    server.reply("next", 200, {"events": []})
+    rc, lines, _ = _cli(["relay-next", "--timeout", "0"], capsys)
+    assert rc == 0 and lines[0]["stale"] is True and lines[0]["via"] == "relay"
+    assert lines[0]["items"] == [{"seq": 7, "text": "Refill bei 40 %"}]
+    assert lines[0]["hint"] == relay.STALE_HINT and "VERALTET" in lines[0]["text"]
+
+
+def test_local_answer_file_stale_is_taken(tmp_path):
+    p = tmp_path / "answers.jsonl"
+    ro.append_jsonl(p, {"type": "revise", "stale": True, "items": ["alt"]})
+    ro.append_jsonl(p, {"type": "revise", "text": "kein stale"})   # positive control: stays
+    got = ro.take_jsonl(p, ro._wanted)
+    assert [g.get("stale") for g in got] == [True]
+    assert ro.take_jsonl(p, lambda o: True) == [{"type": "revise", "text": "kein stale"}]

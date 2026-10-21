@@ -49,6 +49,13 @@ WAKE_TYPES = ("user", "decision", "helper_decision", "voicebot_left", "missed",
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 
+def wanted(ev: dict, types) -> bool:
+    """0.21.9: `ev` matches one of `types`; "<type>:stale" matches only stale events of that
+    type (midturn shows a stale-drop revise, a normal revise stays for `listen`)."""
+    typ = ev.get("type")
+    return typ in types or (ev.get("stale") is True and f"{typ}:stale" in types)
+
+
 def _open_private(path: Path, flags: int):
     fd = os.open(path, flags | _NOFOLLOW, 0o600)
     try:
@@ -392,7 +399,7 @@ class SpoolQueue:
             seq, ev = it["seq"], it["event"]
             if len(out) >= max(0, max_n):
                 break
-            if ev.get("type") not in types or seq in self._shown:
+            if not wanted(ev, types) or seq in self._shown:
                 continue
             try:
                 if wall - float(ev.get("ts") or it.get("ts") or wall) > recent_s:

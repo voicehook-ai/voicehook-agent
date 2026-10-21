@@ -436,13 +436,84 @@ def foreign_owner(payload: dict, own: set[str] | str | None, key: str = "owner")
 def revise_event(payload: dict, now: float | None = None) -> dict:
     """Queue event for an incoming operator.revise: our `--mode revise` replaced own
     not-started says (`unspoken`); if any still matters, send one merged say with
-    mode=overwrite."""
+    mode=overwrite. 0.21.9: `stale: true` = the server dropped our queued says older than
+    its threshold (VOICEHOOK_SAY_STALE_S, default 60 s) unspoken, see stale_fields."""
     ev = {"type": "revise", "role": "system", "text": payload.get("text", ""),
           "ts": now if now is not None else time.time()}
-    for k in ("unspoken", "new"):
+    for k in ("unspoken", "new", "reason"):
         if k in payload:
             ev[k] = payload[k]
+    if is_stale(payload):
+        ev.update(stale_fields(payload))
     return ev
+
+
+# ----- 0.21.9: stale says (Oliver 21.10.2026, rule VH-R1) -----------------------------
+# The server drops queued, not yet spoken says older than VOICEHOOK_SAY_STALE_S (default
+# 60 s; operator says, helper updates, catch-up lines) and sends them back to their sender
+# as operator.revise {stale: true, items: [{seq, text}], hint}. Delta never reads them; the
+# sender decides: obsolete = nothing, still relevant = ONE short current summary.
+STALE_HINT = ("Diese Aussagen sind veraltet, nicht wiederholen; falls noch relevant, EINE kurze "
+              "aktuelle Zusammenfassung neu senden (voicehook-agent say --mode overwrite).")
+STALE_HINT_EN = ("These statements are outdated, do not repeat them; if still relevant, send ONE "
+                 "short current summary (voicehook-agent say --mode overwrite).")
+STALE_ITEMS_MAX = 20
+
+
+def is_stale(payload: object) -> bool:
+    """True for a stale-drop event (operator.revise with stale=true, any shape)."""
+    return isinstance(payload, dict) and payload.get("stale") is True
+
+
+def _stale_items(payload: dict) -> list[dict]:
+    raw = payload.get("items")
+    if not isinstance(raw, list):
+        raw = payload.get("unspoken") if isinstance(payload.get("unspoken"), list) else []
+    out: list[dict] = []
+    for it in raw[:STALE_ITEMS_MAX]:
+        if isinstance(it, dict):
+            text = str(it.get("text") or "").strip()
+            if text:
+                one = {"seq": it.get("seq"), "text": text}
+                if isinstance(it.get("age_s"), (int, float)):
+                    one["age_s"] = it["age_s"]
+                out.append(one)
+        elif isinstance(it, str) and it.strip():
+            out.append({"seq": None, "text": it.strip()})
+    return out
+
+
+def stale_fields(payload: dict) -> dict:
+    """The fields of a stale event for the agent: stale, items [{seq, text}], hint and a
+    clear `text` line (the dropped texts, the hint). German unless lang is en."""
+    items = _stale_items(payload)
+    en = str(payload.get("lang") or "").lower().startswith("en")
+    hint = str(payload.get("hint") or "").strip() or (STALE_HINT_EN if en else STALE_HINT)
+    limit = payload.get("threshold_s") or payload.get("stale_s")
+    try:
+        lim = f" {int(float(limit))} s" if limit else ""
+    except (TypeError, ValueError):
+        lim = ""
+    texts = " ".join(f"[{i['seq']}] \"{i['text']}\"" if i["seq"] is not None else f"\"{i['text']}\""
+                     for i in items)
+    if en:
+        head = f"STALE: {len(items)} queued statement(s) older than{lim or ' the limit'} were dropped unspoken"
+    else:
+        head = f"VERALTET: {len(items)} eingereihte Aussage(n) älter als{lim or ' die Schwelle'} nicht gesprochen"
+    out = {"stale": True, "items": items, "hint": hint,
+           "text": f"{head}: {texts} {hint}" if texts else f"{head}. {hint}"}
+    for k in ("threshold_s", "max_age_s", "lang", "sender"):
+        if k in payload:
+            out[k] = payload[k]
+    return out
+
+
+def stale_meta(ev: dict) -> str:
+    """The join's stdout line for a stale event: metadata only (count), never the texts."""
+    items = ev.get("items") or []
+    ages = [i["age_s"] for i in items if isinstance(i.get("age_s"), (int, float))]
+    age = ev.get("max_age_s") if isinstance(ev.get("max_age_s"), (int, float)) else max(ages, default=None)
+    return f"stale-dropped n={len(items)}" + (f" max_age={int(age)}s" if age is not None else "")
 
 
 # ----- 0.7.0: status board, status_request, latency hint ---------------------------
@@ -961,6 +1032,8 @@ SAY_STATES = ("queued", "spoken", "interrupted", "requeued", "replaced", "covere
 SAY_NOTES = {"covered": "Info steckt schon in Deltas Antwort, nicht nochmal senden",
              "no_audio": "kein Audio, der Voicebot versucht es einmal neu",
              "dropped": "nicht gesprochen (auch der zweite Versuch ohne Audio): bei Bedarf neu senden"}
+# 0.21.9: dropped with reason=stale (queued longer than VOICEHOOK_SAY_STALE_S, never spoken)
+SAY_NOTE_STALE = "veraltet, nicht gesprochen: nicht wiederholen, falls noch relevant EINE kurze Zusammenfassung"
 SAY_STUCK_S = 20.0          # queued/requeued longer than this -> hint
 SAYS_KEEP = 50              # says remembered for `voicehook-agent says`
 
@@ -1016,6 +1089,8 @@ class SayStatus:
         reason = payload.get("reason")
         if isinstance(reason, str) and reason:
             change["reason"] = reason[:40]   # no_audio, max_duration (Notbremse)
+            if state == "dropped" and reason == "stale":  # 0.21.9: too old, never spoken
+                change["note"] = SAY_NOTE_STALE
         self._changes.append(change)
         return change
 
