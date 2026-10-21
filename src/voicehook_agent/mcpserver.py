@@ -92,7 +92,9 @@ TOOLS = [
     {"name": "next",
      "description": "The next event for this session: answers to your decide questions "
                     "(type decision), or with your own join the next call event. "
-                    "{type: timeout} when nothing came.",
+                    "{type: revise, stale: true, items, hint}: queued statements older than "
+                    "60 s were dropped unspoken; never repeat them, if still relevant send ONE "
+                    "short current summary. {type: timeout} when nothing came.",
      "inputSchema": {"type": "object", "properties": {
          "timeout_s": {"type": "number", "minimum": 0, "maximum": NEXT_MAX_S}},
          "additionalProperties": False}},
@@ -289,7 +291,7 @@ def tool_next(args: dict, agent: str) -> dict:
     evs = vrelayops.next_events(rel, frm, t)
     if not evs:
         return {"ok": True, "type": "timeout", "via": "relay"}
-    return {"ok": True, "type": "events", "events": evs, "via": "relay"}
+    return {"ok": True, "type": "events", "events": [vrelayops.view(e) for e in evs], "via": "relay"}
 
 
 def tool_activity(args: dict, agent: str) -> dict:

@@ -61,7 +61,7 @@ voicehook-agent leave --say "See you soon."             # clean exit
 | Command | Output (one JSON line) | Exit |
 |---|---|---|
 | `say <text> [--mode append\|overwrite\|revise] [--urgent]` | `{"ok":true,"seq":3}` | 0 ok, 1 failed |
-| `next [--timeout SEC]` | `{"type":"user","text":...}`, `{"type":"revise","text":...,"unspoken":[...],"new":...}` (your `--mode revise` replaced own not-started says; if any still matters, send one merged `say --mode overwrite`), `{"type":"timeout"}`, `{"type":"ended"}`; 0.21.0 `{"type":"voicebot_left","room","text"}` / `{"type":"voicebot_back","room","seconds","text"}` (the voicebot dropped out, e.g. a server update: tell your user in chat, keep calling `next`, never leave; back: `say` works again. A takeover sends neither; also a JSONL line in `--json` mode) | 0, 3 on `ended` |
+| `next [--timeout SEC]` | `{"type":"user","text":...}`, `{"type":"revise","text":...,"unspoken":[...],"new":...}` (your `--mode revise` replaced own not-started says; if any still matters, send one merged `say --mode overwrite`); 0.21.9 `{"type":"revise","stale":true,"items":[{"seq","text"}],"hint","text"}` (your queued says were older than the server limit, default 60 s, and dropped unspoken: never repeat them; still relevant: ONE short current summary with `say --mode overwrite`; the board hint is then in `status_hint`), `{"type":"timeout"}`, `{"type":"ended"}`; 0.21.0 `{"type":"voicebot_left","room","text"}` / `{"type":"voicebot_back","room","seconds","text"}` (the voicebot dropped out, e.g. a server update: tell your user in chat, keep calling `next`, never leave; back: `say` works again. A takeover sends neither; also a JSONL line in `--json` mode) | 0, 3 on `ended` |
 | `listen [--timeout SEC] [--poll SEC]` (0.21.4) | the gapless `next` loop: ONE line, the first event that needs you (`user`, `decision`, `helper_decision`, `voicebot_left`, `missed`, `status_request`, `revise`, `call_end`, `data`); `timeout`, `human_state`, `voicebot_back` keep it waiting. `--timeout` 0 (default) = until an event; `--poll` (0.21.5: default 10, was 45) = timeout of each single `next`. Reads the join's event spool with a cursor and acks after the print ([Event spool](#event-spool-the-join-listens-for-you-0215)). Run it in the harness's background mode, see [Listen guard](#listen-guard-never-end-a-turn-deaf-0214) | 0, 3 on `ended` / no join |
 | `board [--open-only]`, `decide --list` (0.21.4) | `{"type":"board","open":[{id,number,from,question,options,recommend?,context?,recent?,faq?,state:"open"}],"recent":[... with verdict, option?, text?, by],"own_board":{...},"boards":[{from, doing, open, done, state?, meta?}],"note":"..."}`: what your join has seen on the boards. Decisions: your own and those of local helpers from the moment they are asked; remote helpers' (relay from another machine, MCP, bridge) only once answered, because the server has no decision listing for operators (`delta.decisions` goes to the humans only). Boards: yours plus every `operator.status` your join received (helper boards with `sub` and `state`, other operators) | 0, 3 no join |
 | `send-data --to <label\|identity\|*> (--json J \| --text T \| --file PATH) [--name N] [--mime M] [--id ID]` (0.21.4) | `{"ok":true,"type":"data","id":"...","to":["Scout"],"size":123}`: agent-to-agent data like MCP `send_data` (topic `operator.data`, only to other operator agents, never spoken, never to the humans or the voicebot). Bridge transport: `POST /api/bridge/data`, inline up to ~15 KB, larger files (max 10 MB) first via `POST /api/bridge/upload` and sent as `file_id`. WebRTC: the join sends the packet itself to the targets' identities, inline only (413 names `--transport bridge` for larger files). Incoming: `next` returns `{"type":"data","from","from_identity","kind":"json\|text\|file","id","name?","mime?","size?","payload"\|"url"+"file_id","summary":"Daten von Scout: JSON (1.2 KB)"}`, and `listen` wakes on it. A file `url` needs the Bearer of a bridge session in the same call | 0 ok, 1 failed, 3 no join |
@@ -146,6 +146,25 @@ already took (it takes events within milliseconds, but its exit may only wake yo
 turn) is shown anyway, marked `kam auch über listen`. PostToolUse, not PreToolUse: its
 additionalContext reliably reaches the running turn. Never for subagents or other sessions.
 `VOICEHOOK_MIDTURN_EVENTS=0` turns it off.
+
+### Stale says come back, never spoken (0.21.9)
+
+**Veraltet heißt: nicht wiederholen.** The server drops your queued, not yet spoken says older
+than `VOICEHOOK_SAY_STALE_S` (default 60 s, `0` = off; counted from the first enqueue, a sentence
+being spoken is never cut; normal and live mode; also helper updates and catch-up lines) and
+sends them back to you only as `operator.revise` with `stale: true`. `next` / `listen` bring
+
+```json
+{"type":"revise","stale":true,"items":[{"seq":3,"text":"..."}],
+ "hint":"Diese Aussagen sind veraltet, nicht wiederholen; falls noch relevant, EINE kurze aktuelle Zusammenfassung neu senden (voicehook-agent say --mode overwrite).",
+ "text":"VERALTET: 1 eingereihte Aussage(n) älter als 60 s nicht gesprochen: [3] \"...\" ..."}
+```
+
+(English when the call is English; the board hint is then in `status_hint`). It wakes `listen`
+and the mid-turn hook shows it inside a running turn. Do: nothing when obsolete, else ONE short
+current `say --mode overwrite`. `say_status` shows such a say as `dropped`, `reason: "stale"`.
+The join's stdout gets only `stale-dropped n=N max_age=Ns` (metadata, never the texts). Helper
+sessions get the drop of their updates through `relay-next` / MCP `next`.
 
 ### Listen guard: never end a turn deaf (0.21.4)
 

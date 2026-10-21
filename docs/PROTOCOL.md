@@ -56,7 +56,7 @@ stdin (JSONL):
 | `operator.say`        | out       | TTS push; tagged `_seq`/`_ts` (#9). `mode`: `append` (default since 0.11.0: queue at the end), `overwrite` (replaces only your own unspoken says), `revise` (your own unspoken says are stopped, `operator.revise` comes back to you only); `priority:"urgent"` interrupts whoever speaks |
 | `operator.persona`    | out       | live update voice-ai system prompt     |
 | `operator.interrupt`  | out       | stop your own output (the only way, besides `urgent`, to cut a running say); your unspoken rest comes back as `operator.revise` |
-| `operator.revise`     | in        | agent → you only: `{unspoken[], new, text, owner}`: your `mode:"revise"` replaced these not-started says; if any still matters, send ONE merged say with `mode:"overwrite"` |
+| `operator.revise`     | in        | agent → you only: `{unspoken[], new, text, owner}`: your `mode:"revise"` replaced these not-started says; if any still matters, send ONE merged say with `mode:"overwrite"`. 0.21.9 `{stale: true, items: [{seq, text}], hint, threshold_s?, lang?, sender?, owner}`: your queued says older than `VOICEHOOK_SAY_STALE_S` (default 60 s) were dropped unspoken; never repeat them, if still relevant send ONE short current summary. The CLI adds a clear `text` line and the hint (DE/EN) when missing |
 | `operator.inject`     | out       | force voice-ai to react (user-role)    |
 | `operator.backchannel`| out       | silent operator↔agent side-channel, relayed as-is (#10) |
 | `operator.status`     | out       | your status board `{doing, open[], done[], faq?[{q, a}], project?}` (0.7.0, `status` command; `faq` 0.10.0; `project` 0.21.0 = `--project`, overrides the derived project of the focus filter); replaces the last one, never spoken |
