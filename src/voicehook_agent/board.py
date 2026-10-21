@@ -802,6 +802,12 @@ def fetch_answers(rel: dict, frm: str) -> list[dict]:
             evs = data.get("events") if status < 300 else None
             if isinstance(evs, list):
                 out += [e for e in evs if isinstance(e, dict) and e.get("type", "decision") == "decision"]
+                # 0.21.9: GET /next consumed them; a stale drop goes to the inbox so the
+                # helper's `relay-next` / MCP `next` still brings it (never swallowed here)
+                for e in evs:
+                    if isinstance(e, dict) and relayops._is_stale(e):
+                        vact._private_dir(vact.state_root())
+                        relayops.append_jsonl(relayops.inbox_path(frm), e)
     except Exception:  # noqa: BLE001, S110 - best effort, the next hook run polls again
         pass
     return out
