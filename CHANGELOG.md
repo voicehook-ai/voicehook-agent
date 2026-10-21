@@ -3,6 +3,24 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.22.1 (2026-10-21)
+
+Live-Bug (Call onyx-calm-lumen-P6PG): the main agent got `helper_decision` #21 as from
+"Steuern" and #22 as from "Armin-Box", both sessions said "not mine". Both were questions the
+server detected itself in their status boards (`question_check`, server 20.10.). The server's
+check `question_check` never reached the helper: a WebRTC join dropped `operator.question_check`
+completely, and `relay-next` / the hook dropped everything but `decision`. After 90 s the server
+put the line on the board itself, and the answer came as "the answer to your own question".
+
+- **Join:** `operator.question_check` (only from the worker) goes to the right place: with
+  `sender` to that helper (local relay: its answer file; WebRTC: the server inbox via
+  `pump/answer`; bridge: the server already does it), without `sender` into our own `next`.
+  A helper that only sets its board (never `decide`) is routable too.
+- **Helper:** `relay-next` and the hook deliver `question_check` (next to the 0.22.0 `user_turn`) ("your line ... sounds like a
+  question, ask it with decide, or the server puts it on the board in 90 s"); the hook also
+  polls a session that has a live board but never asked.
+- **Answer text:** an automatically detected decision (`auto`) says so and quotes the
+  question, never "your own question"; the `helper_decision` copy carries `auto` + `question`.
 ## 0.22.0 (2026-10-21)
 
 Oliver (question 34): speak to a helper session by name in the call. The server (voicehook-v4,

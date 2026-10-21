@@ -1868,6 +1868,36 @@ def _route_helper_user_turn(ctl: _Control, payload: dict, own: set[str]) -> bool
     return False
 
 
+def _route_question_check(ctl: _Control, payload: dict, transport: str) -> bool:
+    """0.22.1 (Live-Bug 21.10.2026): the server's question_check (a board/feed line sounds like
+    a question; ask it with decide or confirm no_question, else the server puts it on the board
+    itself after wait_s). With `sender` it belongs to a HELPER: local relay -> its answer file,
+    WebRTC hub -> the server inbox (pump/answer); bridge: the server already did that. Without
+    `sender` it is ours: own `next`. Before, the join dropped it, the helper never knew, and
+    the automatic decision later looked like someone else's question."""
+    ev = {k: payload[k] for k in ("type", "id", "quote", "kind", "wait_s", "text", "sender") if k in payload}
+    snd = str(payload.get("sender") or "")
+    if not snd:
+        ctl.events.put_nowait({**ev, "ts": time.time()})
+        return True
+    if transport == "bridge":
+        return False
+    frm = ctl.relay_senders.get(snd)
+    if frm and ctl.activity_path is not None:
+        try:
+            vrelayops.append_jsonl(vrelayops.answer_path(ctl.activity_path.parent, frm), ev)
+            return True
+        except (OSError, vrelayops.RelayError) as e:
+            print(f"[warn] relay question_check not written ({type(e).__name__})", file=sys.stderr, flush=True)
+            return False
+    if ctl.helper_pump is not None and ctl.helper_http is not None:
+        t = asyncio.ensure_future(ctl.helper_pump.answer(ctl.helper_http, snd, ev))
+        _BG_TASKS.add(t)
+        t.add_done_callback(_BG_TASKS.discard)
+        return True
+    return False
+
+
 def _route_helper_stale(ctl: _Control, ev: dict) -> bool:
     """0.21.9: a stale event whose `sender` names a local helper session also goes into that
     helper's answer file (its `relay-next` / MCP `next` brings it); our own `next` keeps it."""
@@ -1930,6 +1960,7 @@ async def _serve_relay_request(ctl: _Control, dir_: Path, obj: dict) -> None:
         if room is None:
             res = {"ok": False, "status": 503, "error": "not connected to the room (yet)"}
         else:
+            ctl.relay_senders[sender] = frm  # 0.22.1: a board-only helper gets its question_check
             helper = ctl.relay_helpers.setdefault(sender, {})
             if op == "state":  # 0.21.4: the helper's session state from its hooks
                 helper["state"] = body["state"]
@@ -2491,6 +2522,11 @@ async def _connect_and_listen(
                     t.add_done_callback(_BG_TASKS.discard)
                 else:
                     ctl.events.put_nowait(relay.helper_decision_event(payload))
+            elif (topic == "operator.question_check" and ctl is not None
+                    and payload.get("type") == "question_check"
+                    and getattr(pkt.participant, "kind", None) == 4):
+                # 0.22.1: only from the worker (agent kind), like the server bridge
+                _route_question_check(ctl, payload, transport)
             elif (topic == "operator.helper_decision" and ctl is not None
                     and payload.get("type") == "helper_decision"):
                 # 0.18.1, bridge transport: the server's copy of a helper's answer

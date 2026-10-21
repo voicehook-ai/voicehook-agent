@@ -751,6 +751,9 @@ def helper_decision_event(payload: dict, *, frm: str | None = None, label: str |
             ev["text"] = str(payload.get("answer") or payload.get("text") or "")
         if payload.get("changed"):
             ev["changed"] = True
+        if payload.get("auto"):  # 0.22.1: detected by the server, the helper never asked it
+            ev["auto"] = True
+            ev["question"] = question or str(payload.get("question") or "")
         ev["by"] = payload.get("by", "")
     ev.setdefault("ts", now if now is not None else time.time())
     ev["hint"] = HELPER_DECISION_HINT

@@ -537,8 +537,13 @@ def _is_user_turn(o: dict) -> bool:
     return o.get("type") == "user_turn"
 
 
+def _is_question_check(o: dict) -> bool:
+    """0.22.1: the server asks whether a board/feed line of this helper is a question."""
+    return o.get("type") == "question_check"
+
+
 def _wanted(o: dict) -> bool:
-    return _is_decision(o) or _is_stale(o) or _is_user_turn(o)
+    return _is_decision(o) or _is_stale(o) or _is_user_turn(o) or _is_question_check(o)
 
 
 def view(ev: dict) -> dict:

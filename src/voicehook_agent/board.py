@@ -807,8 +807,7 @@ def fetch_answers(rel: dict, frm: str) -> list[dict]:
             status, data = relayops._http(rel, "GET", url, None, FETCH_TIMEOUT_S)
             evs = data.get("events") if status < 300 else None
             if isinstance(evs, list):
-                out += [e for e in evs if isinstance(e, dict) and (e.get("type", "decision") == "decision"
-                                                                   or relayops._is_user_turn(e))]
+                out += [e for e in evs if isinstance(e, dict) and _deliverable(e)]
                 # 0.21.9: GET /next consumed them; a stale drop goes to the inbox so the
                 # helper's `relay-next` / MCP `next` still brings it (never swallowed here)
                 for e in evs:
@@ -821,9 +820,10 @@ def fetch_answers(rel: dict, frm: str) -> list[dict]:
 
 
 def _deliverable(o: dict) -> bool:
-    """A decision answer, or (0.22.0) a request of the human to this helper (user_turn)."""
+    """A decision answer, (0.22.0) a request of the human to this helper (user_turn), or
+    (0.22.1) the server's question_check about this helper's own board/feed line."""
     from . import relayops
-    return relayops._is_decision(o) or relayops._is_user_turn(o)
+    return relayops._is_decision(o) or relayops._is_user_turn(o) or relayops._is_question_check(o)
 
 
 def _answer_key(ev: dict) -> str:
@@ -854,7 +854,7 @@ def take_new(skey: str, got: list[tuple[str, dict]]) -> list[dict]:
             if k not in seen:
                 seen.append(k)
                 new.append(ev)
-                if ev.get("type") != "user_turn":   # 0.22.0: a request closes no question
+                if ev.get("type", "decision") == "decision":  # user_turn / question_check close no question
                     _open_add(me, frm, -1)
         me["delivered"] = seen[-DELIVERED_KEEP:]
         return new
@@ -878,6 +878,8 @@ def answer_text(ev: dict, info: dict | None = None) -> str:
     option / free text. `info` = what this session stored when the question went to the board
     (record_question). German + English, text fields scrubbed and capped."""
     info = info if isinstance(info, dict) else {}
+    if ev.get("type") == "question_check":
+        return question_check_text(ev)
     num = ev.get("number", info.get("number"))
     nr = f" #{num}" if isinstance(num, int) and not isinstance(num, bool) else ""
     by = vact.scrub(str(ev.get("by") or "")).strip()[:40] or "der Mensch"
@@ -903,13 +905,38 @@ def answer_text(ev: dict, info: dict | None = None) -> str:
         extra = free or (text if text and text != ans else "")
         if extra:
             ans += f", Freitext {_q(extra)}"
-    src_de, src_en = SOURCES.get(str(info.get("src") or ""), ("deine Frage", "your question"))
     qpart = f" {_q(q)}" if q else ""
+    if ev.get("auto") and not info:
+        # 0.22.1 (Live-Bug 21.10.): the server put a line of this session's board/feed on the
+        # board itself (question_check, no reaction in time); the session never asked it
+        return (f"voicehook-Board{nr} (automatisch erkannt aus deinem Board/Feed, nicht von dir "
+                f"per decide gestellt):{qpart} -> {by} hat im Call-Board geantwortet: {ans}. "
+                f"Handle danach oder nimm die Zeile vom Board, falls sie keine Frage war. / "
+                f"voicehook board{nr} (detected automatically from your board/feed, you did not "
+                f"ask it with decide):{qpart} -> {by} answered on the call board: {ans}.")
+    src_de, src_en = SOURCES.get(str(info.get("src") or ""), ("deine Frage", "your question"))
     return (f"voicehook-Board{nr} ({src_de}):{qpart} -> {by} hat im Call-Board geantwortet: "
             f"{ans}. Das ist die Antwort des Menschen auf deine eigene Frage, keine Fehlermeldung: "
             f"handle jetzt danach. / voicehook board{nr} ({src_en}):{qpart} -> {by} answered on "
             f"the call board: {ans}. The human's answer to your own question, not an error: act "
             "on it now.")
+
+
+def question_check_text(ev: dict) -> str:
+    """0.22.1: the server's question_check for this session (its board/feed line sounds like a
+    question to the human): ask it with decide, or the server puts it on the board itself."""
+    quote = vact.scrub(str(ev.get("quote") or "")).strip()[:160]
+    try:
+        wait = int(ev.get("wait_s") or 90)
+    except (TypeError, ValueError):
+        wait = 90
+    qid = re.sub(r"[^0-9a-z]", "", str(ev.get("id") or ""))[:16]
+    return (f"voicehook-Call: Deine Meldung {_q(quote)} klingt nach einer Frage an den Menschen. "
+            f"Stelle sie jetzt per decide (vh-helper decide \"<dein Name>\" \"<Frage>\") oder "
+            f"nimm sie vom Board, wenn es keine Frage ist; sonst legt der Server sie in {wait} s "
+            f"selbst als automatisch erkannte Frage an (question_check {qid}). / voicehook call: "
+            f"your line {_q(quote)} sounds like a question to the human. Ask it with decide now, "
+            f"or the server puts it on the board itself in {wait} s.")
 
 
 def record_question(skey: str, dec_id: str, question: str, number: object = None,
