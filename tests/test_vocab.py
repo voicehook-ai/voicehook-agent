@@ -71,6 +71,23 @@ def test_request_shapes():
             cli.vocab_request(term, wrong)
 
 
+def test_batch_request_shape():
+    """Live 21.10.: 10 Wörter einzeln -> 429 rate_limited. Mehrere Wörter = EIN Request."""
+    assert cli.vocab_request(["Trello", " Lemlist ", "trello"], []) == {"cmd": "vocab", "terms": ["Trello", "Lemlist"]}
+    assert len(cli.vocab_request([f"W{i}" for i in range(50)], [])["terms"]) == 50
+    for terms, wrong in (([f"W{i}" for i in range(51)], []), (["A", "B"], ["x"]), (["A", ""], [])):
+        with pytest.raises(ValueError):
+            cli.vocab_request(terms, wrong)
+
+
+def test_parser_builds_batch_request(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(cli, "_run_client", lambda args: seen.setdefault("req", cli._client_request(args)) and 0)
+    with pytest.raises(SystemExit):
+        cli.main(["vocab", "add", "Trello", "Lemlist", "Sales Engine"])
+    assert seen["req"] == {"cmd": "vocab", "terms": ["Trello", "Lemlist", "Sales Engine"]}
+
+
 def test_parser_builds_request(monkeypatch):
     seen = {}
     monkeypatch.setattr(cli, "_run_client", lambda args: seen.setdefault("req", cli._client_request(args)) and 0)

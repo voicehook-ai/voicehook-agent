@@ -747,19 +747,32 @@ VOCAB_PATH = "/api/bridge/vocab"
 VOCAB_TERM_MAX = 50
 
 
-def vocab_request(term: str, wrongs: list[str] | None) -> dict:
-    """`vocab add TERM [--wrong W ...]` -> control request; ValueError on bad input."""
-    t = " ".join(str(term or "").split())
+VOCAB_BATCH_MAX = 50   # server voicehook-v4 vocab.OP_BATCH (21.10.): one batch = ONE request
+
+
+def vocab_request(term: str | list[str], wrongs: list[str] | None) -> dict:
+    """`vocab add TERM [TERM ...] [--wrong W ...]` -> control request; ValueError on bad input.
+    Several terms go in one request (server rate limit counts requests, 21.10.); --wrong only
+    with exactly one term."""
+    raw = [term] if isinstance(term, str) else list(term or [])
+    ts = [" ".join(str(t or "").split()) for t in raw]
     ws = [" ".join(str(w or "").split()) for w in (wrongs or [])]
-    if not t or any(not w for w in ws):
+    if not ts or any(not t for t in ts) or any(not w for w in ws):
         raise ValueError("vocab add: empty word")
-    if len(t) > VOCAB_TERM_MAX or any(len(w) > VOCAB_TERM_MAX for w in ws):
+    if any(len(x) > VOCAB_TERM_MAX for x in ts + ws):
         raise ValueError(f"vocab add: at most {VOCAB_TERM_MAX} characters per word")
+    if len(ts) > VOCAB_BATCH_MAX:
+        raise ValueError(f"vocab add: at most {VOCAB_BATCH_MAX} words per request")
+    if ws and len(ts) > 1:
+        raise ValueError("vocab add: --wrong needs exactly one word")
+    t = ts[0]
     if any(w.casefold() == t.casefold() for w in ws):
         raise ValueError("vocab add: --wrong equals the word")
     if ws:
         return {"cmd": "vocab", "fixes": [{"wrong": w, "right": t} for w in ws]}
-    return {"cmd": "vocab", "terms": [t]}
+    seen: set[str] = set()
+    uniq = [x for x in ts if not (x.casefold() in seen or seen.add(x.casefold()))]
+    return {"cmd": "vocab", "terms": uniq}
 
 
 async def _vocab_add(ctl: _Control, body: dict) -> dict:
@@ -4360,9 +4373,11 @@ def main(argv: list[str] | None = None) -> None:
     p_vo = sub.add_parser(
         "vocab", help="0.21.0 teach the call's speech recognition a word it mishears: "
         "`vocab add \"Trello\" --wrong \"Erzähli\"`; adds to the vocabulary of the account that "
-        "pays for the call (add only, the user manages it on /konto); max 20 per request, 100 per call")
+        "pays for the call (add only, the user manages it on /konto); several words in ONE call: "
+        "`vocab add Trello Lemlist Prospeo` (max 50 per request, 100 per call)")
     p_vo.add_argument("action", choices=["add"], help="add (the only action: agents never delete)")
-    p_vo.add_argument("term", help="the correct word or short phrase, max 50 chars")
+    p_vo.add_argument("term", nargs="+", help="the correct word(s) or short phrase(s), max 50 chars each; "
+                      "several = one batch request")
     p_vo.add_argument("--wrong", action="append", default=[], metavar="TEXT",
                       help="a known mishearing of TERM (repeatable); corrected in every transcript")
     _add_session(p_vo)
