@@ -211,3 +211,30 @@ def test_helper_import_accepts_relay_json_copy_and_rejects_garbage(monkeypatch):
     for bad in ("", "nope", json.dumps({"url": URL})):
         with pytest.raises(ValueError):
             vhelp.import_credential(bad)
+
+
+def test_pump_card_is_shown_in_background_and_answered():
+    """0.23.1: kind card -> show_card (publish as this join, wait for the pages) runs in the
+    background and its result goes to pump/result; without show_card (old wiring) nothing."""
+    card = {"id": "0123456789abcdef", "kind": "text", "text": "Notiz", "from": "Mac: A"}
+    items = [{"kind": "card", "id": "c1", "card": card}]
+    http = FakeHttp([Resp(200, {"items": items, "ended": False}), Resp(200, {"items": [], "ended": True})])
+    shown = []
+
+    async def show_card(c):
+        shown.append(c)
+        await asyncio.sleep(0.05)
+        return {"ok": True, "shown": 1}
+
+    async def nop(*_a):
+        return {}
+
+    async def go():
+        pump = vhelp.Pump("https://voicehook.ai", PUMP_URL, PUMP)
+        await pump.run(http, publish_status=nop, decide=nop, append_activity=lambda _l: None,
+                       stop=asyncio.Event(), show_card=show_card)
+        await asyncio.sleep(0.2)   # the card runs in the background
+    asyncio.run(go())
+    assert shown == [card]
+    assert (PUMP_URL + "/result", {"id": "c1", "result": {"ok": True, "shown": 1}},
+            {"authorization": f"Bearer {PUMP}"}) in http.posts

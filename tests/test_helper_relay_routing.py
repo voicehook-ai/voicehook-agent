@@ -160,10 +160,21 @@ def test_next_as_helper_returns_relay_events(monkeypatch, server, capsys):
     assert server.calls[-1]["path"] == "/api/activity/relay/next"
 
 
-def test_show_as_helper_is_a_clear_error_not_no_session(monkeypatch, server, capsys):
+def test_show_card_as_helper_goes_over_relay(monkeypatch, server, capsys):
+    """0.23.1: show --card of a helper is a helper card (POST relay/show, server #577)."""
     _legacy(server)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "helper-1")
+    server.replies["show"] = {"ok": True, "id": "c1", "kind": "text", "from": "Helfer"}
     rc, lines, _ = _cli(["show", "--card", "text", "--title", "T", "--text", "x"], capsys)
+    assert rc == 0 and lines[0]["type"] == "card" and lines[0]["via"] == "relay", lines
+    assert server.calls[-1]["path"] == "/api/activity/relay/show"
+
+
+def test_show_shape_as_helper_is_a_clear_error_not_no_session(monkeypatch, server, capsys):
+    """Ring shapes have no relay route: a clear error, nothing sent."""
+    _legacy(server)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "helper-1")
+    rc, lines, _ = _cli(["show", "--preset", "arrow_up"], capsys)
     assert rc == 1 and lines[0]["type"] == "helper-unsupported" and lines[0]["via"] == "relay"
     assert server.calls == []
 

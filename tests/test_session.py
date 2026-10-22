@@ -573,3 +573,25 @@ def test_say_next_with_long_home(tmp_path, monkeypatch, fake_env):
 
     r, rc = asyncio.run(run())
     assert r["ok"] and rc == 0
+
+
+def test_control_socket_takes_an_image_sized_request(tmp_path):
+    """0.23.1 (live 21.10.2026): a 227 KB screenshot (base64 in one request line) overran
+    asyncio's 64 KiB line limit; the join dropped the connection without an answer."""
+    from voicehook_agent import session as vs
+
+    async def go():
+        srv = vs.ControlServer(tmp_path / "s.sock", lambda req: _echo(req))
+        await srv.start()
+        try:
+            big = await asyncio.to_thread(vs.request, tmp_path / "s.sock", {"image": "A" * 1_400_000}, 10)
+            over = await asyncio.to_thread(vs.request, tmp_path / "s.sock", {"image": "A" * (vs.REQUEST_MAX + 10)}, 10)
+        finally:
+            await srv.close()
+        return big, over
+
+    async def _echo(req):
+        return {"ok": True, "n": len(req.get("image", ""))}
+    big, over = asyncio.run(go())
+    assert big == {"ok": True, "n": 1_400_000}
+    assert over["ok"] is False and "too large" in over["error"]

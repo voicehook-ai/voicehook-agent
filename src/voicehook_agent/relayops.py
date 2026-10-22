@@ -16,6 +16,8 @@ Remote relay (relay.json kind remote {url, token}, url = <base>/api/activity/rel
 * POST <url>/decide  {from, question?, options?, recommend?, id?, delete?, context?, recent?}
   -> {ok, id, number} (0.21.0: context/recent = background for Delta)
 * POST <url>/status  {from, doing?, open?, done?, project?} -> {ok}; all empty removes the card
+* POST <url>/show    {from, kind, title?, text?, image?} -> {ok, id, kind, from, shown?} (0.23.1:
+  `show --card` of a helper; an image only ok once a call page loaded it, else 409 + why)
 * GET  <url>/next?from=<label>&timeout=<0..25> -> {events: [{type: "decision", ...}]}; 0.22.0
   also {type: "user_turn", text, to, to_kind: "helper", speaker?, ts}: the human spoke to
   this helper by name in the call (a request to it)
@@ -27,7 +29,8 @@ Events fetched while `decide --wait` waits for another id are kept in a local in
 Local relay (relay.json kind local, WebRTC join; file protocol, stdlib only):
 * Request file `<join dir>/relay-req.jsonl` (0600, O_APPEND, flock, never a symlink), one
   JSON object per line: {"v": 1, "rid": "<16 hex>", "from": "<label>", "op":
-  "decide"|"status"|"state" (0.21.4: {state}, the helper's session state), "body": {...},
+  "decide"|"status"|"state" (0.21.4: {state}, the helper's session state)|"card" (0.23.1: text,
+  code or link card; images need the server relay), "body": {...},
   "ts": <unix>}. Written only when the join dir is
   ours and its session.json names the relay's owner pid.
 * The join drains it (flock, read, truncate) every POLL_S and runs decide (LiveKit RPC
@@ -65,6 +68,7 @@ REQ_LINE_MAX = 8192
 REQ_BATCH_MAX = 50
 ANS_MAX_BYTES = 256 * 1024
 RESULT_WAIT_S = 20.0
+SHOW_TIMEOUT_S = 50.0   # 0.23.1: server stores the image, the call pages confirm it (15 s)
 POLL_S = 0.3
 FROM_MAX = vmulti.SESSION_LABEL_MAX
 
@@ -497,6 +501,37 @@ def remote_status(rel: dict, frm: str, body: dict, timeout: float = HTTP_TIMEOUT
     return {"ok": True}
 
 
+def card_body(req: dict) -> dict:
+    """0.23.1 `show --card` of a helper -> relay body {kind, title?, text?, image?}. Panels belong
+    to the main agent: --panel/--large -> RelayError 422."""
+    if req.get("panel") is not None or req.get("large"):
+        raise RelayError("a helper session shows cards only: --panel/--large belong to the main agent", 422)
+    if not req.get("kind"):
+        raise RelayError("a helper session needs --card text|code|link|image", 422)
+    return {k: req[k] for k in ("kind", "title", "text", "image") if req.get(k) is not None}
+
+
+def remote_show(rel: dict, frm: str, body: dict, timeout: float = SHOW_TIMEOUT_S) -> dict:
+    status, out = _http(rel, "POST", endpoint(rel, "show"), {"from": frm, **body}, timeout)
+    if status >= 300 or out.get("ok") is False:
+        return _err(status, out)
+    return {"ok": True, **{k: out[k] for k in ("id", "kind", "from", "shown", "not_loaded") if k in out}}
+
+
+def _valid_card(body: object) -> dict | None:
+    """Local relay card: text, code or link (an image does not fit the request file)."""
+    if not isinstance(body, dict) or body.get("kind") not in ("text", "code", "link"):
+        return None
+    text, title = body.get("text"), body.get("title", "")
+    if not isinstance(text, str) or not text.strip() or len(text) > 4000:
+        return None
+    if not isinstance(title, str) or len(title) > 80:
+        return None
+    if body["kind"] == "link" and not re.fullmatch(r"https?://\S+", text.strip()):
+        return None
+    return {"kind": body["kind"], "text": text, "title": title}
+
+
 def base_url(rel: dict) -> str:
     """<base>/api/activity/relay (the activity line endpoint) from the relay url."""
     return endpoint(rel, "x")[:-2]
@@ -654,6 +689,8 @@ def parse_request(obj: dict) -> tuple[str, str, str, dict | None] | None:
         body = _valid_status(obj.get("body"))
     elif op == "state":   # 0.21.4: session state of a local helper (board.py)
         body = _valid_state(obj.get("body"))
+    elif op == "card":    # 0.23.1: text/code/link card of a local helper
+        body = _valid_card(obj.get("body"))
     else:
         return rid, frm, str(op), None
     return rid, frm, op, body

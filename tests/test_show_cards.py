@@ -122,11 +122,19 @@ def test_big_diagram_svg_is_fine():
 
 # ----- join side -----------------------------------------------------------------------------
 class _Local:
+    """Fake local participant. 0.23.1: an image card is answered by the call page of `host`
+    (vh.card_ack) with `ack` (True loaded, False failed, None = page never answers)."""
+
     def __init__(self) -> None:
         self.published: list[tuple[str, dict, list | None]] = []
+        self.ctl = None
+        self.ack: bool | None = True
 
     async def publish_data(self, data, reliable=True, topic="", destination_identities=None):
-        self.published.append((topic, json.loads(data), destination_identities))
+        obj = json.loads(data)
+        self.published.append((topic, obj, destination_identities))
+        if topic == "operator.card" and "url" in obj and self.ctl is not None and self.ack is not None:
+            asyncio.get_running_loop().call_soon(self.ctl.card_acks.note, {"id": obj["id"], "ok": self.ack}, "host")
 
 
 def _peer(identity, kind=0, attrs=None):
@@ -143,6 +151,8 @@ def _ctl(room) -> cli._Control:
     ctl = cli._Control("blau-tiger", "claude-x", relay.SayTracker(), relay.EchoSuppressor(False), 0.0)
     ctl.attach(room)
     ctl.api_base, ctl.lk_jwt = "http://vh.test", "LK.JWT.TOKEN"
+    if isinstance(getattr(room, "local_participant", None), _Local):
+        room.local_participant.ctl = ctl
     return ctl
 
 
@@ -199,7 +209,7 @@ def test_webrtc_image_uploaded_with_own_token_then_published(monkeypatch):
     room = _room()
     res = asyncio.run(cli._control_handler(_ctl(room), {"cmd": "card", "kind": "image", "image": SVG,
                                                         "title": "Plan", "large": True}))
-    assert res["ok"] and res["id"] == CID
+    assert res["ok"] and res["id"] == CID and res["shown"] == 1
     assert seen == [("/api/card/image", "Bearer LK.JWT.TOKEN", {"image": SVG})]
     (t, card, _), (_, ui, _) = room.local_participant.published
     assert t == "operator.card" and card["url"] == URL and card["mime"] == "image/svg+xml"
@@ -309,3 +319,190 @@ def test_is_svg_head_without_backtracking():
 def test_external_refs_with_spaces_rejected(svg):
     with pytest.raises(vc.CardError, match="nothing external"):
         vc.image_kind(svg)
+
+
+# ----- 0.23.1: ok only when a call page loaded the image (live 21.10.2026) ------------------
+def _img_ok(monkeypatch):
+    _mock_http(monkeypatch, lambda req: httpx.Response(200, json={"ok": True, "id": CID, "url": URL,
+                                                                 "mime": "image/png"}))
+
+
+def test_image_not_loaded_in_page_is_never_ok(monkeypatch):
+    _img_ok(monkeypatch)
+    room = _room()
+    room.local_participant.ack = False   # the page could not load it (server restarted)
+    res = asyncio.run(cli._control_handler(_ctl(room), {"cmd": "card", "kind": "image", "image": SVG}))
+    assert res["ok"] is False and res["type"] == "not_shown" and "did not load" in res["error"]
+    assert res["id"] == CID   # the card went out, the answer says it was not seen
+
+
+def test_image_without_page_answer_is_never_ok(monkeypatch):
+    _img_ok(monkeypatch)
+    monkeypatch.setattr(vc, "ACK_WAIT_S", 0.3)
+    room = _room()
+    room.local_participant.ack = None   # old page or offline: nobody answers
+    ctl = _ctl(room)
+
+    async def go():
+        return await ctl.card_acks.wait("x" * 16, {"host"}, timeout=0.2)
+    assert asyncio.run(go()) == (set(), set())
+    res = asyncio.run(cli._control_handler(ctl, {"cmd": "card", "kind": "image", "image": SVG}))
+    assert res["ok"] is False and res["type"] == "not_shown"
+
+
+def test_image_without_human_is_never_ok(monkeypatch):
+    _img_ok(monkeypatch)
+    room = SimpleNamespace(local_participant=_Local(), remote_participants={
+        "voice-ai": _peer("voice-ai", kind=4)})
+    res = asyncio.run(cli._control_handler(_ctl(room), {"cmd": "card", "kind": "image", "image": SVG}))
+    assert res["ok"] is False and res["type"] == "no_human"
+
+
+def test_ack_waits_for_all_humans_or_grace():
+    async def go():
+        acks = vc.Acks()
+        acks.expect("a" * 16)
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.05, acks.note, {"id": "a" * 16, "ok": True}, "h1")
+        loop.call_later(0.1, acks.note, {"id": "a" * 16, "ok": False}, "h2")
+        loop.call_later(0.1, acks.note, {"id": "b" * 16, "ok": True}, "h3")   # other card: ignored
+        t0 = loop.time()
+        got = await acks.wait("a" * 16, {"h1", "h2"}, timeout=5.0, grace=3.0)
+        return got, loop.time() - t0
+    (loaded, failed), took = asyncio.run(go())
+    assert loaded == {"h1"} and failed == {"h2"} and took < 1.0   # both answered: no waiting
+
+
+def test_ack_result_texts():
+    assert vc.ack_result({"ok": True}, {"a"}, {"b"}, 2) == {"ok": True, "shown": 1, "not_loaded": 1}
+    assert vc.ack_result({"ok": True}, set(), set(), 0)["type"] == "no_human"
+
+
+def test_helper_card_from_pump_is_checked_and_confirmed():
+    room = _room()
+    ctl = _ctl(room)
+    card = {"id": CID, "kind": "image", "title": "Plan", "text": "", "from": "Mac: Scout", "url": URL,
+            "mime": "image/png", "at": 1.0}
+    res = asyncio.run(cli._publish_helper_card(ctl, room, card))
+    assert res == {"ok": True, "shown": 1}
+    (t, pkt, _), = room.local_participant.published
+    assert t == "operator.card" and pkt["from"] == "Mac: Scout" and pkt["seq"] == 1 and pkt["url"] == URL
+    bad = asyncio.run(cli._publish_helper_card(ctl, room, {**card, "url": "https://evil.example/x.png"}))
+    assert bad["ok"] is False and bad["status"] == 422 and len(room.local_participant.published) == 1
+    room.local_participant.ack = False
+    gone = asyncio.run(cli._publish_helper_card(ctl, room, {**card, "id": "b" * 16, "url": URL.replace(CID, "b" * 16)}))
+    assert gone["ok"] is False and gone["status"] == 409
+
+
+# --------------------------------------------------------------------------- #
+# 0.23.1 live 22.10.2026: a ~700 KB image crashed the control socket
+# ("Separator is not found, and chunk exceed the limit", then BrokenPipeError)
+# --------------------------------------------------------------------------- #
+def _png(n: int) -> bytes:
+    import os
+    return b"\x89PNG\r\n\x1a\n" + os.urandom(n - 8)
+
+
+def _show_over_socket(monkeypatch, tmp_path, argv, *, limit=None):
+    """`cli.main(argv)` against a real control socket. limit=None: the join's ControlServer;
+    else a bare asyncio server with that line limit (the pre-0.23.1 join). -> (rc, seen, out)"""
+    from voicehook_agent import session as vs
+    sock = tmp_path / "c.sock"
+    seen: list[dict] = []
+
+    async def handler(req):
+        seen.append(req)
+        return {"ok": True, "type": "card", "kind": req.get("kind")}
+
+    async def bare(reader, writer):  # the old join: default 64 KiB line limit
+        raw = await reader.readline()
+        seen.append(json.loads(raw))
+        writer.write(b'{"ok": true}\n')
+        await writer.drain()
+        writer.close()
+
+    monkeypatch.setattr(cli.vsession, "resolve_socket", lambda *a, **k: sock)
+    monkeypatch.setattr(cli, "_helper_relay", lambda *a, **k: None)
+
+    def run_main():
+        try:
+            cli.main(argv)
+        except SystemExit as e:
+            return e.code
+        return 0
+
+    async def go():
+        if limit is None:
+            srv = vs.ControlServer(sock, handler)
+            await srv.start()
+        else:
+            srv = await asyncio.start_unix_server(bare, path=str(sock), limit=limit)
+        try:
+            return await asyncio.to_thread(run_main)
+        finally:
+            if limit is None:
+                await srv.close()
+            else:
+                srv.close()
+    loop = asyncio.new_event_loop()
+    loop.set_exception_handler(lambda *_: None)  # the old server's crash is the point
+    try:
+        rc = loop.run_until_complete(go())
+    finally:
+        loop.close()
+    return rc, seen
+
+
+def test_700kb_image_goes_through_the_control_socket(monkeypatch, tmp_path, capsys):
+    data = _png(700 * 1024)
+    f = tmp_path / "shot.png"
+    f.write_bytes(data)
+    argv = ["show", "--card", "image", "--title", "Shot", "--file", str(f)]
+    rc, seen = _show_over_socket(monkeypatch, tmp_path, argv)
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert rc == 0 and out["ok"] is True, out
+    assert len(seen) == 1 and seen[0]["kind"] == "image"
+    assert base64.b64decode(seen[0]["image"].split(",", 1)[-1]) == data
+
+
+def test_positive_control_700kb_image_breaks_a_64kib_join(monkeypatch, tmp_path, capsys):
+    """Same request against asyncio's default limit: the join never sees it, the CLI gets
+    no answer (the live symptom). Proves the test above really exercises the limit."""
+    f = tmp_path / "shot.png"
+    f.write_bytes(_png(700 * 1024))
+    rc, seen = _show_over_socket(monkeypatch, tmp_path,
+                                 ["show", "--card", "image", "--file", str(f)], limit=64 * 1024)
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert seen == [] and rc != 0 and out["ok"] is False, out
+
+
+def test_too_large_image_is_a_clear_error_not_a_crash(monkeypatch, tmp_path, capsys):
+    f = tmp_path / "huge.png"
+    f.write_bytes(_png(vc.RASTER_MAX + 1024))
+    rc, seen = _show_over_socket(monkeypatch, tmp_path, ["show", "--card", "image", "--file", str(f)])
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert rc == 2 and out["type"] == "invalid" and "image max" in out["error"] and seen == [], out
+
+
+def test_over_limit_request_answers_instead_of_broken_pipe(monkeypatch, tmp_path):
+    """Client: a line over 4 MB is refused before sending. Join: a line over its limit gets
+    an answer, and the client reads it instead of dying on BrokenPipeError."""
+    from voicehook_agent import session as vs
+    sock = tmp_path / "s.sock"
+
+    async def handler(req):
+        return {"ok": True}
+
+    async def go():
+        srv = vs.ControlServer(sock, handler)
+        await srv.start()
+        try:
+            pre = await asyncio.to_thread(vs.request, sock, {"image": "A" * (vs.REQUEST_MAX + 1)}, 10)
+            monkeypatch.setattr(vs, "REQUEST_MAX", 64 * 1024 * 1024)  # client side only now
+            late = await asyncio.to_thread(vs.request, sock, {"image": "A" * (6 * 1024 * 1024)}, 10)
+        finally:
+            await srv.close()
+        return pre, late
+    pre, late = asyncio.run(go())
+    assert pre["ok"] is False and pre["type"] == "invalid" and "too large" in pre["error"]
+    assert late["ok"] is False and "too large" in late["error"], late

@@ -209,6 +209,7 @@ import asyncio
 import json
 import os
 import re
+import secrets
 import signal
 import sys
 import threading
@@ -805,7 +806,8 @@ PHONE_REASONS = ("done", "blocked", "decision")
 PHONE_MESSAGE_MAX = {"notify_me": 120, "call_me": 200}
 CLI_PHONE_PATH = "/api/cli/{kind}"
 PHONE_HTTP_TIMEOUT_S = {"notify_me": 20.0, "call_me": 720.0}   # server dials up to 690 s
-PHONE_SOCK_TIMEOUT_S = {"notify_me": 30.0, "call_me": 750.0, "data": 120.0}  # data: upload
+PHONE_SOCK_TIMEOUT_S = {"notify_me": 30.0, "call_me": 750.0, "data": 120.0,  # data: upload
+                        "card": 60.0}  # 0.23.1: image upload + wait for the call pages
 
 
 def phone_request(kind: str, reason: str, message: str | None) -> dict:
@@ -901,7 +903,33 @@ async def _run_helper_pump(room, ctl: _Control, stop: asyncio.Event) -> None:
             vactivity.append_line(ctl.activity_path.parent, vactivity.scrub_line(line))
 
     await pump.run(http, publish_status=publish_status,
-                   decide=decide, append_activity=append_activity, stop=stop)
+                   decide=decide,
+                   append_activity=append_activity, stop=stop,
+                   show_card=lambda card: _publish_helper_card(ctl, room, card))
+
+
+async def _publish_helper_card(ctl: _Control, room, card: dict) -> dict:
+    """0.23.1: a helper's card (server hub): publish as ourselves with its `from`; an image
+    only counts once a call page loaded it. -> pump result {ok, shown?} | {ok: false, status, detail}."""
+    pkt = vcards.relay_card(card, ctl.card_seq + 1)
+    if pkt is None:
+        return {"ok": False, "status": 422, "detail": "invalid card"}
+    if "url" in pkt:
+        ctl.card_acks.expect(pkt["id"])
+    try:
+        await room.local_participant.publish_data(json.dumps(pkt, ensure_ascii=False).encode("utf-8"),
+                                                  reliable=True, topic=vcards.TOPIC)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "status": 503, "detail": f"card not sent: {type(e).__name__}"}
+    ctl.card_seq += 1
+    if "url" not in pkt:
+        return {"ok": True}
+    humans = _human_ids(room)
+    loaded, failed = await ctl.card_acks.wait(pkt["id"], humans)
+    res = vcards.ack_result({"ok": True}, loaded, failed, len(humans))
+    if res.get("ok"):
+        return {k: res[k] for k in ("ok", "shown", "not_loaded") if k in res}
+    return {"ok": False, "status": 409, "detail": res.get("error", "not shown")}
 
 
 def _quit_signals() -> list:
@@ -979,6 +1007,7 @@ class _Control:
         # 0.21.0 cards (show --card): own seq, the api base + LiveKit token of the current
         # WebRTC cycle (image upload)
         self.card_seq = 0
+        self.card_acks = vcards.Acks()  # 0.23.1: vh.card_ack of the call pages
         self.api_base = ""
         self.lk_jwt = ""
         # 0.21.0 Silent Mode: aggregate of the humans' vh.mic_muted/vh.speaker_muted/vh.away
@@ -1136,6 +1165,12 @@ async def _upload_card_image(ctl: _Control, image: str) -> dict:
     return {"ok": False, "type": "card", "error": f"image not sent: HTTP {r.status_code} {detail}".strip()}
 
 
+def _human_ids(room) -> set[str]:
+    """Identities of the humans in the room (call pages)."""
+    return {p.identity for p in room.remote_participants.values()
+            if relay.is_human_peer(_kind_label(p), dict(getattr(p, "attributes", None) or {}))}
+
+
 async def _publish_card(ctl: _Control, room, body: dict) -> dict:
     """0.21.0 `show --card`: bridge -> POST /api/bridge/show (same body); WebRTC -> the card
     as topic operator.card (image: stored on the server first) and the panel as delta.ui to
@@ -1169,16 +1204,24 @@ async def _publish_card(ctl: _Control, room, body: dict) -> dict:
         except vcards.CardError as e:
             return {"ok": False, "type": "invalid", "error": str(e)}
         data = json.dumps(card, ensure_ascii=False).encode("utf-8")
+        if url is not None:
+            ctl.card_acks.expect(card["id"])
         try:
             await room.local_participant.publish_data(data, reliable=True, topic=vcards.TOPIC)
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "type": "card", "error": f"card not sent: {type(e).__name__}"}
         ctl.card_seq += 1
         res.update(id=card["id"], seq=card["seq"], kind=card["kind"])
+        if url is not None:
+            # 0.23.1: ok only when a call page loaded the image (vh.card_ack)
+            humans = _human_ids(room)
+            loaded, failed = await ctl.card_acks.wait(card["id"], humans)
+            res = vcards.ack_result(res, loaded, failed, len(humans))
+            if not res.get("ok"):
+                return res
     panel, large = body.get("panel"), body.get("large") is True
     if panel is not None:
-        humans = [p.identity for p in room.remote_participants.values()
-                  if relay.is_human_peer(_kind_label(p), dict(getattr(p, "attributes", None) or {}))]
+        humans = sorted(_human_ids(room))
         if humans:
             try:
                 for pkt in vcards.ui_packets(panel, large=large, cid=res.get("id")):
@@ -1224,6 +1267,9 @@ none opens that panel for the humans (none closes all). --large opens the card v
 the middle with this card at full size, for diagrams (swimlanes, many steps and arrows).
 Limits: text 4000 chars, title 80, SVG 300 KB (no <script>, <foreignObject>, on* attributes
 or external references), PNG/JPEG/WebP 1 MB; invalid: exit 2, nothing sent.
+An image answers ok (with "shown") only after a call page loaded it; else ok false, exit 1
+(not_shown / no_human). A helper session (no own join, relay.json) sends cards over the
+relay with itself as sender (no --panel/--large).
   voicehook-agent show --card code --title Fix --text "git push origin main"
   voicehook-agent show --card link --text https://voicehook.ai --panel cards
   voicehook-agent show --card image --title Ablauf --file swimlane.svg --large
@@ -2061,6 +2107,19 @@ async def _serve_relay_request(ctl: _Control, dir_: Path, obj: dict) -> None:
     sender = vrelayops.sender_for(frm)
     if body is None:
         res: dict = {"ok": False, "status": 422, "error": "invalid relay request"}
+    elif op == "card":  # 0.23.1: text/code/link card of a local helper, with its sender
+        room = await ctl.wait_room(10.0)
+        pkt = vcards.relay_card({**body, "id": secrets.token_hex(8), "from": sender},
+                                ctl.card_seq + 1) if room is not None else None
+        if room is None:
+            res = {"ok": False, "status": 503, "error": "not connected to the room (yet)"}
+        elif pkt is None:
+            res = {"ok": False, "status": 422, "error": "invalid card"}
+        else:
+            await room.local_participant.publish_data(json.dumps(pkt, ensure_ascii=False).encode("utf-8"),
+                                                      reliable=True, topic=vcards.TOPIC)
+            ctl.card_seq += 1
+            res = {"ok": True, "id": pkt["id"], "kind": pkt["kind"]}
     elif op == "decide":
         ctl.relay_senders[sender] = frm  # before the RPC: an answer can be quick
         out = await _decide_rpc(ctl, {**body, "sender": sender})
@@ -2586,6 +2645,10 @@ async def _connect_and_listen(
                 _emit_meta(f"call-ended reason={reason}")
                 disconnect_reason["name"] = "CALL_ENDED"
                 stop.set()
+        elif topic == vcards.ACK_TOPIC:
+            # 0.23.1: a call page loaded (or failed to load) one of our image cards
+            if ctl is not None and pkt.participant is not None:
+                ctl.card_acks.note(payload, getattr(pkt.participant, "identity", ""))
         elif topic == vdata.TOPIC:
             # 0.21.4 agent-to-agent data: a `next` event (never printed with its content)
             ev = vdata.receive_event(ctl.ident if ctl is not None else "", pkt.participant, payload)
@@ -3694,6 +3757,8 @@ def _run_client(args) -> int:
         # 0.16.0: a Claude Code session without its own join, while another session of
         # this machine is in the call: decide/board go over relay.json as a helper.
         # 0.22.2: activity, next and show too, with the same rule (relayops.client_relay).
+        # 0.23.1/0.23.1: show --card goes as a helper card (the card names the helper as
+        # its sender); ring shapes and --panel alone stay with the join.
         rel = _helper_relay(args.session)
         if rel is not None:
             return _run_relay_client(args, req, rel)
@@ -3734,8 +3799,9 @@ RELAY_CMDS = ("decide", "board", "activity", "next", "visual", "card")
 NO_SESSION_HINT = ("no own join and no helper credential for this session: pass --session "
                    "<slug>/<identity>, or import one per session: `voicehook-agent "
                    "helper-credential --label <name> | voicehook-agent helper-import --as <name>`")
-SHOW_HELPER = ("show (ring shapes, cards) is only for the session in the call: the relay has no "
-               "route for it. As a helper use status/activity/decide, or ask the main agent")
+SHOW_HELPER = ("show (ring shapes, --panel alone) is only for the session in the call: the relay "
+               "has no route for it. As a helper use show --card, status/activity/decide, or ask "
+               "the main agent")
 
 
 def _helper_relay(explicit_session: str | None) -> dict | None:
@@ -3843,7 +3909,7 @@ def _print_json(obj: dict) -> None:
 def _run_relay_client(args, req: dict, rel: dict) -> int:
     """0.16.0 helper session: decide / status board over relay.json (remote: HTTP,
     local: request file of the join). One JSON line, plus "via":"relay"."""
-    if req["cmd"] in ("visual", "card"):
+    if req["cmd"] == "visual" or (req["cmd"] == "card" and not req.get("kind")):
         _print_json({"ok": False, "type": "helper-unsupported", "via": "relay", "error": SHOW_HELPER})
         return 1
     local = vmulti._is_local(rel)
@@ -3871,6 +3937,14 @@ def _run_relay_client(args, req: dict, rel: dict) -> int:
                 out["decision"] = evs[0] if evs else None
                 if not evs:
                     out["timeout"] = True
+        elif req["cmd"] == "card":  # 0.23.1: a helper's card (image: server relay only)
+            body = vrelayops.card_body(req)
+            if local and body.get("kind") == "image":
+                raise vrelayops.RelayError("image cards of a helper need the server relay (the "
+                                           "server of this call is too old); text, code and link work", 422)
+            res = (vrelayops.local_request(rel, frm, "card", body) if local
+                   else vrelayops.remote_show(rel, frm, body))
+            out = {**res, "type": "card", "via": "relay"}
         else:
             board = req.get("board") or {}
             body = vrelayops.status_body(board)

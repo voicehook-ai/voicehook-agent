@@ -3,6 +3,29 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.23.1 (2026-10-22)
+
+Live (Oliver, 22.10.): `show --card image` with a ~700 KB screenshot crashed the join's control
+socket ("Separator is not found, and chunk exceed the limit"), the CLI then died on
+`BrokenPipeError`. Server side (voicehook-v4 #577, card acks and `relay/show`) is live since 21.10.
+
+- **Real screenshots work:** the control socket read one request line with asyncio's default
+  limit of 64 KB; a screenshot (base64 in that line) overran it. Now up to 4 MB.
+- **Error message instead of crash:** a request over 4 MB is refused by the CLI before sending
+  (`ok:false`, `type` `invalid`, "request too large"); a join that gets an over-limit line
+  answers instead of dropping the connection, and the CLI reads that answer instead of failing
+  on a broken pipe. An image over 1 MB stays a clear `invalid` (exit 2), nothing sent.
+- **`show` ok only with browser confirmation:** every call page loads an image card and answers
+  on `vh.card_ack` `{id, ok}`. `show --card image` answers `ok:true` with `shown` only after at
+  least one page loaded it; otherwise `ok:false` with `type` `not_shown` (did not load, or no
+  page answered) or `no_human`, exit 1.
+- **Cards from helper sessions:** `show --card ...` of a session without its own join goes over
+  the helper relay (`POST /api/activity/relay/show`, same routing rule as 0.22.2); the card names
+  the helper as sender. Same checks and limits, image only over the server relay, no
+  `--panel`/`--large`. Ring shapes and `--panel` alone stay with the join (clear error as a
+  helper). A WebRTC main agent gets such cards over its helper pump (kind `card`), publishes
+  them as itself and confirms them like its own.
+
 ## 0.23.0 (2026-10-21)
 
 Oliver: "Für Delta brauchen wir auch einen Data Channel, so wie die CLI untereinander Data
