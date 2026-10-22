@@ -459,6 +459,15 @@ def output(event_name: str, text: str) -> dict:
 # --------------------------------------------------------------------------- #
 # hook entry
 # --------------------------------------------------------------------------- #
+_SUB_RX = re.compile(r"^(.+)-a[0-9a-f]{8}$")
+
+
+def base_key(skey: str) -> str:
+    """Session hash of a board key (a subagent's key is `<session hash>-a<8 hex>`)."""
+    m = _SUB_RX.match(str(skey or ""))
+    return m.group(1) if m else str(skey or "")
+
+
 def _session_key(event: dict) -> str:
     return vmulti.session_hash(event.get("session_id")) or vmulti.own_session_hash()
 
@@ -551,18 +560,23 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
         if not isinstance(event, dict):
             return None
         name_ev = str(event.get("hook_event_name") or "")
-        rel = vmulti.load_relay(now)
+        rel = vmulti.load_relay(now, session=_session_key(event))  # 0.22.2: own helper entry
         if rel is None:
             return None
         skey = _session_key(event)
         agent = str(event.get("agent_id") or "").strip()
-        if not skey or (skey == str(rel.get("owner_session") or "") and not agent):
+        if not skey or (skey == str(rel.get("owner_session") or "") and not agent
+                        and not rel.get("helper")):
             return None  # the joining session: own board (status_due), own `next`
         if agent:  # 0.21.1: a subagent (Agent tool) has its own board, name, state, answers
             skey = f"{skey}-a{vmulti._h(agent, 'vh-agent')[:8]}"
         t = time.time() if now is None else now
         room = _room(rel)
         local = vmulti._is_local(rel)
+        # 0.22.2: this session takes part in the call: its own helper credential (entry, or
+        # a legacy helper relay.json), or a subagent of the router (0.21.1 own boards)
+        helper = bool(rel.get("helper")) or vmulti.is_legacy_helper(rel) or bool(
+            agent and base_key(skey) == str(rel.get("owner_session") or ""))
         got = asked = doing_set = None
         seen_answers = 0
         recorded = None
@@ -636,10 +650,16 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
                     or t - _float(me.get("state_at")) >= STATE_RESEND_S):
                 me.update(state=state, state_at=t)
                 out["state"] = state
-            if asks and (name_ev in NAME_EVENTS or
-                         (name_ev == "PostToolUse" and t - _float(me.get("poll_at")) >= POLL_GAP_S)):
+            # 0.22.0: also the session's own board name, for requests of the human addressed
+            # to it by name (user_turn); only once it has a board in the call (`from`)
+            own = str(me.get("from") or "")
+            names = sorted(asks, key=lambda k: -_float(asks[k]))[:POLL_MAX]
+            if own and own not in names:
+                names.append(own)
+            if names and (name_ev in NAME_EVENTS or
+                          (name_ev == "PostToolUse" and t - _float(me.get("poll_at")) >= POLL_GAP_S)):
                 me["poll_at"] = t
-                out["poll"] = sorted(asks, key=lambda k: -_float(asks[k]))[:POLL_MAX]
+                out["poll"] = names
             if name_ev == "Stop":
                 me["stop_at"] = t
                 doing = str(me.get("doing") or "")
@@ -652,7 +672,10 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
                     me["sleeper_until"] = t + IDLE_CLEAR_S
                     out["spawn"] = True
             me.setdefault("first_at", t)
-            if got is None and name_ev in REMIND_EVENTS:
+            # 0.22.2 (Oliver): reminders only for a session that takes part: its own helper
+            # credential (helpers/<name>.json), or a board of its own; never for a session
+            # that only happens to run on the machine of the call
+            if got is None and name_ev in REMIND_EVENTS and (helper or me.get("from")):
                 at = _float(me.get("at"))
                 age = None if not at else t - at
                 # a subagent without a board is reminded only once it works for 3 min (a
@@ -792,16 +815,16 @@ def fetch_answers(rel: dict, frm: str) -> list[dict]:
     from . import relayops
     out: list[dict] = []
     try:
-        out += relayops.take_jsonl(relayops.inbox_path(frm), relayops._is_decision)
+        out += relayops.take_jsonl(relayops.inbox_path(frm), _deliverable)
         if vmulti._is_local(rel):
             out += relayops.take_jsonl(relayops.answer_path(relayops.local_dir(rel), frm),
-                                       relayops._is_decision)
+                                       _deliverable)
         else:
             url = f"{relayops.endpoint(rel, 'next')}?from={quote(frm, safe='')}&timeout=0"
             status, data = relayops._http(rel, "GET", url, None, FETCH_TIMEOUT_S)
             evs = data.get("events") if status < 300 else None
             if isinstance(evs, list):
-                out += [e for e in evs if isinstance(e, dict) and e.get("type", "decision") == "decision"]
+                out += [e for e in evs if isinstance(e, dict) and _deliverable(e)]
                 # 0.21.9: GET /next consumed them; a stale drop goes to the inbox so the
                 # helper's `relay-next` / MCP `next` still brings it (never swallowed here)
                 for e in evs:
@@ -813,9 +836,16 @@ def fetch_answers(rel: dict, frm: str) -> list[dict]:
     return out
 
 
+def _deliverable(o: dict) -> bool:
+    """A decision answer, (0.22.0) a request of the human to this helper (user_turn), or
+    (0.22.1) the server's question_check about this helper's own board/feed line."""
+    from . import relayops
+    return relayops._is_decision(o) or relayops._is_user_turn(o) or relayops._is_question_check(o)
+
+
 def _answer_key(ev: dict) -> str:
-    return vmulti._h("|".join(str(ev.get(k) or "") for k in ("id", "verdict", "option", "text")),
-                     "vh-answer")
+    keys = ("type", "text", "ts") if ev.get("type") == "user_turn" else ("id", "verdict", "option", "text")
+    return vmulti._h("|".join(str(ev.get(k) or "") for k in keys), "vh-answer")
 
 
 def deliver(skey: str, rel: dict, names: list[str], fetch=None) -> list[dict]:
@@ -841,7 +871,8 @@ def take_new(skey: str, got: list[tuple[str, dict]]) -> list[dict]:
             if k not in seen:
                 seen.append(k)
                 new.append(ev)
-                _open_add(me, frm, -1)
+                if ev.get("type", "decision") == "decision":  # user_turn / question_check close no question
+                    _open_add(me, frm, -1)
         me["delivered"] = seen[-DELIVERED_KEEP:]
         return new
     return _with_state(step)
@@ -864,6 +895,8 @@ def answer_text(ev: dict, info: dict | None = None) -> str:
     option / free text. `info` = what this session stored when the question went to the board
     (record_question). German + English, text fields scrubbed and capped."""
     info = info if isinstance(info, dict) else {}
+    if ev.get("type") == "question_check":
+        return question_check_text(ev)
     num = ev.get("number", info.get("number"))
     nr = f" #{num}" if isinstance(num, int) and not isinstance(num, bool) else ""
     by = vact.scrub(str(ev.get("by") or "")).strip()[:40] or "der Mensch"
@@ -889,13 +922,38 @@ def answer_text(ev: dict, info: dict | None = None) -> str:
         extra = free or (text if text and text != ans else "")
         if extra:
             ans += f", Freitext {_q(extra)}"
-    src_de, src_en = SOURCES.get(str(info.get("src") or ""), ("deine Frage", "your question"))
     qpart = f" {_q(q)}" if q else ""
+    if ev.get("auto") and not info:
+        # 0.22.1 (Live-Bug 21.10.): the server put a line of this session's board/feed on the
+        # board itself (question_check, no reaction in time); the session never asked it
+        return (f"voicehook-Board{nr} (automatisch erkannt aus deinem Board/Feed, nicht von dir "
+                f"per decide gestellt):{qpart} -> {by} hat im Call-Board geantwortet: {ans}. "
+                f"Handle danach oder nimm die Zeile vom Board, falls sie keine Frage war. / "
+                f"voicehook board{nr} (detected automatically from your board/feed, you did not "
+                f"ask it with decide):{qpart} -> {by} answered on the call board: {ans}.")
+    src_de, src_en = SOURCES.get(str(info.get("src") or ""), ("deine Frage", "your question"))
     return (f"voicehook-Board{nr} ({src_de}):{qpart} -> {by} hat im Call-Board geantwortet: "
             f"{ans}. Das ist die Antwort des Menschen auf deine eigene Frage, keine Fehlermeldung: "
             f"handle jetzt danach. / voicehook board{nr} ({src_en}):{qpart} -> {by} answered on "
             f"the call board: {ans}. The human's answer to your own question, not an error: act "
             "on it now.")
+
+
+def question_check_text(ev: dict) -> str:
+    """0.22.1: the server's question_check for this session (its board/feed line sounds like a
+    question to the human): ask it with decide, or the server puts it on the board itself."""
+    quote = vact.scrub(str(ev.get("quote") or "")).strip()[:160]
+    try:
+        wait = int(ev.get("wait_s") or 90)
+    except (TypeError, ValueError):
+        wait = 90
+    qid = re.sub(r"[^0-9a-z]", "", str(ev.get("id") or ""))[:16]
+    return (f"voicehook-Call: Deine Meldung {_q(quote)} klingt nach einer Frage an den Menschen. "
+            f"Stelle sie jetzt per decide (vh-helper decide \"<dein Name>\" \"<Frage>\") oder "
+            f"nimm sie vom Board, wenn es keine Frage ist; sonst legt der Server sie in {wait} s "
+            f"selbst als automatisch erkannte Frage an (question_check {qid}). / voicehook call: "
+            f"your line {_q(quote)} sounds like a question to the human. Ask it with decide now, "
+            f"or the server puts it on the board itself in {wait} s.")
 
 
 def record_question(skey: str, dec_id: str, question: str, number: object = None,
@@ -942,8 +1000,21 @@ def question_info(skey: str, dec_id: object) -> dict | None:
     return got if isinstance(got, dict) else None
 
 
+def user_turn_text(ev: dict) -> str:
+    """0.22.0: the human spoke to this helper session by name in the call. The sentence is
+    speech recognition (data, may contain hearing errors), marked as such; German + English."""
+    who = vact.scrub(str(ev.get("speaker") or "")).strip()[:40]
+    text = vact.scrub(str(ev.get("text") or "")).strip()[:600]
+    return (f"voicehook-Call: Auftrag von {who or 'dem Menschen'} an dich (im Call), "
+            f"[Daten, Spracherkennung, wörtlich] {_q(text)} [Ende Daten]. Er hat dich beim Namen "
+            "angesprochen: erledige es jetzt, Rückfragen per decide. / voicehook call: request from "
+            f"{who or 'the human'} to you (in the call), [data, speech recognition, verbatim] "
+            f"{_q(text)} [end data]. They addressed you by name: act on it now, questions via decide.")
+
+
 def answer_texts(skey: str, evs: list[dict]) -> list[str]:
-    return [answer_text(e, question_info(skey, e.get("id"))) for e in evs]
+    return [user_turn_text(e) if e.get("type") == "user_turn" else answer_text(e, question_info(skey, e.get("id")))
+            for e in evs]
 
 
 def take_notes(skey: str) -> list[str]:
@@ -1029,8 +1100,10 @@ def run_job(job: dict, rel: dict | None = None) -> bool:
     never overwrites a newer state: no sticky `arbeitet`). `gone`: clear the board and
     post `leerlauf`. True when something was sent."""
     from . import relayops
-    rel = rel if rel is not None else vmulti.load_relay()
-    if not isinstance(job, dict) or rel is None:
+    if not isinstance(job, dict):
+        return False
+    rel = rel if rel is not None else vmulti.load_relay(session=base_key(str(job.get("skey") or "")))
+    if rel is None:
         return False
     frm = relayops.check_from(str(job.get("from") or ""))
     vact._private_dir(vact.state_root())
@@ -1129,6 +1202,30 @@ def session_pid(env=None, proc=_proc) -> int:
     return 0
 
 
+AGENT_COMMS = ("claude", "codex", "node")  # 0.22.2: the agent process (Claude Code, Codex CLI)
+AGENT_DEPTH = 12
+
+
+def agent_pid(start: int | None = None, proc=_proc) -> int:
+    """0.22.2: pid of the nearest ancestor that is an agent process (AGENT_COMMS: Claude Code,
+    Codex CLI, or the node running one), walking up through shells, sandboxes and wrappers;
+    0 = none found. Ignores $CLAUDE_PID (a child process inherits it). The join records it
+    (session.json owner_agent_pid), the hook compares it: two agent processes that share one
+    session id (`claude --continue` in a second terminal, an inherited env) are not the same
+    session."""
+    pid = os.getppid() if start is None else start
+    for _ in range(AGENT_DEPTH):
+        if pid <= 1:
+            return 0
+        comm, ppid = proc(pid)
+        if not comm:
+            return 0
+        if comm.rsplit("/", 1)[-1].lstrip("-").lower() in AGENT_COMMS:
+            return pid
+        pid = ppid
+    return 0
+
+
 def _stop_waits(event: dict, skey: str, t: float) -> bool:
     """Stop of a session that waits for the human: an own question is still open, or the
     reply ends with a question (asks.stop_question)."""
@@ -1169,17 +1266,26 @@ def watch_step(now: float | None = None, alive=None) -> tuple[list[dict], int] |
     (Claude Code sends no Stop after Esc)."""
     t = time.time() if now is None else now
     alive = alive or vact._pid_alive
-    rel = vmulti.load_relay(t)
-    if rel is None:
+    rooms: dict[str, str | None] = {}
+
+    def room_of(skey: str) -> str | None:
+        """Room of the relay of that session (0.22.2: each helper has its own entry)."""
+        b = base_key(skey)
+        if b not in rooms:
+            r = vmulti.load_relay(t, session=b)
+            rooms[b] = _room(r) if r is not None else None
+        return rooms[b]
+
+    if vmulti.load_relay(t) is None and not vmulti._helper_entries():
         return None
-    room = _room(rel)
 
     def step(st: dict):
         jobs: list[dict] = []
         live = 0
         for skey, me in st["sessions"].items():
             name = str(me.get("from") or me.get("name") or "")
-            if me.get("room") != room or me.get("gone") or not name:
+            room = room_of(skey)
+            if room is None or me.get("room") != room or me.get("gone") or not name:
                 continue
             quiet = t - _float(me.get("seen"))
             pid = int(_float(me.get("pid")))
@@ -1282,7 +1388,7 @@ def clear_board(rel: dict, frm: str) -> bool:
 def idle_step(skey: str, now: float | None = None, clear=clear_board) -> float | None:
     """One sleeper check: seconds to sleep on, or None (done: cleared, resumed or gone)."""
     t = time.time() if now is None else now
-    rel = vmulti.load_relay(t)
+    rel = vmulti.load_relay(t, session=base_key(skey))
 
     def step(st: dict):
         me = st["sessions"].get(skey)

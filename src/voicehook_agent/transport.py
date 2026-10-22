@@ -402,6 +402,21 @@ class BridgeRoom:
         r = await self._post_retry("/api/bridge/data", body, "data")
         return _json(r)
 
+    async def list_decisions(self) -> dict:
+        """Router-Fund 21.10.: GET /api/bridge/decisions -> {ok, open, count, recent?, boards?} (the call's
+        open decisions, last decided ones and helper boards). BridgeError otherwise."""
+        if self._http is None or not self._session or self._closed:
+            raise BridgeError("bridge not connected")
+        try:
+            r = await self._http.get(f"{self.api_base}/api/bridge/decisions", headers=self._auth())
+        except Exception as e:  # noqa: BLE001
+            raise BridgeError(f"bridge decisions failed: {type(e).__name__}") from None
+        if r.status_code != 200:
+            detail = _detail(r)
+            raise BridgeError(f"bridge decisions failed: HTTP {r.status_code} {detail}",
+                              status=r.status_code, body={"detail": detail})
+        return _json(r)
+
     async def upload_file(self, data: bytes, name: str = "", mime: str = "") -> dict:
         """0.21.4: POST /api/bridge/upload (raw body, X-Filename) -> {ok, file_id, url, size,
         expires_in}. BridgeError with the status otherwise (413 too large, 429 busy)."""
@@ -426,6 +441,13 @@ class BridgeRoom:
         | {id, ...changes} | {id, delete: true} -> {ok, id, number}; BridgeError with the
         status otherwise (403/404/409/422/503). Over WebRTC: the vh.decide RPC."""
         r = await self._post_retry("/api/bridge/decide", body, "decide")
+        return _json(r)
+
+    async def send_delta(self, body: dict) -> dict:
+        """0.23.0: POST /api/bridge/delta {kind: rule|note, op: add|list|rm, text?, id?,
+        persist?} -> {ok, kind, op, items, count, max, id?}; BridgeError with the status
+        otherwise (403/404/422/503). Over WebRTC: the vh.delta_notes RPC."""
+        r = await self._post_retry("/api/bridge/delta", body, "delta")
         return _json(r)
 
     async def _post_retry(self, path: str, body: dict, topic: str) -> httpx.Response:

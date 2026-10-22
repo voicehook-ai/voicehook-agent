@@ -152,9 +152,25 @@ def decide(event: dict, status: dict | None, last: dict | None, now: float,
 # --------------------------------------------------------------------------- #
 # I/O: the session's own live join, its status, the block state
 # --------------------------------------------------------------------------- #
+def _owner_agent_pid(d: Path) -> int:
+    try:
+        v = json.loads((d / vsession.INFO_NAME).read_text(encoding="utf-8")).get("owner_agent_pid")
+        return int(v or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0
+
+
+def _hook_agent_pid() -> int:
+    from . import board
+    return board.agent_pid()
+
+
 def own_join_dirs(event: dict) -> list[Path]:
-    """Live join dirs (this home or a pointer file) whose owner_session is the hook
-    event's session. Unknown owner or session: none (never block a foreign session)."""
+    """Live join dirs (this home or a pointer file) of the session that owns them (the
+    router): owner_session is the hook event's session AND (0.22.2) the agent process that
+    started the join is the one running this hook (session.json owner_agent_pid vs
+    board.agent_pid; checked when both are known). Unknown owner or session: none (never a
+    foreign session: no mid-turn call events, no Stop hint)."""
     from . import activity as vact
     from . import multisession as vmulti
     me = vmulti.session_hash(event.get("session_id")) or vmulti.own_session_hash()
@@ -166,7 +182,20 @@ def own_join_dirs(event: dict) -> list[Path]:
             seen.setdefault(str(d.resolve()), d)
         except OSError:
             continue
-    return [d for d in seen.values() if vact.dir_owner(d) == me]
+    mine = [d for d in seen.values() if vact.dir_owner(d) == me]
+    if not mine:
+        return []
+    hook_pid = None
+    out = []
+    for d in mine:
+        jp = _owner_agent_pid(d)
+        if jp > 0:
+            if hook_pid is None:
+                hook_pid = _hook_agent_pid()
+            if hook_pid > 0 and hook_pid != jp:
+                continue  # same session id, another agent process: not the router
+        out.append(d)
+    return out
 
 
 def dead_join_dirs(event: dict, now: float | None = None) -> list[Path]:

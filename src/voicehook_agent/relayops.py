@@ -16,9 +16,11 @@ Remote relay (relay.json kind remote {url, token}, url = <base>/api/activity/rel
 * POST <url>/decide  {from, question?, options?, recommend?, id?, delete?, context?, recent?}
   -> {ok, id, number} (0.21.0: context/recent = background for Delta)
 * POST <url>/status  {from, doing?, open?, done?, project?} -> {ok}; all empty removes the card
-* GET  <url>/next?from=<label>&timeout=<0..25> -> {events: [{type: "decision", ...}]}
-* POST <url>/show    {from, kind, title?, text?, image?} -> {ok, id, kind, from, shown?} (0.21.10:
+* POST <url>/show    {from, kind, title?, text?, image?} -> {ok, id, kind, from, shown?} (0.23.1:
   `show --card` of a helper; an image only ok once a call page loaded it, else 409 + why)
+* GET  <url>/next?from=<label>&timeout=<0..25> -> {events: [{type: "decision", ...}]}; 0.22.0
+  also {type: "user_turn", text, to, to_kind: "helper", speaker?, ts}: the human spoke to
+  this helper by name in the call (a request to it)
 Bearer relay token, never in the URL. 401 marks the token dead (relay.dead) like the hook.
 Events fetched while `decide --wait` waits for another id are kept in a local inbox
 (state dir, `relay-inbox-<hash of from>.jsonl`, 0600) and handed out by the next
@@ -27,7 +29,7 @@ Events fetched while `decide --wait` waits for another id are kept in a local in
 Local relay (relay.json kind local, WebRTC join; file protocol, stdlib only):
 * Request file `<join dir>/relay-req.jsonl` (0600, O_APPEND, flock, never a symlink), one
   JSON object per line: {"v": 1, "rid": "<16 hex>", "from": "<label>", "op":
-  "decide"|"status"|"state" (0.21.4: {state}, the helper's session state)|"card" (0.21.10: text,
+  "decide"|"status"|"state" (0.21.4: {state}, the helper's session state)|"card" (0.23.1: text,
   code or link card; images need the server relay), "body": {...},
   "ts": <unix>}. Written only when the join dir is
   ours and its session.json names the relay's owner pid.
@@ -66,7 +68,7 @@ REQ_LINE_MAX = 8192
 REQ_BATCH_MAX = 50
 ANS_MAX_BYTES = 256 * 1024
 RESULT_WAIT_S = 20.0
-SHOW_TIMEOUT_S = 50.0   # 0.21.10: server stores the image, the call pages confirm it (15 s)
+SHOW_TIMEOUT_S = 50.0   # 0.23.1: server stores the image, the call pages confirm it (15 s)
 POLL_S = 0.3
 FROM_MAX = vmulti.SESSION_LABEL_MAX
 
@@ -143,17 +145,29 @@ def _socket_answers() -> bool:
 
 
 def client_relay(explicit_session: str | None) -> dict | None:
-    """The relay.json a helper command should use, or None (talk to the own join)."""
+    """The relay a command of this session uses, or None (talk to the own join). ONE rule
+    for every helper-capable command (decide, status board, activity, next, show; 0.22.2):
+    1. `--session` given, or VOICEHOOK_NO_RELAY=1: never the relay (own join).
+    2. This agent session runs its own join (session.json names its session hash): own join.
+    3. Its own helper credential (helpers/<name>.json, multisession.load_helper:
+       $VOICEHOOK_SESSION_LABEL names it, or it was imported in this session, or the only
+       unbound one): the relay.
+    4. relay.json of a join on this machine (or a legacy pre-0.22.2 helper-import): the
+       relay, except for the session that wrote it; outside an agent session only when no
+       join control socket answers.
+    5. Nothing: None (the caller then reports no-session with a hint)."""
     if explicit_session or vmulti.relay_disabled():
+        return None
+    own = vmulti.own_session_hash()
+    if own and _own_join_running(own):
         return None
     rel = vmulti.load_relay()
     if rel is None:
         return None
-    own = vmulti.own_session_hash()
-    if own:
-        if own == str(rel.get("owner_session") or "") or _own_join_running(own):
-            return None
+    if rel.get("helper"):
         return rel
+    if own:
+        return None if own == str(rel.get("owner_session") or "") else rel
     return None if _socket_answers() else rel
 
 
@@ -424,7 +438,24 @@ def endpoint(rel: dict, name: str) -> str:
     return f"{parts.scheme}://{parts.netloc}{prefix}{RELAY_PATH}/{name}"
 
 
+RETRY_503_S = (0.5, 1.0, 2.0)  # 0.22.2: backoff while the server answers 503 (v4 #586)
+_sleep = time.sleep
+
+
 def _http(rel: dict, method: str, url: str, body: dict | None, timeout: float) -> tuple[int, dict]:
+    """One relay request. 503 (v4 #586: the main agent is briefly away) = wait and retry
+    (RETRY_503_S), never a dead credential; only 401 marks the token dead here (the hook's
+    post_line also 403/410)."""
+    for wait in (*RETRY_503_S, None):
+        status, out = _http_once(rel, method, url, body, timeout)
+        if status != 503 or wait is None:
+            return status, out
+        _sleep(wait)
+    return status, out  # pragma: no cover
+
+
+def _http_once(rel: dict, method: str, url: str, body: dict | None,
+               timeout: float) -> tuple[int, dict]:
     import urllib.error
     import urllib.request
     data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
@@ -471,7 +502,7 @@ def remote_status(rel: dict, frm: str, body: dict, timeout: float = HTTP_TIMEOUT
 
 
 def card_body(req: dict) -> dict:
-    """0.21.10 `show --card` of a helper -> relay body {kind, title?, text?, image?}. Panels belong
+    """0.23.1 `show --card` of a helper -> relay body {kind, title?, text?, image?}. Panels belong
     to the main agent: --panel/--large -> RelayError 422."""
     if req.get("panel") is not None or req.get("large"):
         raise RelayError("a helper session shows cards only: --panel/--large belong to the main agent", 422)
@@ -499,6 +530,19 @@ def _valid_card(body: object) -> dict | None:
     if body["kind"] == "link" and not re.fullmatch(r"https?://\S+", text.strip()):
         return None
     return {"kind": body["kind"], "text": text, "title": title}
+
+
+def base_url(rel: dict) -> str:
+    """<base>/api/activity/relay (the activity line endpoint) from the relay url."""
+    return endpoint(rel, "x")[:-2]
+
+
+def remote_activity(rel: dict, frm: str, body: dict, timeout: float = HTTP_TIMEOUT_S) -> dict:
+    """0.22.2: one activity line of a helper {text, context?, faq?} under `from`."""
+    status, out = _http(rel, "POST", base_url(rel), {"from": frm, **body}, timeout)
+    if status >= 300 or out.get("ok") is False:
+        return _err(status, out)
+    return {"ok": True, **({"line": out["line"]} if isinstance(out.get("line"), str) else {})}
 
 
 def remote_next(rel: dict, frm: str, timeout: float) -> list[dict]:
@@ -565,8 +609,18 @@ def _is_stale(o: dict) -> bool:
     return vrelay.is_stale(o)
 
 
+def _is_user_turn(o: dict) -> bool:
+    """0.22.0: the human spoke to this helper by name in the call (server: to_kind helper)."""
+    return o.get("type") == "user_turn"
+
+
+def _is_question_check(o: dict) -> bool:
+    """0.22.1: the server asks whether a board/feed line of this helper is a question."""
+    return o.get("type") == "question_check"
+
+
 def _wanted(o: dict) -> bool:
-    return _is_decision(o) or _is_stale(o)
+    return _is_decision(o) or _is_stale(o) or _is_user_turn(o) or _is_question_check(o)
 
 
 def view(ev: dict) -> dict:
@@ -635,7 +689,7 @@ def parse_request(obj: dict) -> tuple[str, str, str, dict | None] | None:
         body = _valid_status(obj.get("body"))
     elif op == "state":   # 0.21.4: session state of a local helper (board.py)
         body = _valid_state(obj.get("body"))
-    elif op == "card":    # 0.21.10: text/code/link card of a local helper
+    elif op == "card":    # 0.23.1: text/code/link card of a local helper
         body = _valid_card(obj.get("body"))
     else:
         return rid, frm, str(op), None

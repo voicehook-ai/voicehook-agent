@@ -16,13 +16,16 @@ answers to helper questions back (POST /api/helper/pump/answer). On leave it end
 
 Helper side: `decide`, `status` and `relay-next` of a session that is not in the call
 (relayops.py, 0.16.0) use that relay.json like the one of a bridge join. `helper-import`
-writes relay.json on another machine from a credential piped in over ssh (never through
-a chat): `voicehook-agent helper-credential --label crown | ssh crown 'voicehook-agent helper-import'`.
+writes the credential on another machine from a credential piped in over ssh (never
+through a chat): `voicehook-agent helper-credential --label crown | ssh crown
+'voicehook-agent helper-import --as crown'`. 0.22.2: one entry per helper session
+(~/.voicehook/helpers/<name>.json), never relay.json (see import_credential).
 """
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -30,7 +33,8 @@ from collections.abc import Awaitable, Callable
 from . import multisession as vmulti
 
 CREDENTIAL_PATH = "/api/helper/credential"
-_BG: set = set()   # 0.21.10: running helper cards (kept referenced)
+_BG: set = set()   # 0.23.1: running helper cards (kept referenced)
+DEFAULT_HELPER = "helper"  # 0.22.2: entry name when neither --as, a session label nor a label
 PUMP_WAIT_S = 25.0
 HTTP_TIMEOUT_S = 10.0
 _CLOCK = re.compile(r"^\d{2}:\d{2}:\d{2} ")
@@ -125,7 +129,7 @@ class Pump:
             await http.post(self.url + "/result", json={"id": str(item.get("id") or ""), "result": res},
                             headers=self._auth(), timeout=HTTP_TIMEOUT_S)
         elif kind == "card" and show_card is not None and isinstance(item.get("card"), dict):
-            # 0.21.10 helper card: publish as ourselves, wait for the call pages (image), answer.
+            # 0.23.1 helper card: publish as ourselves, wait for the call pages (image), answer.
             # In the background: waiting for the pages must not hold up the other helpers.
             t = asyncio.ensure_future(self._card(http, str(item.get("id") or ""), item["card"], show_card))
             _BG.add(t)
@@ -153,6 +157,17 @@ class Pump:
             return None
         return out if isinstance(out, dict) else None
 
+    async def user_turn(self, http, to: str, to_key: str, text: str, speaker: str = "") -> bool:
+        """0.22.0: the human spoke to a helper of this hub by name: into its inbox on the
+        server (POST <pump>/user_turn). False = not delivered (unknown helper, network)."""
+        try:
+            r = await http.post(self.url + "/user_turn",
+                                json={"to": to, "to_key": to_key, "text": text, "speaker": speaker},
+                                headers=self._auth(), timeout=HTTP_TIMEOUT_S)
+        except Exception:  # noqa: BLE001  best effort: the main agent gets the info copy
+            return False
+        return r.status_code == 200
+
     async def credential(self, http, label: str, rotate: bool = False) -> dict | None:
         out = await mint(http, self.api_base, self.token, label, rotate=rotate)
         if out is not None and out.get("pump"):
@@ -179,10 +194,18 @@ async def _sleep(stop: asyncio.Event, s: float) -> None:
 # --------------------------------------------------------------------------- #
 # another machine: helper-import
 # --------------------------------------------------------------------------- #
-def import_credential(raw: str) -> str:
-    """`helper-import`: relay.json from a credential answer ({token, url, expires_in}, the
-    join's relay.json or a /api/helper/credential answer) piped in, e.g. over ssh. No owner
-    pid (another machine's pid means nothing here). Returns the path."""
+def import_credential(raw: str, name: str | None = None) -> dict:
+    """`helper-import [--as NAME]` (0.22.2): ONE helper entry ~/.voicehook/helpers/<name>.json
+    (0600) from a credential answer ({token, url, expires_in}, the join's relay.json or a
+    /api/helper/credential answer) piped in, e.g. over ssh. Never relay.json any more: that
+    one file was shared by every session of the machine, so the last import named all of
+    them. No owner pid (another machine's pid means nothing here).
+    Name and binding:
+    * --as NAME: entry NAME, bound to no session; a session uses it when its
+      $VOICEHOOK_SESSION_LABEL is NAME (or it is the only unbound entry);
+    * else $VOICEHOOK_SESSION_LABEL, else the credential's label: bound to the agent session
+      that runs the import (CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID); outside one unbound.
+    Returns {path, name, bound, legacy}; legacy = a pre-0.22.2 shared relay.json exists."""
     try:
         d = json.loads(raw or "")
     except ValueError:
@@ -197,4 +220,14 @@ def import_credential(raw: str) -> str:
         except (TypeError, ValueError):
             exp = None
     room = str(d.get("room") or "") if isinstance(d, dict) else ""
-    return str(vmulti.write_relay(rel["url"], rel["token"], room, exp, owner_pid=0, owner_session=""))
+    label = str(d.get("label") or "") if isinstance(d, dict) else ""
+    explicit = vmulti.helper_key(name)
+    if name is not None and not explicit:
+        raise ValueError("helper-import --as: name must hold letters or digits")
+    key = explicit or vmulti.helper_key(os.environ.get(vmulti.LABEL_ENV)) or vmulti.helper_key(label)
+    key = key or DEFAULT_HELPER  # a relay.json copy without label, no session label
+    owner = "" if explicit else vmulti.own_session_hash()
+    path = vmulti.write_helper(key, rel["url"], rel["token"], room, exp, owner_session=owner,
+                               label=label)
+    return {"path": str(path), "name": key, "bound": bool(owner),
+            "legacy": vmulti.is_legacy_helper(vmulti.load_main_relay())}

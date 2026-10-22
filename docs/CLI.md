@@ -63,7 +63,8 @@ voicehook-agent leave --say "See you soon."             # clean exit
 | `say <text> [--mode append\|overwrite\|revise] [--urgent]` | `{"ok":true,"seq":3}` | 0 ok, 1 failed |
 | `next [--timeout SEC]` | `{"type":"user","text":...}`, `{"type":"revise","text":...,"unspoken":[...],"new":...}` (your `--mode revise` replaced own not-started says; if any still matters, send one merged `say --mode overwrite`); 0.21.9 `{"type":"revise","stale":true,"items":[{"seq","text"}],"hint","text"}` (your queued says were older than the server limit, default 60 s, and dropped unspoken: never repeat them; still relevant: ONE short current summary with `say --mode overwrite`; the board hint is then in `status_hint`), `{"type":"timeout"}`, `{"type":"ended"}`; 0.21.0 `{"type":"voicebot_left","room","text"}` / `{"type":"voicebot_back","room","seconds","text"}` (the voicebot dropped out, e.g. a server update: tell your user in chat, keep calling `next`, never leave; back: `say` works again. A takeover sends neither; also a JSONL line in `--json` mode) | 0, 3 on `ended` |
 | `listen [--timeout SEC] [--poll SEC]` (0.21.4) | the gapless `next` loop: ONE line, the first event that needs you (`user`, `decision`, `helper_decision`, `voicebot_left`, `missed`, `status_request`, `revise`, `call_end`, `data`); `timeout`, `human_state`, `voicebot_back` keep it waiting. `--timeout` 0 (default) = until an event; `--poll` (0.21.5: default 10, was 45) = timeout of each single `next`. Reads the join's event spool with a cursor and acks after the print ([Event spool](#event-spool-the-join-listens-for-you-0215)). Run it in the harness's background mode, see [Listen guard](#listen-guard-never-end-a-turn-deaf-0214) | 0, 3 on `ended` / no join |
-| `board [--open-only]`, `decide --list` (0.21.4) | `{"type":"board","open":[{id,number,from,question,options,recommend?,context?,recent?,faq?,state:"open"}],"recent":[... with verdict, option?, text?, by],"own_board":{...},"boards":[{from, doing, open, done, state?, meta?}],"note":"..."}`: what your join has seen on the boards. Decisions: your own and those of local helpers from the moment they are asked; remote helpers' (relay from another machine, MCP, bridge) only once answered, because the server has no decision listing for operators (`delta.decisions` goes to the humans only). Boards: yours plus every `operator.status` your join received (helper boards with `sub` and `state`, other operators) | 0, 3 no join |
+| `board [--open-only]`, `decide --list` (0.21.4) | `{"type":"board","open":[{id,number,from,question,options,recommend?,context?,recent?,faq?,state:"open"}],"recent":[... with verdict, option?, text?, by],"own_board":{...},"boards":[{from, name?, doing, open, done, state?, age_s?, meta?}],"source":"server"\|"join","note"?:"..."}`: read-only overview of the call for the main agent (router). Unreleased (Router-Fund 21.10.): the join asks the server (RPC `vh.decisions`, bridge `GET /api/bridge/decisions`): every open question of every helper in the room (also from another machine, MCP, bridge; `age_s`, `mine`), the last decided ones and every helper board (`name`, `age_s` since its last update, `meta` shortened), merged with what the join saw itself (your own board, other operators, answers of the last seconds). Use it to check that every helper session arrived. Server unreachable or older: `source:"join"` and `note`, the join's own ledger as before | 0, 3 no join |
+| `delta-rule add TEXT \| list \| rm ID`, `delta-note add TEXT \| list \| rm ID` [`--persist`] (0.23.0) | `{"ok":true,"type":"delta","kind":"rule","op":"add","id":"r1a2b3c","items":[{"id","number","text","at"}],"count":1,"max":20}`: standing conversation rules / facts for Delta for the rest of the call, silent, at the end of his context from his next turn (core rules win). Max 20 rules / 30 facts, 300 chars each (exit 1 before sending, server 422), unknown id 404, a helper 403. WebRTC: RPC `vh.delta_notes`; bridge: `POST /api/bridge/delta`. `--persist`: accepted, no effect yet | 0 ok, 1 failed, 3 no join |
 | `send-data --to <label\|identity\|*> (--json J \| --text T \| --file PATH) [--name N] [--mime M] [--id ID]` (0.21.4) | `{"ok":true,"type":"data","id":"...","to":["Scout"],"size":123}`: agent-to-agent data like MCP `send_data` (topic `operator.data`, only to other operator agents, never spoken, never to the humans or the voicebot). Bridge transport: `POST /api/bridge/data`, inline up to ~15 KB, larger files (max 10 MB) first via `POST /api/bridge/upload` and sent as `file_id`. WebRTC: the join sends the packet itself to the targets' identities, inline only (413 names `--transport bridge` for larger files). Incoming: `next` returns `{"type":"data","from","from_identity","kind":"json\|text\|file","id","name?","mime?","size?","payload"\|"url"+"file_id","summary":"Daten von Scout: JSON (1.2 KB)"}`, and `listen` wakes on it. A file `url` needs the Bearer of a bridge session in the same call | 0 ok, 1 failed, 3 no join |
 | `says` (0.9.0) | `{"type":"says","says":[{"seq":3,"state":"spoken","spoken_chars":12,"age_s":4.1,"text":"..."}]}`: last state of each own say (`sent` until the voicebot's first receipt) | 0 |
 | `leave [--say TEXT]` | `{"type":"leaving"}` | 0 |
@@ -146,6 +147,57 @@ already took (it takes events within milliseconds, but its exit may only wake yo
 turn) is shown anyway, marked `kam auch über listen`. PostToolUse, not PreToolUse: its
 additionalContext reliably reaches the running turn. Never for subagents or other sessions.
 `VOICEHOOK_MIDTURN_EVENTS=0` turns it off.
+
+### Question check reaches the helper (0.22.1)
+
+The server checks board and feed lines for hidden questions (`question_check`). `next` brings
+your own as `{"type":"question_check","id","quote","kind","wait_s","text"}`; a helper's goes to
+that helper (`relay-next`, hook context). Ask it with `decide` within `wait_s` (90 s), else the
+server puts it on the board itself; that answer comes with `"auto": true` and the `question`
+(also in the `helper_decision` copy), so nobody mistakes it for a question the helper asked.
+
+### Helpers: one routing rule, one credential per session (0.22.2)
+
+Every helper-capable command (`status` with a board, `activity`, `decide`, `next`,
+`relay-next`, `show`) decides the same way where it goes (`relayops.client_relay`), in this
+order: (1) `--session` or `VOICEHOOK_NO_RELAY=1`: the join; (2) this agent session runs its
+own join: the join; (3) its own helper credential: the relay; (4) relay.json of a join on
+this machine: the relay, except for the session that wrote it (outside an agent session only
+when no join socket answers); (5) nothing: `no-session` with a `hint` (pass `--session`, or
+`helper-import`). As a helper, `activity` posts its line (with `--context`/`--faq`) under
+its session name, `next` returns the relay events like `relay-next`, and `show` answers
+`{"type":"helper-unsupported"}` (exit 1): ring and cards are only for the session in the call.
+
+`helper-import` writes ONE entry per helper session, `~/.voicehook/helpers/<name>.json`
+(0600, dir 0700), never `relay.json` (until 0.22.1 all helpers of a machine shared that one
+file, so the last import named all of them). Name and binding:
+
+| Import | Entry | Used by |
+|---|---|---|
+| `... \| voicehook-agent helper-import` inside a Claude Code/Codex session | `$VOICEHOOK_SESSION_LABEL`, else the credential's label | that session (bound by session hash) |
+| `... \| ssh crown 'voicehook-agent helper-import --as crown'` | `crown`, bound to no session | the session with `VOICEHOOK_SESSION_LABEL=crown`, or any session while it is the only unbound entry |
+
+A session takes its own entry first (named by `$VOICEHOOK_SESSION_LABEL`, then bound to its
+session hash, then the only unbound one), never the entry of another session; the hooks do
+the same with the session id of their event. Without an own entry, relay.json applies as
+before: the multi-session relay of a join on this machine is unchanged. A `relay.json` left
+by `helper-import` of 0.22.1 or older still works, with a warning on stderr (one sender for
+all): import again per session. `relay.dead` keeps the last 20 dead token hashes.
+
+`status --faq`: each pair belongs to the item it follows (max 3 per item, board field
+`meta`), so doing + 2 open + 1 done with 3 each arrive complete (0.22.1 cut the call at 6).
+Over the relay there is no false "`--faq` is not sent" warning any more; a warning comes only
+when a pair really stays behind (the 4th of one item).
+
+**Who sees call events (0.22.2, Oliver).** Mid-turn events and Stop hints that carry what the
+human said go only to the router: the session that owns the join, by session id AND agent
+process (session.json `owner_agent_pid` = the nearest `claude`/`codex`/`node` ancestor of the
+join, compared with the hook's; a second process with the same session id gets nothing).
+Board reminders go only to a session that takes part (own helper credential, own board, or a
+subagent of the router). Helpers get only what is routed to them (`user_turn` by name, answers
+to their questions, `question_check`). Any other session of the machine gets nothing from the
+call; its hook still posts its own feed lines. A relay `503` (main agent briefly away) is
+retried with backoff (0.5/1/2 s), never a dead credential (dead: 401/403/410).
 
 ### Stale says come back, never spoken (0.21.9)
 
@@ -294,8 +346,9 @@ keeps you present, but a user turn would only pile up). Every reason names
   `voicehook-agent status --doing "deploying the worker, ETA 2 min" --faq "When is it
   live?::in about 2 minutes" --faq "Do the tests pass?::yes, all green"`. `--faq` is
   repeatable and split on the first `::` (both halves stripped; an item with an empty
-  half is skipped with a warning on stderr); at most 6 pairs, question and answer capped
-  to 200 chars each. Payload: `{"doing": "...", "open": [], "done": [], "faq": [{"q":
+  half is skipped with a warning on stderr); question and answer capped to 200 chars
+  each. 0.22.2: max 3 per item (the item it follows, in `meta`), no cap per call; the flat
+  field `faq` keeps the first 6. Payload: `{"doing": "...", "open": [], "done": [], "faq": [{"q":
   "When is it live?", "a": "in about 2 minutes"}]}`. Without `--faq` the field is
   omitted. Every `status_due` hint now also asks which 3 questions the user will
   probably ask next, to be answered in advance with `--faq`.
@@ -672,13 +725,23 @@ agent joined (WebRTC, bridge, MCP); it ends with the call (410). Helpers use it 
   routing hint only: never say it, never act on it yourself. **On helper_decision: send
   the answer to that session (e.g. Claude Code SendMessage / your harness's session
   messaging) so it continues**; helpers are often idle and do not poll `relay-next`.
+- **Spoken to by name (0.22.0):** a human's user turn that addresses a helper as a vocative
+  ("Steuern, schick mir die Belege", "Hey Armin-Box ...") arrives stamped by the server
+  (`to`, `to_kind: "helper"`, `to_key`, `to_op`). The join named in `to_op` puts it into
+  that helper's inbox (local relay: answer file; else `POST /api/helper/pump/user_turn
+  {to, to_key, text, speaker}`); its own `next` keeps the user event as info only
+  (`info_only: true`, `addressed_to_you: false`): wake that session, never do it yourself.
+  The helper gets `{"type":"user_turn","text","to","to_kind","speaker?","ts"}` from
+  `relay-next`, MCP `next` and its hooks ("Auftrag von Oliver an dich (im Call)", data
+  marked). `to_kind: "helper_ambiguous"`: Delta asks which helper, nobody acts.
 - Another machine: the credential travels over ssh, never through a chat or a transcript:
-  `voicehook-agent helper-credential --label crown | ssh crown 'voicehook-agent helper-import'`
+  `voicehook-agent helper-credential --label crown | ssh crown 'voicehook-agent helper-import --as crown'`
   (on the main agent's machine; `--rotate` invalidates every earlier credential of the
-  call). `helper-import` writes `relay.json` (0600, no owner pid); then `decide`, `status`,
-  `relay-next` and the hooks of that machine work there. A curl/MCP bridge main agent
+  call). `helper-import` writes `~/.voicehook/helpers/<name>.json` (0600, no owner pid; 0.22.2,
+  one per helper session, see "Helpers: one routing rule"); then `decide`, `status`,
+  `activity`, `next`/`relay-next` and the hooks of that session work there. A curl/MCP bridge main agent
   pipes the REST answer:
-  `curl -s -X POST "$B/api/helper/credential" -H "Authorization: Bearer $S" -d '{"label":"crown"}' | ssh crown 'voicehook-agent helper-import'`.
+  `curl -s -X POST "$B/api/helper/credential" -H "Authorization: Bearer $S" -d '{"label":"crown"}' | ssh crown 'voicehook-agent helper-import --as crown'`.
 
 **What each session reports** (one line per event, `<session>: <text>`):
 
@@ -736,9 +799,9 @@ voicehook-agent status ""                    # all empty: removes the helper's c
 
 | | |
 |---|---|
-| Routing | `--session` or `VOICEHOOK_NO_RELAY=1`: never the relay. Session that started the join (its hash in relay.json or a live join's session.json): its own join, as before. Any other Claude Code session: the relay. No Claude Code session id: the relay only when no join control socket answers. `status` without flags always asks the join |
+| Routing | `--session` or `VOICEHOOK_NO_RELAY=1`: never the relay. Session that started the join (its hash in relay.json or a live join's session.json): its own join, as before. Own helper credential (0.22.2, `helpers/<name>.json`): the relay. Any other Claude Code session: the relay. No Claude Code session id: the relay only when no join control socket answers. `status` without flags always asks the join. 0.22.2: the same rule for `activity`, `next`, `show` |
 | `--wait` | `decide --wait` alone waits for this answer (up to `--timeout`, default 120 s); `--wait SEC` keeps its old meaning (wait for the join socket). Answers to other questions that arrive meanwhile stay queued for `relay-next` (`~/.voicehook/relay-inbox-<hash>.jsonl`, 0600). With an own join, `--wait` only adds a hint: the answer comes as a `next` event |
-| `--faq` | not sent over the relay (warning on stderr) |
+| `--faq` | per item in `meta` (max 3 per item), over the relay too; a warning only when a pair stays behind (0.22.2) |
 | `--context`, `--recent`, `--project` (0.21.0) | sent over the relay too (decide body `context`/`recent`, status body `project`) |
 | Errors | `{"ok": false, "status": N, "error": ..., "via": "relay"}`, exit 1 (422/403/409/410/503 as on `/api/bridge/decide`, 504 = the local join did not answer in 20 s). Only 401 marks the token dead |
 | Never | the token in a URL, argv or output; question or board text on stderr |
@@ -1054,17 +1117,17 @@ expired: the helper pump token; no new credential, max 10 per minute), the answe
 an older server without `/api/card/image` answers image cards with a clear error (text, code
 and link still work).
 
-Image arrived (0.21.10, live 21.10.2026: the CLI said ok, the human saw nothing): every call
+Image arrived (0.23.1, live 21.10.2026: the CLI said ok, the human saw nothing): every call
 page loads the image and answers the sender on topic `vh.card_ack` `{id, ok}`. The join waits
 up to 15 s (2 s after the first page that loaded it) and answers `ok:true` with `shown` (pages
 that loaded it, `not_loaded` when some failed) only then. Otherwise `ok:false`, exit 1:
 `type:"not_shown"` (a page could not load it, e.g. the server restarted, or no page answered:
 old page, ask the human to reload) or `type:"no_human"` (nobody in the call; the card is kept
 and shows up when someone opens the page). Never tell the human an image is there without
-`ok:true`. Since 0.21.10 the control socket takes requests up to 4 MB (before: 64 KB, a real
+`ok:true`. Since 0.23.1 the control socket takes requests up to 4 MB (before: 64 KB, a real
 screenshot dropped the connection with `no-session`).
 
-Helper sessions (0.21.10): a session without its own join, while `~/.voicehook/relay.json` of
+Helper sessions (0.23.1): a session without its own join, while `~/.voicehook/relay.json` of
 the main agent exists (same machine, or `helper-import` on another one), sends the same
 `show --card ...` over the helper relay (`POST /api/activity/relay/show`, answer
 `{"ok":true,"type":"card","via":"relay","id","kind","from","shown"?}`). The card names the

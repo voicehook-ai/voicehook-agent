@@ -506,7 +506,7 @@ def test_local_answer_file_stale_is_taken(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# 0.21.10: show --card of a helper session (POST <relay>/show)
+# 0.23.1: show --card of a helper session (POST <relay>/show)
 # --------------------------------------------------------------------------- #
 PNG1 = (b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
 

@@ -421,7 +421,7 @@ def test_hook_main_spawns_detached_post(monkeypatch):
 def test_relay_post_child_reads_text_from_stdin(monkeypatch):
     _write()
     got = []
-    monkeypatch.setattr(ms, "post_line", got.append)
+    monkeypatch.setattr(ms, "post_line", lambda t, **k: got.append(t))
     assert ms.relay_post_main(json.dumps({"text": "a: b"})) == 0 and got == ["a: b"]
     assert ms.relay_post_main("garbage") == 0
 

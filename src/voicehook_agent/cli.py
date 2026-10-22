@@ -52,7 +52,7 @@ Status board (0.7.0):
     status [TEXT] [--doing T] [--open T]... [--done T]... [--faq 'F::A']... [-f board.json]
                                      send operator.status {doing, open[], done[]};
                                      replaces the last board, never spoken; '' clears.
-                                     0.10.0: --faq 'Frage::Antwort' (max 6) adds faq[{q, a}]:
+                                     0.10.0: --faq 'Frage::Antwort' (max 3 per item, after it):
                                      the user's likely next questions, answered in advance.
     next                             also yields {type:"status_request"} (the user asked
                                      what you are doing: send `status` at once) and adds
@@ -456,7 +456,7 @@ ONBOARDING_INVITE = [
     "voicehook-agent hook install",
     "voicehook-agent hook install --agent codex",
     "voicehook-agent join <invite-url> --name <Name> --model <Model> --json",
-    "voicehook-agent helper-credential --label <host> | ssh <host> 'voicehook-agent helper-import'",
+    "voicehook-agent helper-credential --label <host> | ssh <host> 'voicehook-agent helper-import --as <host>'",
 ]
 ONBOARDING_SHARE = [
     'voicehook-agent status --doing "<step + ETA>" --open "<task>"',
@@ -807,7 +807,7 @@ PHONE_MESSAGE_MAX = {"notify_me": 120, "call_me": 200}
 CLI_PHONE_PATH = "/api/cli/{kind}"
 PHONE_HTTP_TIMEOUT_S = {"notify_me": 20.0, "call_me": 720.0}   # server dials up to 690 s
 PHONE_SOCK_TIMEOUT_S = {"notify_me": 30.0, "call_me": 750.0, "data": 120.0,  # data: upload
-                        "card": 60.0}  # 0.21.10: image upload + wait for the call pages
+                        "card": 60.0}  # 0.23.1: image upload + wait for the call pages
 
 
 def phone_request(kind: str, reason: str, message: str | None) -> dict:
@@ -891,19 +891,25 @@ async def _run_helper_pump(room, ctl: _Control, stop: asyncio.Event) -> None:
     async def publish_status(payload: dict) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         await room.local_participant.publish_data(data, reliable=True, topic="operator.status")
+        ctl.ledger.board(ctl.ident, payload)  # `board` (Router-Fund 21.10.): our own packets never come back
+
+    async def decide(body: dict) -> dict:
+        out = await _decide_rpc(ctl, body)
+        ctl.ledger.created(body, out, frm=str(body.get("sender") or ""))  # `board` (Router-Fund 21.10.)
+        return out
 
     def append_activity(line: str) -> None:
         if ctl.activity_path is not None:
             vactivity.append_line(ctl.activity_path.parent, vactivity.scrub_line(line))
 
     await pump.run(http, publish_status=publish_status,
-                   decide=lambda body: _decide_rpc(ctl, body),
+                   decide=decide,
                    append_activity=append_activity, stop=stop,
                    show_card=lambda card: _publish_helper_card(ctl, room, card))
 
 
 async def _publish_helper_card(ctl: _Control, room, card: dict) -> dict:
-    """0.21.10: a helper's card (server hub): publish as ourselves with its `from`; an image
+    """0.23.1: a helper's card (server hub): publish as ourselves with its `from`; an image
     only counts once a call page loaded it. -> pump result {ok, shown?} | {ok: false, status, detail}."""
     pkt = vcards.relay_card(card, ctl.card_seq + 1)
     if pkt is None:
@@ -1001,7 +1007,7 @@ class _Control:
         # 0.21.0 cards (show --card): own seq, the api base + LiveKit token of the current
         # WebRTC cycle (image upload)
         self.card_seq = 0
-        self.card_acks = vcards.Acks()  # 0.21.10: vh.card_ack of the call pages
+        self.card_acks = vcards.Acks()  # 0.23.1: vh.card_ack of the call pages
         self.api_base = ""
         self.lk_jwt = ""
         # 0.21.0 Silent Mode: aggregate of the humans' vh.mic_muted/vh.speaker_muted/vh.away
@@ -1207,7 +1213,7 @@ async def _publish_card(ctl: _Control, room, body: dict) -> dict:
         ctl.card_seq += 1
         res.update(id=card["id"], seq=card["seq"], kind=card["kind"])
         if url is not None:
-            # 0.21.10: ok only when a call page loaded the image (vh.card_ack)
+            # 0.23.1: ok only when a call page loaded the image (vh.card_ack)
             humans = _human_ids(room)
             loaded, failed = await ctl.card_acks.wait(card["id"], humans)
             res = vcards.ack_result(res, loaded, failed, len(humans))
@@ -1302,6 +1308,7 @@ Examples:
 _SAY_MODES = ("append", "overwrite", "revise")
 SAY_DEFAULT_MODE = "append"
 _DECIDE_RPC = "vh.decide"  # decisions.RPC_METHOD on the worker (Decision Board)
+_LIST_RPC = "vh.decisions"  # decisions.RPC_LIST: open/recent decisions + helper boards
 DECIDE_CONTEXT_MAX = 1500  # 0.21.0 decisions.CONTEXT_MAX: background for Delta, never shown
 DECIDE_RECENT_MAX = 600    # 0.21.0 decisions.RECENT_MAX: last turn of the asking session
 
@@ -1378,6 +1385,108 @@ async def _send_data(ctl: _Control, req: dict) -> dict:
         return {"ok": False, "type": "data", "status": 503, "error": f"publish failed: {type(e).__name__}"}
     return {"ok": True, "type": "data", "id": pkt["id"], "to": [vdata.label(p) for p in targets],
             "size": size}
+
+
+_DELTA_RPC = "vh.delta_notes"  # deltanotes.RPC_METHOD on the worker (rules/facts for Delta)
+DELTA_KINDS = {"delta-rule": "rule", "delta-note": "note"}
+DELTA_TEXT_MAX = 300           # deltanotes.TEXT_MAX (server: 422 over it, never cut)
+
+
+def delta_request(cmd: str, action: str, arg: str | None, persist: bool = False) -> dict:
+    """`delta-rule|delta-note add TEXT | list | rm ID` -> the request for the join. Bad input:
+    ValueError before anything is sent."""
+    kind = DELTA_KINDS[cmd]
+    req: dict = {"cmd": "delta", "kind": kind, "op": action}
+    if action == "add":
+        text = " ".join(str(arg or "").split())
+        if text == "-":
+            text = " ".join(sys.stdin.read().split())
+        if not text:
+            raise ValueError(f"{cmd} add needs the text")
+        if len(text) > DELTA_TEXT_MAX:
+            raise ValueError(f"{cmd} add: max {DELTA_TEXT_MAX} characters (got {len(text)}), nothing sent")
+        req["text"] = text
+        if persist:
+            req["persist"] = True
+    elif action == "rm":
+        if not arg:
+            raise ValueError(f"{cmd} rm needs the id (see {cmd} list)")
+        req["id"] = str(arg).strip()
+    elif arg:
+        raise ValueError(f"{cmd} list takes no argument")
+    return req
+
+
+async def _delta_rpc(ctl: _Control, req: dict) -> dict:
+    """0.23.0: rules/facts for Delta. WebRTC: vh.delta_notes RPC to the voicebot (only the
+    operator itself, never with a helper `sender`); bridge: POST /api/bridge/delta."""
+    body = {k: req[k] for k in ("kind", "op", "text", "id", "persist") if req.get(k) is not None}
+    room = await ctl.wait_room(10.0)
+    if room is None:
+        return {"ok": False, "type": "delta", "error": "not connected to the room (yet)"}
+    send = getattr(room, "send_delta", None)
+    if send is not None:  # bridge: the server runs the RPC for us
+        try:
+            out = await send(body)
+        except vtransport.BridgeError as e:
+            detail = (e.body or {}).get("detail") if isinstance(e.body, dict) else None
+            return {"ok": False, "type": "delta", "status": e.status or 503, "error": str(detail or e)}
+        return {**out, "type": "delta"}
+    worker = next((p.identity for p in room.remote_participants.values()
+                   if _kind_label(p) == "agent"), None)
+    if worker is None:
+        return {"ok": False, "type": "delta", "status": 503, "error": "voicebot not in the call, try again shortly"}
+    deadline = time.monotonic() + 8.0
+    while True:
+        try:
+            raw = await room.local_participant.perform_rpc(
+                destination_identity=worker, method=_DELTA_RPC,
+                payload=json.dumps(body, ensure_ascii=False), response_timeout=8.0)
+            out = json.loads(raw or "{}")
+        except ValueError:
+            return {"ok": False, "type": "delta", "status": 502, "error": "bad answer"}
+        except Exception as e:  # noqa: BLE001  RPC error/timeout (old server: unsupported method)
+            return {"ok": False, "type": "delta", "status": 503, "error": f"delta rpc failed: {type(e).__name__}"}
+        if not isinstance(out, dict):
+            return {"ok": False, "type": "delta", "status": 502, "error": "bad answer"}
+        if out.get("status") != 425 or time.monotonic() >= deadline:
+            if out.get("status") == 425:
+                return {"ok": False, "type": "delta", "status": 503, "error": "voicebot not ready, try again shortly"}
+            if not out.get("ok") and "detail" in out:
+                out = {**out, "error": out.pop("detail")}
+            return {**out, "type": "delta"}
+        await asyncio.sleep(0.25)
+
+
+async def _list_rpc(ctl: _Control) -> dict:
+    """Router-Fund 21.10.: the call's decisions and helper boards from the server, read-only: WebRTC =
+    RPC vh.decisions to the voicebot, bridge = GET /api/bridge/decisions. Never logs content."""
+    room = await ctl.wait_room(10.0)
+    if room is None:
+        return {"ok": False, "error": "not connected to the room (yet)"}
+    list_decisions = getattr(room, "list_decisions", None)
+    if list_decisions is not None:  # bridge
+        try:
+            return await list_decisions()
+        except vtransport.BridgeError as e:
+            return {"ok": False, "status": e.status or 503, "error": str(e)}
+    worker = next((p.identity for p in room.remote_participants.values()
+                   if _kind_label(p) == "agent"), None)
+    if worker is None:
+        return {"ok": False, "status": 503, "error": "voicebot not in the call, try again shortly"}
+    deadline = time.monotonic() + 8.0
+    while True:
+        try:
+            raw = await room.local_participant.perform_rpc(
+                destination_identity=worker, method=_LIST_RPC, payload="{}", response_timeout=8.0)
+            out = json.loads(raw or "{}")
+        except Exception as e:  # noqa: BLE001  RPC error/timeout/bad JSON: only the class
+            return {"ok": False, "status": 503, "error": f"decisions rpc failed: {type(e).__name__}"}
+        if not isinstance(out, dict):
+            return {"ok": False, "status": 502, "error": "bad answer"}
+        if out.get("status") != 425 or time.monotonic() >= deadline:
+            return out
+        await asyncio.sleep(0.25)
 
 
 async def _decide_rpc(ctl: _Control, req: dict) -> dict:
@@ -1531,11 +1640,15 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         out = await _decide_rpc(ctl, req)
         ctl.ledger.created(req, out)  # 0.21.4 `board`
         return out
+    if cmd == "delta":  # 0.23.0 `voicehook-agent delta-rule|delta-note` (rules/facts for Delta)
+        ctl.watchdog.touch()
+        return await _delta_rpc(ctl, req)
     if cmd == "data":  # 0.21.4 `voicehook-agent send-data` (datachan.py)
         ctl.watchdog.touch()
         return await _send_data(ctl, req)
     if cmd == "board_list":  # 0.21.4 `voicehook-agent board` / `decide --list`
-        return ctl.ledger.listing(only_open=bool(req.get("open")))
+        # Router-Fund 21.10.: the server's listing (all helpers of the room) merged with our own ledger
+        return ctl.ledger.merged(await _list_rpc(ctl), only_open=bool(req.get("open")))
     if cmd == "vocab":
         # 0.21.0: teach the call's speech recognition (server adds to the payer's account)
         ctl.watchdog.touch()
@@ -1886,6 +1999,63 @@ def _route_helper_decision(ctl: _Control, payload: dict) -> bool:
     return True
 
 
+def _route_helper_user_turn(ctl: _Control, payload: dict, own: set[str]) -> bool:
+    """0.22.0 (server 21.10.2026): a user turn addressed to a helper session by name
+    (to_kind helper, to_op = us). A helper of this machine (to_key = our sender for it) gets
+    it in its answer file (local relay: its `relay-next`, MCP `next` and hooks bring it);
+    otherwise the server hub's inbox (POST /api/helper/pump/user_turn). Never logs content."""
+    if payload.get("role") != "user" or payload.get("to_kind") != "helper":
+        return False
+    to = payload.get("to") if isinstance(payload.get("to"), list) else []
+    text = " ".join(str(payload.get("text") or "").split())
+    if len(to) != 1 or not text or str(payload.get("to_op") or "") not in own:
+        return False
+    name, key = str(to[0])[:80], str(payload.get("to_key") or "")
+    speaker = str(payload.get("speaker") or "")
+    frm = key.split(": ", 1)[1] if ": " in key else ""
+    if frm and ctl.activity_path is not None and key == vrelayops.sender_for(frm):
+        try:
+            vrelayops.append_jsonl(vrelayops.answer_path(ctl.activity_path.parent, frm),
+                                   relay.helper_user_turn_event(text, name, speaker))
+            return True
+        except (OSError, vrelayops.RelayError) as e:
+            print(f"[warn] relay user turn not written ({type(e).__name__})", file=sys.stderr, flush=True)
+    if ctl.helper_pump is not None and ctl.helper_http is not None:
+        asyncio.ensure_future(ctl.helper_pump.user_turn(ctl.helper_http, name, key, text, speaker))
+        return True
+    return False
+
+
+def _route_question_check(ctl: _Control, payload: dict, transport: str) -> bool:
+    """0.22.1 (Live-Bug 21.10.2026): the server's question_check (a board/feed line sounds like
+    a question; ask it with decide or confirm no_question, else the server puts it on the board
+    itself after wait_s). With `sender` it belongs to a HELPER: local relay -> its answer file,
+    WebRTC hub -> the server inbox (pump/answer); bridge: the server already did that. Without
+    `sender` it is ours: own `next`. Before, the join dropped it, the helper never knew, and
+    the automatic decision later looked like someone else's question."""
+    ev = {k: payload[k] for k in ("type", "id", "quote", "kind", "wait_s", "text", "sender") if k in payload}
+    snd = str(payload.get("sender") or "")
+    if not snd:
+        ctl.events.put_nowait({**ev, "ts": time.time()})
+        return True
+    if transport == "bridge":
+        return False
+    frm = ctl.relay_senders.get(snd)
+    if frm and ctl.activity_path is not None:
+        try:
+            vrelayops.append_jsonl(vrelayops.answer_path(ctl.activity_path.parent, frm), ev)
+            return True
+        except (OSError, vrelayops.RelayError) as e:
+            print(f"[warn] relay question_check not written ({type(e).__name__})", file=sys.stderr, flush=True)
+            return False
+    if ctl.helper_pump is not None and ctl.helper_http is not None:
+        t = asyncio.ensure_future(ctl.helper_pump.answer(ctl.helper_http, snd, ev))
+        _BG_TASKS.add(t)
+        t.add_done_callback(_BG_TASKS.discard)
+        return True
+    return False
+
+
 def _route_helper_stale(ctl: _Control, ev: dict) -> bool:
     """0.21.9: a stale event whose `sender` names a local helper session also goes into that
     helper's answer file (its `relay-next` / MCP `next` brings it); our own `next` keeps it."""
@@ -1937,7 +2107,7 @@ async def _serve_relay_request(ctl: _Control, dir_: Path, obj: dict) -> None:
     sender = vrelayops.sender_for(frm)
     if body is None:
         res: dict = {"ok": False, "status": 422, "error": "invalid relay request"}
-    elif op == "card":  # 0.21.10: text/code/link card of a local helper, with its sender
+    elif op == "card":  # 0.23.1: text/code/link card of a local helper, with its sender
         room = await ctl.wait_room(10.0)
         pkt = vcards.relay_card({**body, "id": secrets.token_hex(8), "from": sender},
                                 ctl.card_seq + 1) if room is not None else None
@@ -1961,6 +2131,7 @@ async def _serve_relay_request(ctl: _Control, dir_: Path, obj: dict) -> None:
         if room is None:
             res = {"ok": False, "status": 503, "error": "not connected to the room (yet)"}
         else:
+            ctl.relay_senders[sender] = frm  # 0.22.1: a board-only helper gets its question_check
             helper = ctl.relay_helpers.setdefault(sender, {})
             if op == "state":  # 0.21.4: the helper's session state from its hooks
                 helper["state"] = body["state"]
@@ -1972,6 +2143,9 @@ async def _serve_relay_request(ctl: _Control, dir_: Path, obj: dict) -> None:
                 payload["state"] = helper["state"]
             data = json.dumps({**payload, "sub": sender}, ensure_ascii=False).encode("utf-8")
             await room.local_participant.publish_data(data, reliable=True, topic="operator.status")
+            ledger = getattr(ctl, "ledger", None)  # `board` (Router-Fund 21.10.)
+            if ledger is not None:
+                ledger.board(ctl.ident, {**payload, "sub": sender})
             res = {"ok": True}
     vrelayops.append_jsonl(vrelayops.answer_path(dir_, frm), {"type": "result", "rid": rid, **res})
 
@@ -2445,6 +2619,10 @@ async def _connect_and_listen(
             if ctl is not None:
                 ev = relay.user_turn_event(role, text, payload)
                 if ev is not None:
+                    hf = relay.helper_turn_fields(payload)
+                    if hf:  # 0.22.0: the human spoke to a helper by name: info copy for us
+                        ev.update(hf)
+                        _route_helper_user_turn(ctl, payload, _own_ids())
                     ctl.events.put_nowait(ev)
                     ctl.clock.user()
                     _print_stale(ctl, json_mode)  # 0.13.0
@@ -2468,7 +2646,7 @@ async def _connect_and_listen(
                 disconnect_reason["name"] = "CALL_ENDED"
                 stop.set()
         elif topic == vcards.ACK_TOPIC:
-            # 0.21.10: a call page loaded (or failed to load) one of our image cards
+            # 0.23.1: a call page loaded (or failed to load) one of our image cards
             if ctl is not None and pkt.participant is not None:
                 ctl.card_acks.note(payload, getattr(pkt.participant, "identity", ""))
         elif topic == vdata.TOPIC:
@@ -2522,6 +2700,11 @@ async def _connect_and_listen(
                     t.add_done_callback(_BG_TASKS.discard)
                 else:
                     ctl.events.put_nowait(relay.helper_decision_event(payload))
+            elif (topic == "operator.question_check" and ctl is not None
+                    and payload.get("type") == "question_check"
+                    and getattr(pkt.participant, "kind", None) == 4):
+                # 0.22.1: only from the worker (agent kind), like the server bridge
+                _route_question_check(ctl, payload, transport)
             elif (topic == "operator.helper_decision" and ctl is not None
                     and payload.get("type") == "helper_decision"):
                 # 0.18.1, bridge transport: the server's copy of a helper's answer
@@ -2998,7 +3181,10 @@ async def _join(
                                            "identity": ident, "api_base": api_base,
                                            "started": time.time(),
                                            # 0.15.0: hash only; hooks of other sessions skip this join
-                                           "owner_session": vmulti.own_session_hash()})
+                                           "owner_session": vmulti.own_session_hash(),
+                                           # 0.22.2: the agent process that started us; only
+                                           # its hooks get mid-turn events (listenguard)
+                                           "owner_agent_pid": vboardpid()})
             vactivity.write_pointer(sess_dir)  # 0.13.0: hook finds us under any home
             # 0.21.5: durable event spool in the session dir (0600); a restart of this join
             # (self-update) picks up what was not acked yet, an old one is deleted
@@ -3391,6 +3577,9 @@ def _client_request(args) -> dict:
         return {"cmd": "leave", "say": args.say} if args.say else {"cmd": "leave"}
     if args.cmd == "send-data":  # 0.21.4
         return _data_request(args)
+    if args.cmd in DELTA_KINDS:  # 0.23.0
+        return delta_request(args.cmd, args.action, " ".join(args.arg or []) or None,
+                             bool(getattr(args, "persist", False)))
     if args.cmd == "board" or (args.cmd == "decide" and getattr(args, "list", False)):
         # 0.21.4: open + recent decisions and the boards this join has seen
         return {"cmd": "board_list", "open": bool(getattr(args, "open_only", False))}
@@ -3455,7 +3644,10 @@ def _client_request(args) -> dict:
                 file_obj = json.load(fh)
         def warn(m: str) -> None:
             print(m, file=sys.stderr, flush=True)
-        faq = relay.parse_faq(faq_raw, warn=warn)
+        # 0.22.2: every --faq belongs to the item it follows (meta, max ITEM_FAQ_MAX per item,
+        # warned there); the flat board field faq keeps the first FAQ_MAX pairs silently, so
+        # doing + several open/done items with 3 pairs each is never cut at 6 any more
+        faq = relay.parse_faq(faq_raw, limit=len(faq_raw))[:relay.FAQ_MAX]
         board = relay.build_board(args.text, args.doing, args.open, args.done, file_obj, faq=faq)
         # 0.21.6: waiting for the human is a decision, never only a status (waitcheck.py)
         vwait.check(board.get("doing"), "status --doing")
@@ -3527,14 +3719,21 @@ def _relay_owner_pid() -> int | None:
     return None
 
 
-def _run_helper_import() -> int:
-    """`helper-import`: credential JSON on stdin (over ssh, never a chat) -> relay.json."""
+def _run_helper_import(args=None) -> int:
+    """`helper-import [--as NAME]`: credential JSON on stdin (over ssh, never a chat) ->
+    ~/.voicehook/helpers/<name>.json (0.22.2: one per helper session, vhelp.import_credential)."""
     try:
-        path = vhelp.import_credential(sys.stdin.read())
+        got = vhelp.import_credential(sys.stdin.read(), getattr(args, "as_name", None))
     except (OSError, ValueError) as e:
         print(json.dumps({"ok": False, "type": "error", "error": str(e)}), flush=True)
         return 1
-    print(json.dumps({"ok": True, "type": "helper-import", "path": path}), flush=True)
+    if got.pop("legacy", False):
+        print(vmulti.LEGACY_WARN, file=sys.stderr, flush=True)
+    if not got["bound"]:
+        print(f"[info] helper {got['name']!r} is bound to no session: start the helper session "
+              f"with VOICEHOOK_SESSION_LABEL={got['name']} (or keep it the only unbound one)",
+              file=sys.stderr, flush=True)
+    print(json.dumps({"ok": True, "type": "helper-import", **got}), flush=True)
     return 0
 
 
@@ -3554,12 +3753,13 @@ def _run_client(args) -> int:
     except (OSError, ValueError) as e:
         print(json.dumps({"ok": False, "type": "error", "error": str(e)}, ensure_ascii=False), flush=True)
         return 1
-    if req.get("cmd") in ("decide", "board") or (req.get("cmd") == "card" and req.get("kind")):
+    if req.get("cmd") in RELAY_CMDS:
         # 0.16.0: a Claude Code session without its own join, while another session of
         # this machine is in the call: decide/board go over relay.json as a helper.
-        # 0.21.10: show --card too (the card names the helper as its sender; --panel alone
-        # stays with the join, as before).
-        rel = vrelayops.client_relay(args.session)
+        # 0.22.2: activity, next and show too, with the same rule (relayops.client_relay).
+        # 0.23.1/0.23.1: show --card goes as a helper card (the card names the helper as
+        # its sender); ring shapes and --panel alone stay with the join.
+        rel = _helper_relay(args.session)
         if rel is not None:
             return _run_relay_client(args, req, rel)
     wait_answer = req.get("cmd") == "decide" and getattr(args, "wait", None) == WAIT_ANSWER
@@ -3571,12 +3771,12 @@ def _run_client(args) -> int:
             req = {**req, "lease": True}  # 0.21.5: acked below, after the print (spool.py)
         reply = vsession.request(sock, req, timeout=sock_timeout)
     except vsession.SessionError as e:
-        print(json.dumps({"ok": False, "type": "no-session", "error": str(e)},
-                         ensure_ascii=False), flush=True)
+        print(json.dumps({"ok": False, "type": "no-session", "error": str(e),
+                          **_no_session_hint(args, req)}, ensure_ascii=False), flush=True)
         return 3
     except OSError as e:
-        print(json.dumps({"ok": False, "type": "no-session", "error": repr(e)},
-                         ensure_ascii=False), flush=True)
+        print(json.dumps({"ok": False, "type": "no-session", "error": repr(e),
+                          **_no_session_hint(args, req)}, ensure_ascii=False), flush=True)
         return 3
     if wait_answer and reply.get("ok"):
         reply["hint"] = "own join: the answer comes as a `next` event type decision"
@@ -3591,6 +3791,48 @@ def _run_client(args) -> int:
     if reply.get("type") == "ended":
         return 3
     return 0 if reply.get("ok") else 1
+
+
+# 0.22.2: the requests a helper session (no own join) sends over the relay; one routing rule
+# for all of them (relayops.client_relay). `status` without a board, `ui`, `say` & co. never.
+RELAY_CMDS = ("decide", "board", "activity", "next", "visual", "card")
+NO_SESSION_HINT = ("no own join and no helper credential for this session: pass --session "
+                   "<slug>/<identity>, or import one per session: `voicehook-agent "
+                   "helper-credential --label <name> | voicehook-agent helper-import --as <name>`")
+SHOW_HELPER = ("show (ring shapes, --panel alone) is only for the session in the call: the relay "
+               "has no route for it. As a helper use show --card, status/activity/decide, or ask "
+               "the main agent")
+
+
+def _helper_relay(explicit_session: str | None) -> dict | None:
+    """The relay of this session (relayops.client_relay), with the legacy warning (0.22.2)."""
+    rel = vrelayops.client_relay(explicit_session)
+    if rel is not None and vmulti.is_legacy_helper(rel):
+        print(vmulti.LEGACY_WARN, file=sys.stderr, flush=True)
+    return rel
+
+
+def _no_session_hint(args, req: dict) -> dict:
+    """{hint} for a no-session answer of a helper-capable command (0.22.2), else {}."""
+    if req.get("cmd") not in RELAY_CMDS or getattr(args, "session", None):
+        return {}
+    return {"hint": NO_SESSION_HINT}
+
+
+def _meta_faq_n(meta: object) -> int:
+    if not isinstance(meta, dict):
+        return 0
+    items = [meta.get("doing")] + list(meta.get("open") or []) + list(meta.get("done") or [])
+    return sum(len(m.get("faq") or []) for m in items if isinstance(m, dict))
+
+
+def vboardpid() -> int:
+    """0.22.2: board.agent_pid() of this join (0 when unknown, never raises)."""
+    try:
+        from . import board
+        return board.agent_pid()
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 def vrelay_meta(req: dict) -> dict:
@@ -3667,10 +3909,24 @@ def _print_json(obj: dict) -> None:
 def _run_relay_client(args, req: dict, rel: dict) -> int:
     """0.16.0 helper session: decide / status board over relay.json (remote: HTTP,
     local: request file of the join). One JSON line, plus "via":"relay"."""
+    if req["cmd"] == "visual" or (req["cmd"] == "card" and not req.get("kind")):
+        _print_json({"ok": False, "type": "helper-unsupported", "via": "relay", "error": SHOW_HELPER})
+        return 1
     local = vmulti._is_local(rel)
     try:
         frm = vrelayops.check_from(vrelayops.session_label())
-        if req["cmd"] == "decide":
+        if req["cmd"] == "next":
+            return _relay_next_out(rel, frm, getattr(args, "timeout", 0.0))
+        if req["cmd"] == "activity":
+            body = {"text": req["text"], **vrelay_meta(req)}
+            if local:
+                ok = vmulti.append_local(rel, f"{frm}: {req['text']}")
+                res = {"ok": True} if ok else {"ok": False, "status": 503,
+                                               "error": "join of the relay is gone"}
+            else:
+                res = vrelayops.remote_activity(rel, frm, body)
+            out = {**res, "type": "activity", "via": "relay"}
+        elif req["cmd"] == "decide":
             body = vrelayops.decide_body(req)
             res = (vrelayops.local_request(rel, frm, "decide", body) if local
                    else vrelayops.remote_decide(rel, frm, body))
@@ -3681,7 +3937,7 @@ def _run_relay_client(args, req: dict, rel: dict) -> int:
                 out["decision"] = evs[0] if evs else None
                 if not evs:
                     out["timeout"] = True
-        elif req["cmd"] == "card":  # 0.21.10: a helper's card (image: server relay only)
+        elif req["cmd"] == "card":  # 0.23.1: a helper's card (image: server relay only)
             body = vrelayops.card_body(req)
             if local and body.get("kind") == "image":
                 raise vrelayops.RelayError("image cards of a helper need the server relay (the "
@@ -3691,10 +3947,12 @@ def _run_relay_client(args, req: dict, rel: dict) -> int:
             out = {**res, "type": "card", "via": "relay"}
         else:
             board = req.get("board") or {}
-            if board.get("faq"):
-                print("[warn] --faq is not sent over the relay (helper board: doing/open/done)",
-                      file=sys.stderr, flush=True)
             body = vrelayops.status_body(board)
+            # 0.22.2: --faq goes per item in meta; warn only when a pair really stays behind
+            if board.get("faq") and _meta_faq_n(body.get("meta")) < max(
+                    1, _meta_faq_n(board.get("meta"))):
+                print("[warn] --faq: not every pair reached the relay (meta per item, "
+                      f"max {relay.ITEM_FAQ_MAX} per item)", file=sys.stderr, flush=True)
             res = (vrelayops.local_request(rel, frm, "status", body) if local
                    else vrelayops.remote_status(rel, frm, body))
             out = {**res, "type": "board", **({"board": body} if res.get("ok") else {}),
@@ -3730,7 +3988,7 @@ def _run_waiting(args) -> int:
         return _waiting_out({"ok": False, "type": "invalid", "error": "--waiting needs a text"}, 2)
     if bool(q) == bool(ref):
         return _waiting_out({"ok": False, "type": "invalid", "error": WAITING_NEEDS}, 2)
-    rel = vrelayops.client_relay(args.session)
+    rel = _helper_relay(args.session)
     frm = vrelayops.check_from(vrelayops.session_label()) if rel is not None else ""
     sock = None
     if rel is None:
@@ -3797,15 +4055,28 @@ def _run_waiting(args) -> int:
 
 def _run_relay_next(args) -> int:
     """0.16.0 `relay-next [--timeout S]`: the answers to this helper session's decisions,
-    one JSON line per event; {"type":"timeout"} when none came. Exit 3: no relay."""
+    one JSON line per event; {"type":"timeout"} when none came. Exit 3: no relay.
+    0.22.2: the relay of this session (own helper entry first, multisession.load_relay)."""
     rel = None if vmulti.relay_disabled() else vmulti.load_relay()
     if rel is None:
         _print_json({"ok": False, "type": "no-relay", "via": "relay",
-                     "error": "no usable ~/.voicehook/relay.json (no call on this machine)"})
+                     "error": "no helper credential for this session and no usable "
+                              "~/.voicehook/relay.json (no call on this machine)"})
         return 3
+    if vmulti.is_legacy_helper(rel):
+        print(vmulti.LEGACY_WARN, file=sys.stderr, flush=True)
     try:
         frm = vrelayops.check_from(vrelayops.session_label())
-        evs = vrelayops.next_events(rel, frm, max(0.0, float(args.timeout)))
+    except vrelayops.RelayError as e:
+        _print_json({"ok": False, "status": e.status or 503, "error": str(e), "via": "relay"})
+        return 1
+    return _relay_next_out(rel, frm, args.timeout)
+
+
+def _relay_next_out(rel: dict, frm: str, timeout) -> int:
+    """The events of one relay-next round, one JSON line each (or one timeout line)."""
+    try:
+        evs = vrelayops.next_events(rel, frm, max(0.0, float(timeout or 0)))
     except vrelayops.RelayError as e:
         _print_json({"ok": False, "status": e.status or 503, "error": str(e), "via": "relay"})
         return 1
@@ -4049,11 +4320,12 @@ def main(argv: list[str] | None = None) -> None:
     p_status.add_argument("--open", action=_SeqAction, default=[], metavar="TASK", help="open task (repeatable)")
     p_status.add_argument("--done", action=_SeqAction, default=[], metavar="TASK", help="finished task (repeatable)")
     p_status.add_argument("--faq", action=_SeqAction, default=[], metavar="'FRAGE::ANTWORT'",
-                          help="0.10.0: a question the user will likely ask next + your answer, "
-                          "split on the first '::' (repeatable, max 6, 200 chars each). Sent as "
-                          "board field faq[{q, a}]; refresh it on every board update. 0.21.4: also "
-                          "attached to the item it follows (--doing/--open/--done, else TEXT), max "
-                          f"{relay.ITEM_FAQ_MAX} per item, in board field meta")
+                          help="a question the user will likely ask next + your answer, split on "
+                          "the first '::' (repeatable, 200 chars each). It belongs to the item it "
+                          "follows (--doing/--open/--done, else TEXT): max "
+                          f"{relay.ITEM_FAQ_MAX} per item, in board field meta (0.22.2: no cap "
+                          "per call, e.g. doing + 2 open + 1 done with 3 each). Refresh it on "
+                          "every board update")
     p_status.add_argument("--context", default=None, action=_SeqAction, metavar="TEXT",
                           help=f"0.21.4: hidden background of the item it follows (--doing/--open/"
                                f"--done, else TEXT), max {relay.ITEM_CONTEXT_MAX} chars: never shown, "
@@ -4252,24 +4524,39 @@ def main(argv: list[str] | None = None) -> None:
     p_sd.add_argument("--mime", default=None, metavar="M", help="mime type, e.g. text/csv")
     p_sd.add_argument("--id", default=None, metavar="ID", help="own message id [A-Za-z0-9._-]")
     _add_session(p_sd)
+    for dcmd, what in (("delta-rule", "a standing conversation rule (how Delta talks or behaves)"),
+                       ("delta-note", "a fact Delta knows and answers from")):
+        p_dn = sub.add_parser(
+            dcmd, help=f"0.23.0: {what}, for the rest of the call: add TEXT | list | rm ID. Silent, "
+            "never spoken: it goes to the end of Delta's context and applies from his next turn "
+            f"(his core rules win on conflict). Only the agent in the call, never a helper. Max "
+            f"{'20 rules' if dcmd == 'delta-rule' else '30 facts'}, {DELTA_TEXT_MAX} characters each")
+        p_dn.add_argument("action", choices=("add", "list", "rm"))
+        p_dn.add_argument("arg", nargs="*", default=[], metavar="TEXT|ID",
+                          help="add: the text ('-' = stdin); rm: the id from list")
+        p_dn.add_argument("--persist", action="store_true", default=False,
+                          help="mark for a later account memory (accepted, no effect yet)")
+        _add_session(p_dn)
     p_board = sub.add_parser(
-        "board", help="0.21.4: what is on the call's boards, as seen by your join: open and "
-        "recent decisions (number, asking label, question, options, hidden context/faq, "
-        "answer) plus your own board and the boards of helpers / other operators")
+        "board", help="0.21.4: what is on the call's boards (read-only overview for the main "
+        "agent): open and recent decisions of every agent and helper (number, asking label, "
+        "question, options, hidden context, answer, age) from the server, plus your own board "
+        "and every helper board of the room (name, doing/open/done, age of the last update)")
     p_board.add_argument("--open-only", action="store_true", default=False,
                          help="only the open decisions")
     _add_session(p_board)
     # 0.16.0: answers for a helper session (decide over relay.json)
     p_rn = sub.add_parser(
         "relay-next", help="0.16.0 helper session (not itself in the call): print the answers "
-        "to your own decide questions as JSON lines (type decision); {\"type\":\"timeout\"} if none")
+        "to your own decide questions as JSON lines (type decision; 0.22.0 also type user_turn: the "
+        "human spoke to you by name in the call); {\"type\":\"timeout\"} if none")
     p_rn.add_argument("--timeout", type=float, default=25.0, metavar="SEC",
                       help="wait up to SEC seconds for an answer (default 25; 0 = only what is there)")
     # 0.17.0 helper access (server /api/helper/*): data only, no voice, no join
     p_hc = sub.add_parser(
         "helper-credential", help="print a helper credential of the running join as JSON for "
         "ANOTHER machine; pipe it into ssh: `voicehook-agent helper-credential --label crown | "
-        "ssh crown 'voicehook-agent helper-import'` (never paste it into a chat)")
+        "ssh crown 'voicehook-agent helper-import --as crown'` (never paste it into a chat)")
     p_hc.add_argument("--label", default=None, metavar="NAME",
                       help="the helper machine, shown as 'Helfer NAME: ...' (max 22 chars)")
     p_hc.add_argument("--rotate", action="store_true", default=False,
@@ -4299,9 +4586,16 @@ def main(argv: list[str] | None = None) -> None:
         p_ph.add_argument("--message", default=None, metavar="TEXT",
                           help=f"optional short text, max {PHONE_MESSAGE_MAX[kind]} chars")
         _add_session(p_ph)
-    sub.add_parser("helper-import", help="read a helper credential (JSON) from stdin and write "
-                   "~/.voicehook/relay.json (0600): then `decide`, `status` and `relay-next` "
-                   "and the Claude Code hooks of this machine feed the call")
+    p_hi = sub.add_parser(
+        "helper-import", help="read a helper credential (JSON) from stdin and write it for ONE "
+        "helper session: ~/.voicehook/helpers/<name>.json (0600, 0.22.2; was the shared "
+        "relay.json). Then `status`, `activity`, `decide`, `next`/`relay-next` and the hooks "
+        "of that session feed the call under its own sender")
+    p_hi.add_argument("--as", dest="as_name", default=None, metavar="NAME",
+                      help="name of the entry, bound to no session: a session uses it when its "
+                      "VOICEHOOK_SESSION_LABEL is NAME (or it is the only unbound entry). "
+                      "Without --as: name = VOICEHOOK_SESSION_LABEL or the credential's label, "
+                      "bound to the agent session that runs the import")
     # 0.13.0: bridge session for the hook (Quickstart A, curl bridge join)
     p_bs = sub.add_parser(
         "bridge-session", help="store {base, session} of a curl bridge join (Quickstart A) in "
@@ -4365,9 +4659,10 @@ def main(argv: list[str] | None = None) -> None:
             rc = 1  # only reached when the exec failed
         sys.exit(rc)
     if args.cmd == "helper-import":
-        sys.exit(_run_helper_import())
+        sys.exit(_run_helper_import(args))
     if args.cmd in ("say", "next", "says", "leave", "status", "activity", "decide", "helper-credential",
-                    "vocab", "ui", "notify-me", "call-me", "board", "send-data"):
+                    "vocab", "ui", "notify-me", "call-me", "board", "send-data",
+                    *DELTA_KINDS):
         sys.exit(_run_client(args))
     if args.cmd == "show":
         sys.exit(_run_client(args))

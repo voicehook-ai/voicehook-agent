@@ -247,11 +247,21 @@ def resolve_socket(session: str | None, wait: float = 0.0,
 
 def request(sock_path: Path, obj: dict, timeout: float | None = None) -> dict:
     """Send one JSON request, return the one JSON reply."""
+    data = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
+    if len(data) > REQUEST_MAX:
+        # 0.23.1 (live 22.10.2026): never push an over-limit line into the join; the join
+        # stops reading and the rest of the send broke the pipe. A clear answer instead.
+        return {"ok": False, "type": "invalid",
+                "error": f"request too large ({len(data) // 1024} KB, max "
+                         f"{REQUEST_MAX // (1024 * 1024)} MB)"}
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
         s.connect(str(sock_path))
-        s.sendall((json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8"))
+        try:
+            s.sendall(data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the join answered early (e.g. bad request) and closed: read its answer
         buf = b""
         while b"\n" not in buf:
             chunk = s.recv(65536)
@@ -396,7 +406,7 @@ class IdleWatchdog:
 # --------------------------------------------------------------------------- #
 Handler = Callable[[dict], Awaitable[dict]]
 
-# 0.21.10: one request line may carry an image card (PNG/JPEG/WebP max 1 MB -> base64
+# 0.23.1: one request line may carry an image card (PNG/JPEG/WebP max 1 MB -> base64
 # ~1.4 MB, SVG max 300 KB). asyncio's default line limit is 64 KiB: a real screenshot
 # overran it, the join dropped the connection without an answer (live 21.10.2026).
 REQUEST_MAX = 4 * 1024 * 1024

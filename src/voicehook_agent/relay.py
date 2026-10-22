@@ -419,6 +419,35 @@ def user_turn_event(role: str, text: str, payload: dict | None = None,
     return ev
 
 
+USER_TURN_MAX = 2000   # same cap as the server (bridge.USER_TURN_MAX)
+
+
+def helper_turn_fields(payload: dict | None) -> dict:
+    """0.22.0 (server 21.10.2026): a user turn the worker stamped as addressed to a helper
+    session by name (to_kind helper / helper_ambiguous). The fields for our own `next` event:
+    an info copy, never ours to do (the sentence goes to that helper's inbox)."""
+    p = payload or {}
+    kind = p.get("to_kind")
+    if kind == "helper":
+        to = [str(x)[:80] for x in (p.get("to") or []) if x][:1]
+        name = to[0] if to else ""
+        return {"to": to, "to_kind": "helper", "info_only": True, "addressed_to_you": False,
+                "note": f"addressed to helper {name}, info only (the sentence is in its relay inbox)"}
+    if kind == "helper_ambiguous":
+        return {"to": [], "to_kind": "helper_ambiguous", "info_only": True, "addressed_to_you": False,
+                "note": "several helpers match, Delta asks which one; do not act"}
+    return {}
+
+
+def helper_user_turn_event(text: str, name: str, speaker: str = "", now: float | None = None) -> dict:
+    """The inbox event of a helper the human spoke to by name (same shape as the server's)."""
+    ev = {"type": "user_turn", "role": "user", "text": " ".join(str(text or "").split())[:USER_TURN_MAX],
+          "to": [name], "to_kind": "helper", "ts": now if now is not None else time.time()}
+    if speaker:
+        ev["speaker"] = " ".join(str(speaker).split())[:80]
+    return ev
+
+
 def foreign_owner(payload: dict, own: set[str] | str | None, key: str = "owner") -> bool:
     """0.11.0 (multi-operator): True if `payload[key]` names another operator.
 
@@ -530,7 +559,7 @@ FAQ_HINT = ("Welche 3 Fragen stellt der Nutzer wahrscheinlich als Nächstes? "
 # every decision and every status entry. The CLI warns (never refuses, a call is live).
 MANDATORY_HINT = ("[hint] Pflicht: zu jeder Entscheidung und jedem Status-Eintrag --context "
                   '"<was, warum, Stand>" und die 3 wahrscheinlichsten Rückfragen mit Antwort '
-                  '(--faq "Frage::Antwort", 3x). Ohne Antwort bisher: sag es mit Bearbeiter und '
+                  '(--faq "Frage::Antwort", 3x direkt nach dem Eintrag, max 3 je Eintrag). Ohne Antwort bisher: sag es mit Bearbeiter und '
                   'ETA ("In Arbeit bei <Name>, Ergebnis ca. 10 Min"). Der Voicebot braucht immer '
                   "Material. / Mandatory: context + the 3 likely follow-up questions with answers "
                   "(unknown yet: who works on it + ETA).")
@@ -564,7 +593,7 @@ STATUS_HINTS = {
 }
 SAY_PROGRESS_HINT = ("Fortschritt angesagt, Board ist aelter: Delta kennt ihn sonst nicht. "
                      "Jetzt: " + STATUS_CMD + ". " + FAQ_HINT)
-FAQ_MAX = 6          # pairs per board
+FAQ_MAX = 6          # pairs in the flat board field faq (per item: ITEM_FAQ_MAX in meta)
 FAQ_CHARS = 200      # per question and per answer
 _PROGRESS_RX = re.compile(
     r"\b(fertig|erledigt|abgeschlossen|live|deploy\w*|gemerged|merged|done|finished|shipped)\b",
@@ -722,6 +751,9 @@ def helper_decision_event(payload: dict, *, frm: str | None = None, label: str |
             ev["text"] = str(payload.get("answer") or payload.get("text") or "")
         if payload.get("changed"):
             ev["changed"] = True
+        if payload.get("auto"):  # 0.22.1: detected by the server, the helper never asked it
+            ev["auto"] = True
+            ev["question"] = question or str(payload.get("question") or "")
         ev["by"] = payload.get("by", "")
     ev.setdefault("ts", now if now is not None else time.time())
     ev["hint"] = HELPER_DECISION_HINT

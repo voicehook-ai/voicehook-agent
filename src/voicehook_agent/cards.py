@@ -12,7 +12,7 @@ An image is too large for the data channel: the join stores it on the server fir
 (POST /api/card/image, Bearer = its own LiveKit token, no new credential) and puts the
 signed, room-bound URL into the card. Bridge join: POST /api/bridge/show, same body.
 
-Image arrived (0.21.10, live 21.10.2026: the CLI said ok, the human saw nothing): every call
+Image arrived (0.23.1, live 21.10.2026: the CLI said ok, the human saw nothing): every call
 page loads an image card and answers the sender on topic vh.card_ack {id, ok} (ok false: the
 image did not load). The join waits up to ACK_WAIT_S for the humans in the call and answers
 ok only when at least one browser loaded the image; otherwise ok false with the reason
@@ -349,7 +349,7 @@ FROM_MAX = 80
 
 
 def relay_card(card: object, seq: int) -> dict | None:
-    """0.21.10 helper card from the server hub (pump kind card): checked again before we publish
+    """0.23.1 helper card from the server hub (pump kind card): checked again before we publish
     it as ourselves -> the operator.card packet with our seq, or None (dropped)."""
     if not isinstance(card, dict):
         return None

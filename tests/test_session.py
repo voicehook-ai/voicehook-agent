@@ -576,7 +576,7 @@ def test_say_next_with_long_home(tmp_path, monkeypatch, fake_env):
 
 
 def test_control_socket_takes_an_image_sized_request(tmp_path):
-    """0.21.10 (live 21.10.2026): a 227 KB screenshot (base64 in one request line) overran
+    """0.23.1 (live 21.10.2026): a 227 KB screenshot (base64 in one request line) overran
     asyncio's 64 KiB line limit; the join dropped the connection without an answer."""
     from voicehook_agent import session as vs
 

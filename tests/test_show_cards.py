@@ -122,7 +122,7 @@ def test_big_diagram_svg_is_fine():
 
 # ----- join side -----------------------------------------------------------------------------
 class _Local:
-    """Fake local participant. 0.21.10: an image card is answered by the call page of `host`
+    """Fake local participant. 0.23.1: an image card is answered by the call page of `host`
     (vh.card_ack) with `ack` (True loaded, False failed, None = page never answers)."""
 
     def __init__(self) -> None:
@@ -321,7 +321,7 @@ def test_external_refs_with_spaces_rejected(svg):
         vc.image_kind(svg)
 
 
-# ----- 0.21.10: ok only when a call page loaded the image (live 21.10.2026) ------------------
+# ----- 0.23.1: ok only when a call page loaded the image (live 21.10.2026) ------------------
 def _img_ok(monkeypatch):
     _mock_http(monkeypatch, lambda req: httpx.Response(200, json={"ok": True, "id": CID, "url": URL,
                                                                  "mime": "image/png"}))
@@ -392,3 +392,117 @@ def test_helper_card_from_pump_is_checked_and_confirmed():
     room.local_participant.ack = False
     gone = asyncio.run(cli._publish_helper_card(ctl, room, {**card, "id": "b" * 16, "url": URL.replace(CID, "b" * 16)}))
     assert gone["ok"] is False and gone["status"] == 409
+
+
+# --------------------------------------------------------------------------- #
+# 0.23.1 live 22.10.2026: a ~700 KB image crashed the control socket
+# ("Separator is not found, and chunk exceed the limit", then BrokenPipeError)
+# --------------------------------------------------------------------------- #
+def _png(n: int) -> bytes:
+    import os
+    return b"\x89PNG\r\n\x1a\n" + os.urandom(n - 8)
+
+
+def _show_over_socket(monkeypatch, tmp_path, argv, *, limit=None):
+    """`cli.main(argv)` against a real control socket. limit=None: the join's ControlServer;
+    else a bare asyncio server with that line limit (the pre-0.23.1 join). -> (rc, seen, out)"""
+    from voicehook_agent import session as vs
+    sock = tmp_path / "c.sock"
+    seen: list[dict] = []
+
+    async def handler(req):
+        seen.append(req)
+        return {"ok": True, "type": "card", "kind": req.get("kind")}
+
+    async def bare(reader, writer):  # the old join: default 64 KiB line limit
+        raw = await reader.readline()
+        seen.append(json.loads(raw))
+        writer.write(b'{"ok": true}\n')
+        await writer.drain()
+        writer.close()
+
+    monkeypatch.setattr(cli.vsession, "resolve_socket", lambda *a, **k: sock)
+    monkeypatch.setattr(cli, "_helper_relay", lambda *a, **k: None)
+
+    def run_main():
+        try:
+            cli.main(argv)
+        except SystemExit as e:
+            return e.code
+        return 0
+
+    async def go():
+        if limit is None:
+            srv = vs.ControlServer(sock, handler)
+            await srv.start()
+        else:
+            srv = await asyncio.start_unix_server(bare, path=str(sock), limit=limit)
+        try:
+            return await asyncio.to_thread(run_main)
+        finally:
+            if limit is None:
+                await srv.close()
+            else:
+                srv.close()
+    loop = asyncio.new_event_loop()
+    loop.set_exception_handler(lambda *_: None)  # the old server's crash is the point
+    try:
+        rc = loop.run_until_complete(go())
+    finally:
+        loop.close()
+    return rc, seen
+
+
+def test_700kb_image_goes_through_the_control_socket(monkeypatch, tmp_path, capsys):
+    data = _png(700 * 1024)
+    f = tmp_path / "shot.png"
+    f.write_bytes(data)
+    argv = ["show", "--card", "image", "--title", "Shot", "--file", str(f)]
+    rc, seen = _show_over_socket(monkeypatch, tmp_path, argv)
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert rc == 0 and out["ok"] is True, out
+    assert len(seen) == 1 and seen[0]["kind"] == "image"
+    assert base64.b64decode(seen[0]["image"].split(",", 1)[-1]) == data
+
+
+def test_positive_control_700kb_image_breaks_a_64kib_join(monkeypatch, tmp_path, capsys):
+    """Same request against asyncio's default limit: the join never sees it, the CLI gets
+    no answer (the live symptom). Proves the test above really exercises the limit."""
+    f = tmp_path / "shot.png"
+    f.write_bytes(_png(700 * 1024))
+    rc, seen = _show_over_socket(monkeypatch, tmp_path,
+                                 ["show", "--card", "image", "--file", str(f)], limit=64 * 1024)
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert seen == [] and rc != 0 and out["ok"] is False, out
+
+
+def test_too_large_image_is_a_clear_error_not_a_crash(monkeypatch, tmp_path, capsys):
+    f = tmp_path / "huge.png"
+    f.write_bytes(_png(vc.RASTER_MAX + 1024))
+    rc, seen = _show_over_socket(monkeypatch, tmp_path, ["show", "--card", "image", "--file", str(f)])
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert rc == 2 and out["type"] == "invalid" and "image max" in out["error"] and seen == [], out
+
+
+def test_over_limit_request_answers_instead_of_broken_pipe(monkeypatch, tmp_path):
+    """Client: a line over 4 MB is refused before sending. Join: a line over its limit gets
+    an answer, and the client reads it instead of dying on BrokenPipeError."""
+    from voicehook_agent import session as vs
+    sock = tmp_path / "s.sock"
+
+    async def handler(req):
+        return {"ok": True}
+
+    async def go():
+        srv = vs.ControlServer(sock, handler)
+        await srv.start()
+        try:
+            pre = await asyncio.to_thread(vs.request, sock, {"image": "A" * (vs.REQUEST_MAX + 1)}, 10)
+            monkeypatch.setattr(vs, "REQUEST_MAX", 64 * 1024 * 1024)  # client side only now
+            late = await asyncio.to_thread(vs.request, sock, {"image": "A" * (6 * 1024 * 1024)}, 10)
+        finally:
+            await srv.close()
+        return pre, late
+    pre, late = asyncio.run(go())
+    assert pre["ok"] is False and pre["type"] == "invalid" and "too large" in pre["error"]
+    assert late["ok"] is False and "too large" in late["error"], late
