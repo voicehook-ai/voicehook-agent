@@ -485,7 +485,7 @@ def test_too_large_image_is_a_clear_error_not_a_crash(monkeypatch, tmp_path, cap
 
 
 def test_over_limit_request_answers_instead_of_broken_pipe(monkeypatch, tmp_path):
-    """Client: a line over 4 MB is refused before sending. Join: a line over its limit gets
+    """Client: a line over REQUEST_MAX (0.25.0: 16 MB) is refused before sending. Join: a line over its limit gets
     an answer, and the client reads it instead of dying on BrokenPipeError."""
     from voicehook_agent import session as vs
     sock = tmp_path / "s.sock"
@@ -499,7 +499,8 @@ def test_over_limit_request_answers_instead_of_broken_pipe(monkeypatch, tmp_path
         try:
             pre = await asyncio.to_thread(vs.request, sock, {"image": "A" * (vs.REQUEST_MAX + 1)}, 10)
             monkeypatch.setattr(vs, "REQUEST_MAX", 64 * 1024 * 1024)  # client side only now
-            late = await asyncio.to_thread(vs.request, sock, {"image": "A" * (6 * 1024 * 1024)}, 10)
+            late = await asyncio.to_thread(vs.request, sock,
+                                           {"image": "A" * (17 * 1024 * 1024)}, 10)
         finally:
             await srv.close()
         return pre, late
