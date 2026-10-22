@@ -43,6 +43,23 @@ voicehook-v4 #606 (stamps `wake` on every final user turn).
   shows them as context.
 - **Old server:** without `wake` everything works as in 0.23.1.
 
+Agent-to-agent tasks over the CLI (#138, Phase 1, local sessions only, no server line):
+
+- **`send --to <label> "<Auftrag>"`:** hand a directed task to another Claude Code / Codex
+  session of this machine. It lands in that session's flock inbox (durable, 0600) and, if the
+  target runs a join, wakes it at once over its control socket (`task_wake`). Directed only: no
+  `--to *` broadcast in Phase 1. Unknown target -> clear "target not in room" with the known
+  sessions, ambiguous -> 409, empty/`*` -> 422.
+- **Receiver + ack:** the target consumes the `task` event over `relay-next` / `listen` / its
+  own `next` and acks it back (`task_acked`) into the sender's inbox, so the sender's board
+  shows it accepted.
+- **Board + reminders:** `tasks` reconstructs "Auftrag offen bei X seit MM:SS" from the inbox
+  on disk (not a volatile ledger); an open, unacked task older than 60 s nags the sender with a
+  `task_due` once per ~30 s, capped at 3, then it stays open (operator intervenes).
+- **New wake types** `task` / `task_acked` / `task_due` are additive: an older CLI treats them
+  as inert unknown events, so this is fully backward compatible. Phase 2 (remote relay / server
+  endpoint) follows separately.
+
 ## 0.23.1 (2026-10-22)
 
 Live (Oliver, 22.10.): `show --card image` with a ~700 KB screenshot crashed the join's control

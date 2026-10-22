@@ -235,6 +235,7 @@ def _rewrite(fd: int, lines: list[str]) -> None:
 def append_jsonl(path: Path, obj: dict, cap: int = ANS_MAX_BYTES) -> None:
     """Append one JSON line under flock (0600, no symlink); drop the oldest when > cap."""
     line = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    vact._private_dir(Path(path).parent)  # the state/join dir may not exist yet (first inbox line)
     fd = _open_locked(path, create=True)
     assert fd is not None
     try:
@@ -276,6 +277,35 @@ def take_jsonl(path: Path, want) -> list[dict]:
         os.close(fd)
 
 
+def read_jsonl(path: Path) -> list[dict]:
+    """All JSON objects in `path`, oldest first, WITHOUT removing them (flock). [] when the file
+    is missing or not a private regular file. For a read-only view (board reconstruction)."""
+    try:
+        fd = _open_locked(path, create=False)
+    except RelayError:
+        return []
+    if fd is None:
+        return []
+    try:
+        out: list[dict] = []
+        for ln in _read_all(fd).decode("utf-8", "replace").splitlines():
+            if not ln.strip():
+                continue
+            try:
+                obj = json.loads(ln)
+            except ValueError:
+                continue
+            if isinstance(obj, dict):
+                out.append(obj)
+        return out
+    finally:
+        os.close(fd)
+
+
+# board reconstruction reads the inbox without consuming it (a2a.py, cli `tasks`)
+read_inbox = read_jsonl
+
+
 def drain_requests(dir_: Path) -> list[dict]:
     """Join side: take all queued helper requests (max REQ_BATCH_MAX per call)."""
     path = Path(dir_) / REQ_NAME
@@ -310,6 +340,15 @@ def answer_path(dir_: Path, frm: str) -> Path:
 
 def inbox_path(frm: str) -> Path:
     return vact.state_root() / f"{INBOX_PREFIX}{_from_hash(frm)}.jsonl"
+
+
+OUTBOX_PREFIX = "a2a-outbox-"
+
+
+def outbox_path(frm: str) -> Path:
+    """0.24.0 a2a.py: a session's durable record of the tasks IT sent (board reconstruction).
+    Separate from the inbox so `relay-next` never re-delivers a session its own sent tasks."""
+    return vact.state_root() / f"{OUTBOX_PREFIX}{_from_hash(frm)}.jsonl"
 
 
 def clear_dir(dir_: Path) -> None:
@@ -619,8 +658,15 @@ def _is_question_check(o: dict) -> bool:
     return o.get("type") == "question_check"
 
 
+def _is_task(o: dict) -> bool:
+    """0.24.0 a2a.py: an agent-to-agent task event (task / task_acked / task_due) in the inbox."""
+    from . import a2a
+    return o.get("type") in a2a.WAKE_TYPES
+
+
 def _wanted(o: dict) -> bool:
-    return _is_decision(o) or _is_stale(o) or _is_user_turn(o) or _is_question_check(o)
+    return (_is_decision(o) or _is_stale(o) or _is_user_turn(o) or _is_question_check(o)
+            or _is_task(o))
 
 
 def view(ev: dict) -> dict:
