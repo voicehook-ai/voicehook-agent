@@ -401,18 +401,27 @@ def own_helper_entry(*, session: str | None = None) -> tuple[Path, dict] | None:
     return free[0] if len(free) == 1 else None
 
 
-def helper_state(entry: dict, now: float | None = None) -> str:
+def helper_state(entry: dict, path: Path | None = None, now: float | None = None) -> str:
     """0.25.0: 'live', 'dead' (token marked in relay.dead: 401/403/410, e.g. the main agent
-    rejoined), 'expired' or 'unusable' (bad or owner gone) for one helper entry."""
+    rejoined), 'expired' or 'unusable' (bad, or owner gone) for one helper entry. The same
+    rules as _usable (an entry with only expires_in counts from the file's mtime; relay.dead
+    applies to remote entries only), so 'live' here == load_helper takes it."""
     t = time.time() if now is None else now
-    try:
-        if float(entry.get("expires_at") or 0) <= t:
-            return "expired"
-    except (TypeError, ValueError):
-        return "unusable"
-    if isinstance(entry.get("token"), str) and _is_dead(entry["token"]):
+    p = helpers_dir() if path is None else path
+    if _usable(entry, p, t) is not None:
+        return "live"
+    if not _is_local(entry) and isinstance(entry.get("token"), str) and _is_dead(entry["token"]):
         return "dead"
-    return "live" if _usable(entry, helpers_dir(), t) is not None else "unusable"
+    try:
+        if "expires_at" not in entry and entry.get("expires_in") is not None:
+            exp = os.lstat(p).st_mtime + float(entry["expires_in"])
+        elif entry.get("expires_at") is None:
+            return "unusable"
+        else:
+            exp = float(entry.get("expires_at") or 0)
+    except (OSError, TypeError, ValueError):
+        return "unusable"
+    return "expired" if exp <= t else "unusable"
 
 
 def load_helper(now: float | None = None, *, session: str | None = None) -> dict | None:

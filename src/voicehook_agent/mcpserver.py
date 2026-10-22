@@ -133,6 +133,8 @@ def _route() -> tuple[str, dict | None]:
     try:
         vsession.resolve_socket(None, wait=0.0)
         return "own", None
+    except vsession.ForeignJoin as e:  # 0.25.0: never another session's join
+        raise ToolError(str(e)) from None
     except (vsession.SessionError, OSError):
         return "", None
 
@@ -146,6 +148,8 @@ def _own(req: dict, timeout: float | None = 30.0) -> dict:
     try:
         sock = vsession.resolve_socket(None, wait=0.0)
         return vsession.request(sock, req, timeout=timeout)
+    except vsession.ForeignJoin as e:  # 0.25.0
+        raise ToolError(str(e)) from None
     except (vsession.SessionError, OSError, ValueError) as e:
         raise ToolError(f"join not reachable: {type(e).__name__}") from None
 

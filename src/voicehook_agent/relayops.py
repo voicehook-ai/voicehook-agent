@@ -123,14 +123,12 @@ def session_label() -> str:
 
 
 def _own_join_running(own: str) -> bool:
-    """A live join (session.json with a live pid) started by this Claude Code session."""
+    """A live join (session.json with a live pid) started by this agent session: its
+    owner_session, or 0.25.0 the same agent process after /clear or /resume (a new session
+    id; session.owned_by)."""
     from . import session as vsession
     for d in vact.live_join_dirs():
-        try:
-            info = json.loads((d / vsession.INFO_NAME).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if isinstance(info, dict) and info.get("owner_session") == own:
+        if vsession.owned_by(vsession.read_info(d), own):
             return True
     return False
 
@@ -148,7 +146,8 @@ def client_relay(explicit_session: str | None) -> dict | None:
     """The relay a command of this session uses, or None (talk to the own join). ONE rule
     for every helper-capable command (decide, status board, activity, next, show; 0.22.2):
     1. `--session` given, or VOICEHOOK_NO_RELAY=1: never the relay (own join).
-    2. This agent session runs its own join (session.json names its session hash): own join.
+    2. This agent session runs its own join (session.json names its session hash, or 0.25.0
+       the same agent process after /clear): own join.
     3. Its own helper credential (helpers/<name>.json, multisession.load_helper:
        $VOICEHOOK_SESSION_LABEL names it, or it was imported in this session, or the only
        unbound one): the relay.
@@ -200,7 +199,7 @@ def helper_problem(explicit_session: str | None) -> dict | None:
     found = vmulti.own_helper_entry()
     if found is None:
         return None
-    state = vmulti.helper_state(found[1])
+    state = vmulti.helper_state(found[1], found[0])
     if state == "live":
         return None
     name = str(found[1].get("helper") or "helper")
