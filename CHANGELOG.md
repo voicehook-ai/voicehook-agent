@@ -22,6 +22,30 @@ instead of leaving the call and re-joining.
 - **stale-join warning:** a join records its CLI version in `session.json` and the `status` reply;
   a newer binary (a starting join) warns (never spoken, stderr / `--json` `_meta: stale_join`) when
   a running join is on an older CLI and names the fix `voicehook-agent rejoin`.
+- **a session never uses another session's join (fail-closed, live 22.10.2026, crown):** a
+  helper session whose own relay died (relay.dead after an operator rejoin) fell back to
+  `resolve_socket(None)`, which took the only live join of the machine, the one of ANOTHER
+  session ("Selfhost"): its decisions showed as Selfhost's own (no sender) and the answers went
+  there. Fixed in ONE place: without `--session`, `resolve_socket` only picks joins this agent
+  session owns (`session.split_owned`), so every command follows it: `say`, `ui`, `leave`,
+  `status` (plain, `--doing`, `--waiting`), `show` (ring shapes, `--panel`, `--card`), `next`,
+  `listen` (no more leasing/acking another join's events), `decide`, `activity` and the MCP
+  tools. Only joins of other sessions running: `type` `foreign-join`, exit 3, nothing sent, the
+  join named in `error` with `--session` as the deliberate way. A helper whose own helper entry
+  is dead, expired or unusable gets `relay-dead` / `relay-expired` / `relay-unusable` (exit 3)
+  with the fix in `hint` (fresh `helper-credential | helper-import --as <name>`).
+- **join ownership survives /clear and /resume:** a join is this session's when its
+  `session.json` names this session id (`claude --resume` keeps it) or, after `/clear` or an
+  in-process `/resume` (new session id), when the live agent process that started the join
+  (`owner_agent_pid`) is the caller's agent process. The owner then keeps its own join for
+  every command, also next to an old dead helper entry, and never posts through its own
+  relay.json as if it were a helper.
+- **unchanged:** `--session`, `VOICEHOOK_NO_RELAY=1` (drive the machine's join directly), no
+  agent session at all (a human in a terminal, a script: the only join, as before), a join
+  with no recorded owner (started outside any agent session), a live own helper relay.
+- **helper_state** follows `_usable`: an entry with only `expires_in` (copied by hand) counts
+  from the file's mtime, `relay.dead` applies to remote entries only, an entry without any
+  expiry is `unusable`, not `expired`.
 - **several local joins:** a bare `rejoin` errors and lists the joins (`--session` required); no
   silent "rejoin all".
 

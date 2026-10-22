@@ -172,6 +172,88 @@ class SessionError(RuntimeError):
     pass
 
 
+class ForeignJoin(SessionError):
+    """0.25.0: no join of THIS agent session runs, only joins of other sessions (fail-closed:
+    never used without --session)."""
+
+
+def _caller() -> str:
+    """Hash of the calling agent session, '' when the ownership filter does not apply: outside
+    an agent session (a human in a terminal, a script) or with VOICEHOOK_NO_RELAY=1 (the
+    documented opt-out: this session drives the machine's join directly)."""
+    from . import (
+        multisession as vmulti,  # lazy: multisession imports activity -> session
+    )
+    if vmulti.relay_disabled():
+        return ""
+    return vmulti.own_session_hash()
+
+
+def _agent_pid() -> int:
+    try:
+        from . import board  # lazy, heavy
+        return board.agent_pid()
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def owned_by(info: dict, own: str, agent_pid: Callable[[], int] = _agent_pid) -> bool:
+    """0.25.0: is the join of `info` (session.json) owned by the agent session `own`?
+    Its owner_session is `own`, or (after /clear or /resume inside the same agent process:
+    a new session id, the join keeps the old one) the agent process that started the join
+    (owner_agent_pid, alive) is the agent process of this caller. Never a join with no
+    recorded owner (see split_owned)."""
+    if not own or not isinstance(info, dict):
+        return False
+    owner = str(info.get("owner_session") or "")
+    if not owner:
+        return False
+    if owner == own:
+        return True
+    try:
+        jp = int(info.get("owner_agent_pid") or 0)
+    except (TypeError, ValueError):
+        return False
+    if jp <= 1:
+        return False
+    from . import activity as vact  # lazy
+    return vact._pid_alive(jp) and agent_pid() == jp
+
+
+def split_owned(live: list[Path], own: str | None = None,
+                agent_pid: Callable[[], int] = _agent_pid) -> tuple[list[Path], list[Path]]:
+    """0.25.0 (live 22.10.2026, crown: helper dev-3 posted as Selfhost): (usable, foreign)
+    live joins for the calling session. Outside an agent session or with VOICEHOOK_NO_RELAY=1
+    all are usable (old rule). In an agent session: its own joins (owned_by) and joins with
+    no recorded owner (started outside any agent session); a join of ANOTHER session never."""
+    own = _caller() if own is None else own
+    if not own:
+        return list(live), []
+    mine: list[Path] = []
+    foreign: list[Path] = []
+    pid_cache: list[int] = []
+
+    def pid() -> int:
+        if not pid_cache:
+            pid_cache.append(agent_pid())
+        return pid_cache[0]
+
+    for d in live:
+        info = read_info(d)
+        if not str(info.get("owner_session") or "") or owned_by(info, own, pid):
+            mine.append(d)
+        else:
+            foreign.append(d)
+    return mine, foreign
+
+
+FOREIGN_HINT = ("a join of another agent session runs on this machine ({names}); this session "
+                "does not own it, so nothing was sent (a session never posts through another "
+                "session's join). Use your own join, your own helper credential "
+                "(`voicehook-agent helper-credential --label <name> | voicehook-agent "
+                "helper-import --as <name>`), or name the join deliberately: --session <slug>/<identity>")
+
+
 class SessionBusy(SessionError):
     """A live join already owns this (slug, identity) socket."""
 
@@ -203,9 +285,11 @@ def resolve_socket(session: str | None, wait: float = 0.0,
     `session` may be `<slug>/<identity>`, a slug, a session dir or a socket
     path. A slug alone works when only one join runs in that room. Without
     `session`, the single live join is used; more than one is an error that
-    lists them (pass --session). Waits up to `wait` seconds for the socket to
+    lists them (pass --session). 0.25.0: inside an agent session only its own joins count
+    (split_owned); when only joins of other sessions run: ForeignJoin. Waits up to `wait` seconds for the socket to
     appear, so `say` right after starting `join` in the background just works."""
     deadline = time.monotonic() + max(0.0, wait)
+    foreign: list[Path] = []
     while True:
         if session:
             p = Path(session)
@@ -236,11 +320,16 @@ def resolve_socket(session: str | None, wait: float = 0.0,
             else:
                 msg = f"no running join for session {session!r}"
         else:
-            live = live_sessions()
+            # 0.25.0: only the joins this session may use (split_owned), never another's
+            live, foreign = split_owned(live_sessions())
             if live:
                 return _checked(socket_path(_pick(live, "")))
             msg = f"no running join found under {sessions_root()}"
+            if foreign:
+                msg = FOREIGN_HINT.format(names=", ".join(_label(d) for d in foreign))
         if time.monotonic() >= deadline:
+            if not session and foreign:
+                raise ForeignJoin(msg)
             raise SessionError(msg)
         time.sleep(poll)
 

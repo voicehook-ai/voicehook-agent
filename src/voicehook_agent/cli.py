@@ -4027,6 +4027,10 @@ def _run_client(args) -> int:
         rel = _helper_relay(args.session)
         if rel is not None:
             return _run_relay_client(args, req, rel)
+        bad = vrelayops.helper_problem(args.session)  # 0.25.0: never another session's join
+        if bad is not None:
+            print(json.dumps(bad, ensure_ascii=False), flush=True)
+            return 3
     wait_answer = req.get("cmd") == "decide" and getattr(args, "wait", None) == WAIT_ANSWER
     try:
         sock = vsession.resolve_socket(args.session,
@@ -4035,6 +4039,9 @@ def _run_client(args) -> int:
         if req.get("cmd") == "next":
             req = {**req, "lease": True}  # 0.21.5: acked below, after the print (spool.py)
         reply = vsession.request(sock, req, timeout=sock_timeout)
+    except vsession.ForeignJoin as e:  # 0.25.0: never another session's join
+        print(json.dumps(_foreign_reply(e), ensure_ascii=False), flush=True)
+        return 3
     except vsession.SessionError as e:
         print(json.dumps({"ok": False, "type": "no-session", "error": str(e),
                           **_no_session_hint(args, req)}, ensure_ascii=False), flush=True)
@@ -4075,6 +4082,11 @@ def _helper_relay(explicit_session: str | None) -> dict | None:
     if rel is not None and vmulti.is_legacy_helper(rel):
         print(vmulti.LEGACY_WARN, file=sys.stderr, flush=True)
     return rel
+
+
+def _foreign_reply(e: Exception) -> dict:
+    """0.25.0: the answer when only joins of OTHER agent sessions run (session.ForeignJoin)."""
+    return {"ok": False, "type": "foreign-join", "error": str(e)}
 
 
 def _no_session_hint(args, req: dict) -> dict:
@@ -4139,6 +4151,9 @@ def _run_listen(args, request=None, resolve=None, clock=time.monotonic) -> int:
     deadline = clock() + args.timeout if args.timeout and args.timeout > 0 else None
     try:
         sock = resolve(args.session, wait=args.wait)
+    except vsession.ForeignJoin as e:  # 0.25.0: never take another session's next events
+        _print_json(_foreign_reply(e))
+        return 3
     except (vsession.SessionError, OSError) as e:
         _print_json({"ok": False, "type": "no-session", "error": str(e)})
         return 3
@@ -4257,8 +4272,13 @@ def _run_waiting(args) -> int:
     frm = vrelayops.check_from(vrelayops.session_label()) if rel is not None else ""
     sock = None
     if rel is None:
+        bad = vrelayops.helper_problem(args.session)  # 0.25.0: never another session's join
+        if bad is not None:
+            return _waiting_out(bad, 3)
         try:
             sock = vsession.resolve_socket(args.session, wait=args.wait)
+        except vsession.ForeignJoin as e:
+            return _waiting_out(_foreign_reply(e), 3)
         except (vsession.SessionError, OSError) as e:
             return _waiting_out({"ok": False, "type": "no-session", "error": str(e)}, 3)
 
