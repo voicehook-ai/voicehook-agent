@@ -1341,6 +1341,77 @@ async def _send_data(ctl: _Control, req: dict) -> dict:
             "size": size}
 
 
+_DELTA_RPC = "vh.delta_notes"  # deltanotes.RPC_METHOD on the worker (rules/facts for Delta)
+DELTA_KINDS = {"delta-rule": "rule", "delta-note": "note"}
+DELTA_TEXT_MAX = 300           # deltanotes.TEXT_MAX (server: 422 over it, never cut)
+
+
+def delta_request(cmd: str, action: str, arg: str | None, persist: bool = False) -> dict:
+    """`delta-rule|delta-note add TEXT | list | rm ID` -> the request for the join. Bad input:
+    ValueError before anything is sent."""
+    kind = DELTA_KINDS[cmd]
+    req: dict = {"cmd": "delta", "kind": kind, "op": action}
+    if action == "add":
+        text = " ".join(str(arg or "").split())
+        if text == "-":
+            text = " ".join(sys.stdin.read().split())
+        if not text:
+            raise ValueError(f"{cmd} add needs the text")
+        if len(text) > DELTA_TEXT_MAX:
+            raise ValueError(f"{cmd} add: max {DELTA_TEXT_MAX} characters (got {len(text)}), nothing sent")
+        req["text"] = text
+        if persist:
+            req["persist"] = True
+    elif action == "rm":
+        if not arg:
+            raise ValueError(f"{cmd} rm needs the id (see {cmd} list)")
+        req["id"] = str(arg).strip()
+    elif arg:
+        raise ValueError(f"{cmd} list takes no argument")
+    return req
+
+
+async def _delta_rpc(ctl: _Control, req: dict) -> dict:
+    """0.23.0: rules/facts for Delta. WebRTC: vh.delta_notes RPC to the voicebot (only the
+    operator itself, never with a helper `sender`); bridge: POST /api/bridge/delta."""
+    body = {k: req[k] for k in ("kind", "op", "text", "id", "persist") if req.get(k) is not None}
+    room = await ctl.wait_room(10.0)
+    if room is None:
+        return {"ok": False, "type": "delta", "error": "not connected to the room (yet)"}
+    send = getattr(room, "send_delta", None)
+    if send is not None:  # bridge: the server runs the RPC for us
+        try:
+            out = await send(body)
+        except vtransport.BridgeError as e:
+            detail = (e.body or {}).get("detail") if isinstance(e.body, dict) else None
+            return {"ok": False, "type": "delta", "status": e.status or 503, "error": str(detail or e)}
+        return {**out, "type": "delta"}
+    worker = next((p.identity for p in room.remote_participants.values()
+                   if _kind_label(p) == "agent"), None)
+    if worker is None:
+        return {"ok": False, "type": "delta", "status": 503, "error": "voicebot not in the call, try again shortly"}
+    deadline = time.monotonic() + 8.0
+    while True:
+        try:
+            raw = await room.local_participant.perform_rpc(
+                destination_identity=worker, method=_DELTA_RPC,
+                payload=json.dumps(body, ensure_ascii=False), response_timeout=8.0)
+            out = json.loads(raw or "{}")
+        except ValueError:
+            return {"ok": False, "type": "delta", "status": 502, "error": "bad answer"}
+        except Exception as e:  # noqa: BLE001  RPC error/timeout (old server: unsupported method)
+            return {"ok": False, "type": "delta", "status": 503, "error": f"delta rpc failed: {type(e).__name__}"}
+        if not isinstance(out, dict):
+            return {"ok": False, "type": "delta", "status": 502, "error": "bad answer"}
+        if out.get("status") != 425 or time.monotonic() >= deadline:
+            if out.get("status") == 425:
+                return {"ok": False, "type": "delta", "status": 503, "error": "voicebot not ready, try again shortly"}
+            if not out.get("ok") and "detail" in out:
+                out = {**out, "error": out.pop("detail")}
+            return {**out, "type": "delta"}
+        await asyncio.sleep(0.25)
+
+
 async def _list_rpc(ctl: _Control) -> dict:
     """Router-Fund 21.10.: the call's decisions and helper boards from the server, read-only: WebRTC =
     RPC vh.decisions to the voicebot, bridge = GET /api/bridge/decisions. Never logs content."""
@@ -1523,6 +1594,9 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         out = await _decide_rpc(ctl, req)
         ctl.ledger.created(req, out)  # 0.21.4 `board`
         return out
+    if cmd == "delta":  # 0.23.0 `voicehook-agent delta-rule|delta-note` (rules/facts for Delta)
+        ctl.watchdog.touch()
+        return await _delta_rpc(ctl, req)
     if cmd == "data":  # 0.21.4 `voicehook-agent send-data` (datachan.py)
         ctl.watchdog.touch()
         return await _send_data(ctl, req)
@@ -3440,6 +3514,9 @@ def _client_request(args) -> dict:
         return {"cmd": "leave", "say": args.say} if args.say else {"cmd": "leave"}
     if args.cmd == "send-data":  # 0.21.4
         return _data_request(args)
+    if args.cmd in DELTA_KINDS:  # 0.23.0
+        return delta_request(args.cmd, args.action, " ".join(args.arg or []) or None,
+                             bool(getattr(args, "persist", False)))
     if args.cmd == "board" or (args.cmd == "decide" and getattr(args, "list", False)):
         # 0.21.4: open + recent decisions and the boards this join has seen
         return {"cmd": "board_list", "open": bool(getattr(args, "open_only", False))}
@@ -4373,6 +4450,19 @@ def main(argv: list[str] | None = None) -> None:
     p_sd.add_argument("--mime", default=None, metavar="M", help="mime type, e.g. text/csv")
     p_sd.add_argument("--id", default=None, metavar="ID", help="own message id [A-Za-z0-9._-]")
     _add_session(p_sd)
+    for dcmd, what in (("delta-rule", "a standing conversation rule (how Delta talks or behaves)"),
+                       ("delta-note", "a fact Delta knows and answers from")):
+        p_dn = sub.add_parser(
+            dcmd, help=f"0.23.0: {what}, for the rest of the call: add TEXT | list | rm ID. Silent, "
+            "never spoken: it goes to the end of Delta's context and applies from his next turn "
+            f"(his core rules win on conflict). Only the agent in the call, never a helper. Max "
+            f"{'20 rules' if dcmd == 'delta-rule' else '30 facts'}, {DELTA_TEXT_MAX} characters each")
+        p_dn.add_argument("action", choices=("add", "list", "rm"))
+        p_dn.add_argument("arg", nargs="*", default=[], metavar="TEXT|ID",
+                          help="add: the text ('-' = stdin); rm: the id from list")
+        p_dn.add_argument("--persist", action="store_true", default=False,
+                          help="mark for a later account memory (accepted, no effect yet)")
+        _add_session(p_dn)
     p_board = sub.add_parser(
         "board", help="0.21.4: what is on the call's boards (read-only overview for the main "
         "agent): open and recent decisions of every agent and helper (number, asking label, "
@@ -4497,7 +4587,8 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "helper-import":
         sys.exit(_run_helper_import(args))
     if args.cmd in ("say", "next", "says", "leave", "status", "activity", "decide", "helper-credential",
-                    "vocab", "ui", "notify-me", "call-me", "board", "send-data"):
+                    "vocab", "ui", "notify-me", "call-me", "board", "send-data",
+                    *DELTA_KINDS):
         sys.exit(_run_client(args))
     if args.cmd == "show":
         sys.exit(_run_client(args))
