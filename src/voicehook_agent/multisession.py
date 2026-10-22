@@ -376,32 +376,53 @@ def write_helper(name: str, url: str, token: str, room: str, expires_in: float |
     return path
 
 
-def load_helper(now: float | None = None, *, session: str | None = None) -> dict | None:
-    """The helper entry of THIS session, never the one of another session:
+def own_helper_entry(*, session: str | None = None) -> tuple[Path, dict] | None:
+    """(path, data) of the helper entry of THIS session in any state (also dead or expired),
+    never the one of another session:
     1. $VOICEHOOK_SESSION_LABEL names an entry (helpers/<key of the label>.json),
     2. else an entry bound to this session (owner_session = session hash: `helper-import`
        ran inside this session),
     3. else the only entry bound to no session (imported over ssh, outside any session:
-       `helper-import --as <name>`); with several unbound entries: none (ambiguous).
-    None otherwise (load_relay then takes relay.json)."""
+       `helper-import --as <name>`); with several unbound entries: none (ambiguous)."""
     entries = _helper_entries()
     if not entries:
         return None
-    t = time.time() if now is None else now
     skey = own_session_hash() if session is None else str(session or "")
     want = helper_key(os.environ.get(LABEL_ENV))
     if want:
         for p, e in entries:
             if e.get("helper") == want:
-                return _usable(e, p, t)
+                return p, e
     if skey:
         for p, e in entries:
             if e.get("owner_session") == skey:
-                return _usable(e, p, t)
+                return p, e
     free = [(p, e) for p, e in entries if not e.get("owner_session")]
-    if len(free) == 1:
-        return _usable(free[0][1], free[0][0], t)
-    return None
+    return free[0] if len(free) == 1 else None
+
+
+def helper_state(entry: dict, now: float | None = None) -> str:
+    """0.25.0: 'live', 'dead' (token marked in relay.dead: 401/403/410, e.g. the main agent
+    rejoined), 'expired' or 'unusable' (bad or owner gone) for one helper entry."""
+    t = time.time() if now is None else now
+    try:
+        if float(entry.get("expires_at") or 0) <= t:
+            return "expired"
+    except (TypeError, ValueError):
+        return "unusable"
+    if isinstance(entry.get("token"), str) and _is_dead(entry["token"]):
+        return "dead"
+    return "live" if _usable(entry, helpers_dir(), t) is not None else "unusable"
+
+
+def load_helper(now: float | None = None, *, session: str | None = None) -> dict | None:
+    """The usable helper entry of THIS session (own_helper_entry), never the one of another
+    session. None otherwise (load_relay then takes relay.json)."""
+    found = own_helper_entry(session=session)
+    if found is None:
+        return None
+    t = time.time() if now is None else now
+    return _usable(found[1], found[0], t)
 
 
 def mark_dead(token: str) -> None:

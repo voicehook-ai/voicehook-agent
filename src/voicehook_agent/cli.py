@@ -4027,6 +4027,10 @@ def _run_client(args) -> int:
         rel = _helper_relay(args.session)
         if rel is not None:
             return _run_relay_client(args, req, rel)
+        bad = vrelayops.helper_problem(args.session)  # 0.25.0: never another session's join
+        if bad is not None:
+            print(json.dumps(bad, ensure_ascii=False), flush=True)
+            return 3
     wait_answer = req.get("cmd") == "decide" and getattr(args, "wait", None) == WAIT_ANSWER
     try:
         sock = vsession.resolve_socket(args.session,
@@ -4257,6 +4261,9 @@ def _run_waiting(args) -> int:
     frm = vrelayops.check_from(vrelayops.session_label()) if rel is not None else ""
     sock = None
     if rel is None:
+        bad = vrelayops.helper_problem(args.session)  # 0.25.0: never another session's join
+        if bad is not None:
+            return _waiting_out(bad, 3)
         try:
             sock = vsession.resolve_socket(args.session, wait=args.wait)
         except (vsession.SessionError, OSError) as e:

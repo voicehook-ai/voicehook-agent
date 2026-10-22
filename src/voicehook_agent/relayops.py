@@ -155,7 +155,9 @@ def client_relay(explicit_session: str | None) -> dict | None:
     4. relay.json of a join on this machine (or a legacy pre-0.22.2 helper-import): the
        relay, except for the session that wrote it; outside an agent session only when no
        join control socket answers.
-    5. Nothing: None (the caller then reports no-session with a hint)."""
+    5. Nothing: None (the caller then reports no-session with a hint). 0.25.0: when this
+       session has its own helper entry but it is dead/expired, the caller reports
+       helper_problem() instead and never falls back to another session's join."""
     if explicit_session or vmulti.relay_disabled():
         return None
     own = vmulti.own_session_hash()
@@ -169,6 +171,42 @@ def client_relay(explicit_session: str | None) -> dict | None:
     if own:
         return None if own == str(rel.get("owner_session") or "") else rel
     return None if _socket_answers() else rel
+
+
+HELPER_PROBLEM = {
+    "dead": "the relay of helper {name!r} is dead (the main agent rejoined or revoked it)",
+    "expired": "the helper credential of {name!r} has expired",
+    "unusable": "the helper credential of {name!r} is not usable",
+}
+HELPER_RENEW = ("nothing was sent (a helper never posts through the join of another session). "
+                "Ask the main agent of the call for a fresh credential: `voicehook-agent "
+                "helper-credential --label {name} | voicehook-agent helper-import --as {name}` "
+                "(MCP: helper_credential), then repeat the command")
+
+
+def helper_problem(explicit_session: str | None) -> dict | None:
+    """0.25.0 (live 22.10.2026, crown): this session is a helper (its own helper entry,
+    multisession.own_helper_entry) without a join of its own, and that entry is dead, expired
+    or unusable. Then the error the caller prints INSTEAD of falling back to
+    resolve_socket(None): that finds the join of ANOTHER session of the machine, which posted
+    the helper's decisions as its own (no sender) and got the answers. None when the session
+    may use a join (`--session`, VOICEHOOK_NO_RELAY=1, its own join, no helper entry) or its
+    entry is live."""
+    if explicit_session or vmulti.relay_disabled():
+        return None
+    own = vmulti.own_session_hash()
+    if own and _own_join_running(own):
+        return None
+    found = vmulti.own_helper_entry()
+    if found is None:
+        return None
+    state = vmulti.helper_state(found[1])
+    if state == "live":
+        return None
+    name = str(found[1].get("helper") or "helper")
+    return {"ok": False, "type": f"relay-{state}",
+            "error": HELPER_PROBLEM.get(state, HELPER_PROBLEM["unusable"]).format(name=name),
+            "hint": HELPER_RENEW.format(name=name)}
 
 
 def _from_hash(frm: str) -> str:

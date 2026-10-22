@@ -22,6 +22,14 @@ instead of leaving the call and re-joining.
 - **stale-join warning:** a join records its CLI version in `session.json` and the `status` reply;
   a newer binary (a starting join) warns (never spoken, stderr / `--json` `_meta: stale_join`) when
   a running join is on an older CLI and names the fix `voicehook-agent rejoin`.
+- **a helper never posts as another session (live 22.10.2026, crown):** when the own helper
+  credential of a helper session was dead (relay.dead after an operator rejoin), expired or
+  unusable, `decide`, `status --doing/--waiting`, `activity`, `next`, `show --card` and the MCP
+  tools fell back to the only live join of the machine, the one of ANOTHER session: its decisions
+  showed as that session's own (no sender) and the answers went there. Now a clear error
+  (`type` `relay-dead` / `relay-expired` / `relay-unusable`, exit 3) with the fix in `hint`
+  (fresh `helper-credential | helper-import --as <name>`); nothing is sent. `--session`,
+  `VOICEHOOK_NO_RELAY=1` and the session that owns the join are unchanged.
 - **several local joins:** a bare `rejoin` errors and lists the joins (`--session` required); no
   silent "rejoin all".
 

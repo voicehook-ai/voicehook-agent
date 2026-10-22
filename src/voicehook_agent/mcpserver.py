@@ -127,6 +127,9 @@ def _route() -> tuple[str, dict | None]:
     rel = vrelayops.client_relay(None)
     if rel is not None:
         return "relay", rel
+    bad = vrelayops.helper_problem(None)  # 0.25.0: a dead helper never takes another's join
+    if bad is not None:
+        raise ToolError(f"{bad['error']}; {bad['hint']}")
     try:
         vsession.resolve_socket(None, wait=0.0)
         return "own", None
