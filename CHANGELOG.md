@@ -3,6 +3,24 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.24.0 (2026-10-22)
+
+Targeted wake, to save tokens: until now every final user turn woke every agent session in the
+call, and a helper turn also woke the main session that only forwards it. Server side:
+voicehook-v4 #606 (stamps `wake` on every final user turn).
+
+- **Only the session that is meant wakes:** a main session (the join) wakes its agent
+  (`next`, `listen`, mid-turn hook, `--notify-url` webhook, stdout `wake` line) only when its
+  identity is in `wake.ids` and `scope` is not `helper`. Scope `none` (Delta or a human is
+  meant): nobody wakes.
+- **Helper turns:** on scope `helper` the join named in `wake.ids` forwards the turn to the
+  helper whose relay key is `wake.helper` (local answer file or server hub inbox, as with
+  `to_kind: "helper"` since 0.22.0) without waking its own agent. No other helper gets it.
+- **Nothing lost:** turns that did not wake the agent come with its next woken event as
+  `since_last` (compact: text up to 200 chars, speaker, scope, last 20); the mid-turn hook
+  shows them as context.
+- **Old server:** without `wake` everything works as in 0.23.1.
+
 ## 0.23.1 (2026-10-22)
 
 Live (Oliver, 22.10.): `show --card image` with a ~700 KB screenshot crashed the join's control

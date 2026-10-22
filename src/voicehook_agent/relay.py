@@ -18,6 +18,7 @@ import hashlib
 import os
 import re
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Iterator
@@ -437,6 +438,81 @@ def helper_turn_fields(payload: dict | None) -> dict:
         return {"to": [], "to_kind": "helper_ambiguous", "info_only": True, "addressed_to_you": False,
                 "note": "several helpers match, Delta asks which one; do not act"}
     return {}
+
+
+# --------------------------------------------------------------------------- #
+# 0.24.0 targeted wake (server voicehook-v4 #606, 22.10.2026)
+# --------------------------------------------------------------------------- #
+WAKE_SCOPES = ("helper", "agents", "main", "none")
+QUIET_MAX = 20          # not-woken turns kept for the next woken event (oldest dropped)
+QUIET_TEXT_MAX = 200    # compact: chars per turn in `since_last`
+
+
+def wake_info(payload: dict | None) -> dict | None:
+    """The server's `wake` stamp of a final user turn, normalized; None when absent or not
+    usable (old server: everything as before)."""
+    w = (payload or {}).get("wake")
+    if not isinstance(w, dict) or w.get("scope") not in WAKE_SCOPES:
+        return None
+    ids = w.get("ids") if isinstance(w.get("ids"), list) else []
+    return {"scope": w["scope"], "ids": [str(i) for i in ids if i][:50],
+            "helper": str(w.get("helper") or "")}
+
+
+def wakes_main(payload: dict | None, own: set[str] | str | None) -> bool:
+    """A main session (the join) wakes its LLM for this turn: own identity in `wake.ids` and
+    scope != helper. Without `wake` (old server) always True."""
+    w = wake_info(payload)
+    if w is None:
+        return True
+    if w["scope"] == "helper":
+        return False
+    mine = {own} if isinstance(own, str) else set(own or ())
+    return bool(mine & set(w["ids"]))
+
+
+def wakes_helper(payload: dict | None, key: str) -> bool:
+    """A helper session (relay key '<Label>: <from>') is woken only on scope helper with
+    `wake.helper` == its key. Without `wake` (old server) always True."""
+    w = wake_info(payload)
+    if w is None:
+        return True
+    return w["scope"] == "helper" and bool(key) and w["helper"] == key
+
+
+class QuietTurns:
+    """User turns the server did not mean for us (not woken). Nothing is lost: the next woken
+    event (spool `before_add`) carries them compactly as `since_last`. In memory only, bounded."""
+
+    def __init__(self, maxlen: int = QUIET_MAX) -> None:
+        self._q: deque[dict] = deque(maxlen=maxlen)
+        self.dropped = 0
+
+    def __len__(self) -> int:
+        return len(self._q)
+
+    def add(self, ev: dict, scope: str = "") -> None:
+        if len(self._q) == self._q.maxlen:
+            self.dropped += 1
+        item = {"text": str(ev.get("text") or "").strip()[:QUIET_TEXT_MAX], "ts": ev.get("ts")}
+        for k in ("speaker",):
+            if ev.get(k):
+                item[k] = ev[k]
+        if scope:
+            item["scope"] = scope
+        if ev.get("to"):
+            item["to"] = ev["to"]
+        self._q.append(item)
+
+    def attach(self, ev: dict) -> dict:
+        """Moves the buffered turns into `ev["since_last"]` (+ `since_last_dropped`)."""
+        if self._q:
+            ev["since_last"] = list(self._q)
+            if self.dropped:
+                ev["since_last_dropped"] = self.dropped
+            self._q.clear()
+            self.dropped = 0
+        return ev
 
 
 def helper_user_turn_event(text: str, name: str, speaker: str = "", now: float | None = None) -> dict:

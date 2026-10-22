@@ -107,6 +107,7 @@ class SpoolQueue:
         self._disk_ok = self.dir is not None
         self.last_consumed: float | None = None  # clock of the last ack
         self._shown: dict[int, float] = {}  # 0.21.7: seq -> clock, shown to the agent mid-turn
+        self.before_add = None  # 0.24.0: callable(event) on every wake-type event before it is queued
 
     # ------------------------------------------------------------------ files
     @property
@@ -247,6 +248,8 @@ class SpoolQueue:
     def _add(self, event: dict, front: bool = False) -> bool:
         if not self.armed:
             return False
+        if self.before_add is not None and wanted(event, WAKE_TYPES):
+            self.before_add(event)  # 0.24.0: not-woken turns ride along (relay.QuietTurns)
         before = len(self._acked)
         if front:  # one of a kind in line: an older unread one of the same type is superseded
             typ = event.get("type")
