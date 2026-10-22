@@ -22,6 +22,14 @@ Limits (checked here before anything is sent, again in the join, and by the serv
 text max 4000 chars, title max 80, SVG max 300 KB (draws anything, but no <script>,
 <foreignObject>, on* attributes or external references), PNG/JPEG/WebP max 1 MB, link one
 http(s) URL. Too large or wrong: exit 2, nothing sent, never cut.
+
+Artefakt-Karten (0.25.0): `show --card pdf|csv|md --file PATH` or `show --file PATH` (kind from
+the file extension) puts a file on the call page: PDF max 10 MB (starts with %PDF-), CSV and
+Markdown max 2 MB of UTF-8 text. The join uploads it (POST /api/card/file, same Bearer as
+/api/card/image) and publishes operator.card {id, seq, kind, title, text, at, url, mime, name,
+size}; ok only once a call page loaded the file (vh.card_ack, as for images). Title default =
+file name, --text = optional caption. A helper sends {kind, title, text, name, data} to
+relay/show, the server publishes. Never logged: only kind and size.
 """
 from __future__ import annotations
 
@@ -37,17 +45,26 @@ from urllib.parse import urlparse
 TOPIC = "operator.card"
 UI_TOPIC = "delta.ui"
 IMAGE_PATH = "/api/card/image"
-KINDS = ("text", "code", "link", "image")
+FILE_PATH = "/api/card/file"   # 0.25.0 pdf, csv, md (server voicehook-v4 cards.FILE_KINDS)
+FILE_KINDS = ("pdf", "csv", "md")
+KINDS = ("text", "code", "link", "image", *FILE_KINDS)
 PANELS = ("cards", "board", "log", "decisions", "none")
 UI_PANELS = ("board", "log", "cards", "decisions")  # `none` closes these four
 TEXT_MAX = 4000
 TITLE_MAX = 80
 SVG_MAX = 300 * 1024
 RASTER_MAX = 1024 * 1024
+PDF_MAX = 10 * 1024 * 1024       # 0.25.0, like the server
+TEXTFILE_MAX = 2 * 1024 * 1024   # csv, md (UTF-8)
+NAME_MAX = 120
+ATTACH_MAX = 8                   # status --attach
+FILE_EXT = {"pdf": (".pdf",), "csv": (".csv",), "md": (".md", ".markdown"),
+            "image": (".png", ".jpg", ".jpeg", ".webp", ".svg")}
 PACKET_MAX = 14_000
 ACK_TOPIC = "vh.card_ack"
 ACK_WAIT_S = 15.0      # a phone may need a while for a 1 MB image
 ACK_GRACE_S = 2.0      # after the first ok: wait this long for the other humans
+FILE_ACK_WAIT_S = 30.0  # 0.25.0: a 10 MB PDF on a phone takes longer than an image
 
 _SVG_TAG = re.compile(rb"<svg[\s>]", re.IGNORECASE)
 
@@ -146,6 +163,85 @@ def image_field(data: bytes) -> str:
     return base64.b64encode(data).decode("ascii")
 
 
+def _size_txt(n: int) -> str:
+    return f"{n // (1024 * 1024)} MB" if n >= 1024 * 1024 else f"{n // 1024} KB"
+
+
+def kind_from_name(path: str) -> str:
+    """0.25.0 `show --file PATH` without --card: the kind from the extension, else CardError."""
+    low = os.path.basename(str(path)).lower()
+    for kind, exts in FILE_EXT.items():
+        if low.endswith(exts):
+            return kind
+    raise CardError("--file without --card: the extension must be .pdf, .csv, .md/.markdown or "
+                    ".png/.jpg/.jpeg/.webp/.svg (else pass --card text|code|link|image|pdf|csv|md)")
+
+
+def file_name(name: object, kind: str) -> str:
+    """The file name of a file card (like the server): last path part, no control chars, max
+    NAME_MAX chars, with a fitting extension (appended otherwise)."""
+    n = _clean(name).replace("\\", "/").split("/")[-1].strip()
+    n = " ".join(n.split())[:NAME_MAX].strip(" .")
+    exts = FILE_EXT[kind]
+    if not n:
+        n = "datei" + exts[0]
+    if not n.lower().endswith(exts):
+        n = n[:NAME_MAX - len(exts[0])] + exts[0]
+    return n
+
+
+def check_file(kind: str, data: bytes) -> None:
+    """A pdf/csv/md file: size and content like the server. CardError when wrong, never cut."""
+    if kind == "pdf":
+        if len(data) > PDF_MAX:
+            raise CardError(f"pdf max {_size_txt(PDF_MAX)}")
+        if data.lstrip()[:5] != b"%PDF-":
+            raise CardError("pdf must be a PDF file (starts with %PDF-)")
+        return
+    if len(data) > TEXTFILE_MAX:
+        raise CardError(f"{kind} max {_size_txt(TEXTFILE_MAX)}")
+    if not data.strip():
+        raise CardError(f"{kind} file is empty")
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise CardError(f"{kind} must be UTF-8 text") from None
+    if b"\x00" in data:
+        raise CardError(f"{kind} must be text (no NUL bytes)")
+
+
+def read_file(kind: str, path: str) -> bytes:
+    """Read a pdf/csv/md file, size checked BEFORE reading it whole."""
+    limit = PDF_MAX if kind == "pdf" else TEXTFILE_MAX
+    if os.path.getsize(path) > limit:
+        raise CardError(f"{kind} max {_size_txt(limit)}")
+    with open(path, "rb") as fh:
+        data = fh.read(limit + 1)
+    check_file(kind, data)
+    return data
+
+
+def _file_bytes(kind: str, data: object) -> bytes:
+    s = "".join(str(data or "").split())
+    if not s:
+        raise CardError(f"{kind} data is empty")
+    limit = PDF_MAX if kind == "pdf" else TEXTFILE_MAX
+    if len(s) > (limit * 4) // 3 + 16:
+        raise CardError(f"{kind} max {_size_txt(limit)}")
+    try:
+        raw = base64.b64decode(s, validate=True)
+    except (binascii.Error, ValueError):
+        raise CardError(f"{kind} data must be base64") from None
+    check_file(kind, raw)
+    return raw
+
+
+def file_size(body: dict) -> int:
+    """Decoded size of a checked file card body (base64 in `data`)."""
+    s = "".join(str(body.get("data") or "").split())
+    return (len(s) * 3) // 4 - s[-2:].count("=")
+
+
 def _image_bytes(image: str) -> bytes:
     s = (image or "").strip()
     if not s:
@@ -173,7 +269,7 @@ def validate(req: dict) -> dict:
     kind = req.get("kind")
     image = req.get("image")
     body: dict = {}
-    if kind is None and image is None and not str(req.get("text") or "").strip():
+    if kind is None and image is None and req.get("data") is None and not str(req.get("text") or "").strip():
         if panel is None:
             raise CardError("nothing to show: give --card (with --text or --file) and/or --panel")
         return {"panel": panel, **({"large": True} if large else {})}
@@ -184,7 +280,19 @@ def validate(req: dict) -> dict:
     if len(title) > TITLE_MAX:
         raise CardError(f"title max {TITLE_MAX} characters")
     text = _clean(req.get("text"))
-    if kind == "image":
+    if kind in FILE_KINDS:  # 0.25.0: file + optional caption
+        if image:
+            raise CardError("image only with --card image")
+        if len(text) > TEXT_MAX:
+            raise CardError(f"text max {TEXT_MAX} characters")
+        _file_bytes(kind, req.get("data"))
+        body.update(kind=kind, name=file_name(req.get("name"), kind),
+                    data="".join(str(req["data"]).split()))
+        if text.strip():
+            body["text"] = text
+    elif req.get("data") is not None:
+        raise CardError("data only with --card pdf|csv|md")
+    elif kind == "image":
         if text.strip():
             raise CardError("--card image takes --file, not --text")
         image_kind(_image_bytes(str(image or "")))
@@ -213,14 +321,25 @@ def request_from_args(*, kind: str | None, title: str | None, text: str | None,
                       stdin=None) -> dict:
     """`show --card KIND [--title T] [--text T | --file PATH] [--panel P] [--large]` -> the join
     request {cmd: card, ...}. `--text -` reads stdin. Reads the file, checks everything."""
-    if text is not None and file is not None:
+    if kind is None and file is not None:   # 0.25.0: kind from the extension
+        kind = kind_from_name(file)
+    if text is not None and file is not None and kind not in FILE_KINDS:
         raise CardError("--text and --file cannot be combined")
-    if kind is None and (title is not None or text is not None or file is not None):
-        raise CardError("--title/--text/--file need --card text|code|link|image")
+    if kind is None and (title is not None or text is not None):
+        raise CardError("--title/--text/--file need --card text|code|link|image|pdf|csv|md")
+    if file is not None and title is None and kind in ("image", *FILE_KINDS):
+        title = " ".join(_clean(os.path.basename(file)).split())[:TITLE_MAX]  # default: file name
     req: dict = {"kind": kind, "title": title, "panel": panel, "large": True if large else None}
     if text == "-":
         text = stdin.read() if stdin is not None else ""
-    if kind == "image":
+    if kind in FILE_KINDS:
+        if file is None:
+            raise CardError(f"--card {kind} needs --file PATH")
+        req["data"] = base64.b64encode(read_file(kind, file)).decode("ascii")
+        req["name"] = file_name(os.path.basename(file), kind)
+        if text is not None:
+            req["text"] = text   # caption
+    elif kind == "image":
         if text is not None:
             raise CardError("--card image takes --file, not --text")
         if file is None:
@@ -244,15 +363,19 @@ def request_from_args(*, kind: str | None, title: str | None, text: str | None,
 
 
 def make_card(*, seq: int, body: dict, url: str | None = None, mime: str | None = None,
-              cid: str | None = None, now: float | None = None) -> dict:
-    """The operator.card packet {id, seq, kind, title, text, at, url?, mime?} (same shape the
-    server builds for the bridge)."""
+              cid: str | None = None, now: float | None = None, name: str | None = None,
+              size: int | None = None) -> dict:
+    """The operator.card packet {id, seq, kind, title, text, at, url?, mime?, name?, size?}
+    (same shape the server builds for the bridge; never the file itself)."""
     card = {"id": cid or secrets.token_hex(8), "seq": seq, "kind": body["kind"],
             "title": body.get("title", ""), "text": body.get("text", ""),
             "at": round(now if now is not None else time.time(), 3)}
     if url is not None:
         card["url"] = url
         card["mime"] = mime or ""
+    if name is not None:
+        card["name"] = name
+        card["size"] = int(size or 0)
     if len(json.dumps(card, ensure_ascii=False).encode("utf-8")) + 400 > PACKET_MAX:
         raise CardError(f"card too large for the call (max {PACKET_MAX} bytes UTF-8)")
     return card
@@ -325,8 +448,9 @@ class Acks:
             self._w.pop(cid, None)
 
 
-def ack_result(res: dict, loaded: set[str], failed: set[str], humans: int) -> dict:
-    """The join's answer for an image card after waiting for the call pages."""
+def ack_result(res: dict, loaded: set[str], failed: set[str], humans: int,
+               what: str = "image", wait_s: float | None = None) -> dict:
+    """The join's answer for an image (0.25.0: or file) card after waiting for the call pages."""
     if loaded:
         out = {**res, "shown": len(loaded)}
         if failed:
@@ -334,14 +458,14 @@ def ack_result(res: dict, loaded: set[str], failed: set[str], humans: int) -> di
         return out
     if humans == 0:
         return {**res, "ok": False, "type": "no_human",
-                "error": "no human in the call: the image was not shown to anyone (the card is kept "
+                "error": f"no human in the call: the {what} was not shown to anyone (the card is kept "
                          "and shows up when someone opens the call page)"}
     if failed:
         return {**res, "ok": False, "type": "not_shown",
-                "error": "the image did not load in the call page (server lost it, e.g. after a "
+                "error": f"the {what} did not load in the call page (server lost it, e.g. after a "
                          "restart): send it again"}
     return {**res, "ok": False, "type": "not_shown",
-            "error": f"no call page confirmed the image within {int(ACK_WAIT_S)} s (page not "
+            "error": f"no call page confirmed the {what} within {int(wait_s or ACK_WAIT_S)} s (page not "
                      "reloaded since the update, or offline): ask the human to reload, then send again"}
 
 
@@ -362,11 +486,15 @@ def relay_card(card: object, seq: int) -> dict | None:
     out = {"id": cid, "seq": seq, "kind": kind, "title": str(card.get("title") or "")[:TITLE_MAX],
            "text": str(card.get("text") or "")[:TEXT_MAX], "from": frm,
            "at": card.get("at") if isinstance(card.get("at"), (int, float)) else round(time.time(), 3)}
-    if kind == "image":
+    if kind == "image" or kind in FILE_KINDS:
         if not image_url_ok(card.get("url"), cid):
             return None
         out["url"] = card["url"]
         out["mime"] = str(card.get("mime") or "")[:40]
+    if kind in FILE_KINDS:  # 0.25.0
+        out["name"] = file_name(card.get("name"), kind)
+        sz = card.get("size")
+        out["size"] = sz if isinstance(sz, int) and not isinstance(sz, bool) and sz >= 0 else 0
     if len(json.dumps(out, ensure_ascii=False).encode("utf-8")) > PACKET_MAX:
         return None
     return out

@@ -841,7 +841,8 @@ PHONE_MESSAGE_MAX = {"notify_me": 120, "call_me": 200}
 CLI_PHONE_PATH = "/api/cli/{kind}"
 PHONE_HTTP_TIMEOUT_S = {"notify_me": 20.0, "call_me": 720.0}   # server dials up to 690 s
 PHONE_SOCK_TIMEOUT_S = {"notify_me": 30.0, "call_me": 750.0, "data": 120.0,  # data: upload
-                        "card": 60.0}  # 0.23.1: image upload + wait for the call pages
+                        "card": 90.0}  # 0.23.1: image upload + wait for the call pages;
+# 0.25.0: a 10 MB PDF (upload up to 45 s) + FILE_ACK_WAIT_S
 
 
 def phone_request(kind: str, reason: str, message: str | None) -> dict:
@@ -959,8 +960,11 @@ async def _publish_helper_card(ctl: _Control, room, card: dict) -> dict:
     if "url" not in pkt:
         return {"ok": True}
     humans = _human_ids(room)
-    loaded, failed = await ctl.card_acks.wait(pkt["id"], humans)
-    res = vcards.ack_result({"ok": True}, loaded, failed, len(humans))
+    is_file = pkt["kind"] in vcards.FILE_KINDS  # 0.25.0
+    wait_s = vcards.FILE_ACK_WAIT_S if is_file else vcards.ACK_WAIT_S
+    loaded, failed = await ctl.card_acks.wait(pkt["id"], humans, timeout=wait_s)
+    res = vcards.ack_result({"ok": True}, loaded, failed, len(humans),
+                            what="file" if is_file else "image", wait_s=wait_s)
     if res.get("ok"):
         return {k: res[k] for k in ("ok", "shown", "not_loaded") if k in res}
     return {"ok": False, "status": 409, "detail": res.get("error", "not shown")}
@@ -1169,24 +1173,27 @@ VISUAL_RATE_ERROR = ("rate limit: at most one shape per 2 s per operator, "
                      "nothing drawn; send it again in 2 s or skip it")
 CARD_IMAGE_OLD_SERVER = ("image cards over WebRTC need a newer server (POST /api/card/image "
                          "missing); text, code and link cards work")
+CARD_FILE_OLD_SERVER = ("pdf, csv and md cards need a newer server (POST /api/card/file "
+                        "missing); text, code, link and image cards work")
 
 
-async def _upload_card_image(ctl: _Control, image: str) -> dict:
-    """0.21.0: store an image card on the server (POST /api/card/image, Bearer = the LiveKit
-    token of this cycle, after it expired the helper pump token) -> {ok, id, url, mime}.
-    Never prints a token."""
+async def _upload_card(ctl: _Control, path: str, payload: dict, what: str, old_server: str,
+                       timeout: float = 20.0) -> dict:
+    """0.21.0: store an image (0.25.0: or a pdf/csv/md file) card on the server (POST `path`,
+    Bearer = the LiveKit token of this cycle, after it expired the helper pump token) ->
+    {ok, id, url, mime, name?, size?}. Never prints a token or the file."""
     bearers = [b for b in (ctl.lk_jwt, getattr(ctl.helper_pump, "token", None)) if b]
     if not ctl.api_base or not bearers:
         return {"ok": False, "type": "card", "error": "not connected to the room (yet)"}
     r = None
-    async with httpx.AsyncClient(timeout=20.0, headers={"user-agent": _USER_AGENT,
-                                                        "x-vh-cli": _VERSION}) as http:
+    async with httpx.AsyncClient(timeout=timeout, headers={"user-agent": _USER_AGENT,
+                                                           "x-vh-cli": _VERSION}) as http:
         for bearer in bearers:
             try:
-                r = await http.post(ctl.api_base.rstrip("/") + vcards.IMAGE_PATH, json={"image": image},
+                r = await http.post(ctl.api_base.rstrip("/") + path, json=payload,
                                     headers={"authorization": f"Bearer {bearer}"})
             except httpx.HTTPError as e:
-                return {"ok": False, "type": "card", "error": f"image not sent: {type(e).__name__}"}
+                return {"ok": False, "type": "card", "error": f"{what} not sent: {type(e).__name__}"}
             if r.status_code != 404 or len(bearers) == 1:
                 break
     try:
@@ -1196,14 +1203,32 @@ async def _upload_card_image(ctl: _Control, image: str) -> dict:
     j = j if isinstance(j, dict) else {}
     detail = str(j.get("detail") or "")[:300]
     if r.status_code == 200 and vcards.image_url_ok(j.get("url"), j.get("id")):
-        return {"ok": True, "id": j["id"], "url": j["url"], "mime": str(j.get("mime") or "")}
+        out = {"ok": True, "id": j["id"], "url": j["url"], "mime": str(j.get("mime") or "")[:80]}
+        if isinstance(j.get("name"), str):
+            out["name"] = j["name"]
+        if isinstance(j.get("size"), int) and not isinstance(j.get("size"), bool):
+            out["size"] = j["size"]
+        return out
     if r.status_code in (404, 405) and detail in ("", "Not Found", "Method Not Allowed"):
-        return {"ok": False, "type": "card", "error": CARD_IMAGE_OLD_SERVER}
+        return {"ok": False, "type": "card", "error": old_server}
+    if r.status_code == 413:
+        return {"ok": False, "type": "invalid", "error": f"server: {what} too large {detail}".strip()}
     if r.status_code == 422:
-        return {"ok": False, "type": "invalid", "error": f"server rejected the image: {detail}"}
+        return {"ok": False, "type": "invalid", "error": f"server rejected the {what}: {detail}"}
     if r.status_code == 429:
-        return {"ok": False, "type": "rate_limited", "error": "too many images, try again in a minute"}
-    return {"ok": False, "type": "card", "error": f"image not sent: HTTP {r.status_code} {detail}".strip()}
+        return {"ok": False, "type": "rate_limited", "error": f"too many {what}s, try again in a minute"}
+    return {"ok": False, "type": "card", "error": f"{what} not sent: HTTP {r.status_code} {detail}".strip()}
+
+
+async def _upload_card_image(ctl: _Control, image: str) -> dict:
+    return await _upload_card(ctl, vcards.IMAGE_PATH, {"image": image}, "image", CARD_IMAGE_OLD_SERVER)
+
+
+async def _upload_card_file(ctl: _Control, body: dict) -> dict:
+    """0.25.0 POST /api/card/file {kind, name, data} (data = base64, checked before)."""
+    return await _upload_card(ctl, vcards.FILE_PATH,
+                              {"kind": body["kind"], "name": body["name"], "data": body["data"]},
+                              "file", CARD_FILE_OLD_SERVER, timeout=45.0)
 
 
 def _human_ids(room) -> set[str]:
@@ -1234,14 +1259,23 @@ async def _publish_card(ctl: _Control, room, body: dict) -> dict:
         return res
     res: dict = {"ok": True, "type": "card", "via": "datachannel"}
     if "kind" in body:
-        url = mime = cid = None
+        url = mime = cid = name = size = None
+        is_file = body["kind"] in vcards.FILE_KINDS
         if body["kind"] == "image":
             up = await _upload_card_image(ctl, body["image"])
             if not up.get("ok"):
                 return up
             url, mime, cid = up["url"], up["mime"], up["id"]
+        elif is_file:  # 0.25.0 pdf/csv/md: stored on the server, the card carries the URL
+            up = await _upload_card_file(ctl, body)
+            if not up.get("ok"):
+                return up
+            url, mime, cid = up["url"], up["mime"], up["id"]
+            name = str(up.get("name") or body["name"])[:vcards.NAME_MAX]
+            size = up.get("size") if isinstance(up.get("size"), int) else vcards.file_size(body)
         try:
-            card = vcards.make_card(seq=ctl.card_seq + 1, body=body, url=url, mime=mime, cid=cid)
+            card = vcards.make_card(seq=ctl.card_seq + 1, body=body, url=url, mime=mime, cid=cid,
+                                    name=name, size=size)
         except vcards.CardError as e:
             return {"ok": False, "type": "invalid", "error": str(e)}
         data = json.dumps(card, ensure_ascii=False).encode("utf-8")
@@ -1256,8 +1290,12 @@ async def _publish_card(ctl: _Control, room, body: dict) -> dict:
         if url is not None:
             # 0.23.1: ok only when a call page loaded the image (vh.card_ack)
             humans = _human_ids(room)
-            loaded, failed = await ctl.card_acks.wait(card["id"], humans)
-            res = vcards.ack_result(res, loaded, failed, len(humans))
+            wait_s = vcards.FILE_ACK_WAIT_S if is_file else vcards.ACK_WAIT_S
+            loaded, failed = await ctl.card_acks.wait(card["id"], humans, timeout=wait_s)
+            res = vcards.ack_result(res, loaded, failed, len(humans),
+                                    what="file" if is_file else "image", wait_s=wait_s)
+            if is_file:
+                res.update(name=card["name"], size=card["size"])
             if not res.get("ok"):
                 return res
     panel, large = body.get("panel"), body.get("large") is True
@@ -1641,8 +1679,9 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
     if cmd == "card":
         ctl.watchdog.touch()
         try:  # same rules as the client, checked again (stdin-free path)
-            body = vcards.validate({k: req.get(k) for k in ("kind", "title", "text", "image", "panel",
-                                                            "large") if req.get(k) is not None})
+            body = vcards.validate({k: req.get(k) for k in ("kind", "title", "text", "image", "data",
+                                                            "name", "panel", "large")
+                                    if req.get(k) is not None})
         except vcards.CardError as e:
             return {"ok": False, "type": "invalid", "error": str(e)}
         room = await ctl.wait_room(10.0)
@@ -3780,6 +3819,42 @@ def _run_tasks(args) -> int:
     return 0
 
 
+def _attach_cards(paths: list[str]) -> list[dict]:
+    """0.25.0 `status --attach FILE` (max ATTACH_MAX): one checked card request per file
+    (kind from the extension, limits like show --file). CardError -> exit 2, nothing sent."""
+    if len(paths) > vcards.ATTACH_MAX:
+        raise vcards.CardError(f"status --attach: max {vcards.ATTACH_MAX} files")
+    return [vcards.request_from_args(kind=None, title=None, text=None, file=f, panel=None)
+            for f in paths]
+
+
+# uploaded + published, only not shown yet (nobody in the call, or no page loaded it): the card
+# is in the call and shows up when the page opens, so the board still links it (hint, no error)
+ATTACH_OK_TYPES = ("no_human", "not_shown")
+
+
+def _attach_upload(cards: list[dict], send) -> tuple[list[dict] | None, dict | None]:
+    """0.25.0: upload each `status --attach` card with send(card_req) -> reply; -> (attach list
+    [{id, name, kind}], None) or (None, error answer). One failure stops: nothing goes silently
+    missing (the status is not sent)."""
+    out: list[dict] = []
+    for c in cards:
+        name = c.get("name") or c.get("title") or c.get("kind")
+        r = send(c)
+        r = r if isinstance(r, dict) else {}
+        cid = r.get("id")
+        good = r.get("ok") or (r.get("type") in ATTACH_OK_TYPES and isinstance(cid, str))
+        if not good or not isinstance(cid, str):
+            return None, {"ok": False, "type": "attach", "error": f"attachment {name} not uploaded, "
+                          f"status not sent: {r.get('error') or 'no card id'}",
+                          **({"status": r["status"]} if isinstance(r.get("status"), int) else {})}
+        if not r.get("ok"):
+            print(f"[note] attachment {name}: card is in the call, no call page loaded it yet "
+                  f"({r.get('type')}); the board links it anyway", file=sys.stderr, flush=True)
+        out.append({"id": cid, "name": str(name)[:vcards.NAME_MAX], "kind": c["kind"]})
+    return out, None
+
+
 def _client_request(args) -> dict:
     if args.cmd == "say":
         text = " ".join(args.text)
@@ -3793,7 +3868,8 @@ def _client_request(args) -> dict:
                                       getattr(args, "emotion", None)))
         return req
     if args.cmd == "show":
-        if args.card is not None or args.panel is not None or args.large:  # 0.21.0 cards
+        if (args.card is not None or args.panel is not None or args.large  # 0.21.0 cards
+                or args.file is not None):  # 0.25.0: --file alone = kind from the extension
             if (args.preset or args.polygon or args.path or args.json is not None or args.open
                     or args.label is not None or args.hold_ms is not None or args.emotion is not None):
                 raise vcards.CardError("--card/--panel cannot be combined with shape flags "
@@ -3802,7 +3878,7 @@ def _client_request(args) -> dict:
                                             file=args.file, panel=args.panel, large=args.large,
                                             stdin=sys.stdin)
         if args.title is not None or args.text is not None or args.file is not None:
-            raise vcards.CardError("--title/--text/--file need --card text|code|link|image")
+            raise vcards.CardError("--title/--text need --card text|code|link|image|pdf|csv|md")
         shape = vvisual.shape_from_args(
             presets=args.preset, polygons=args.polygon, paths=args.path,
             json_text=args.json, open_=args.open, label=args.label, hold_ms=args.hold_ms)
@@ -3901,8 +3977,11 @@ def _client_request(args) -> dict:
         return req
     faq_raw = getattr(args, "faq", None) or []
     project = vui.project_field(getattr(args, "project", None))  # 0.21.0
+    attach = getattr(args, "attach", None) or []
     if (args.text is not None or args.doing is not None or args.open or args.done or args.file
             or faq_raw):
+        # 0.25.0 --attach: every file checked (kind, size) before anything is sent
+        attach_cards = _attach_cards(attach)
         file_obj = None
         if args.file:
             with open(args.file, encoding="utf-8") as fh:
@@ -3930,7 +4009,12 @@ def _client_request(args) -> dict:
             warn(f"{relay.MANDATORY_HINT} Fehlt bei: " + "; ".join(missing[:5]))
         if project is not None:
             board["project"] = project
-        return {"cmd": "board", "board": board}
+        req = {"cmd": "board", "board": board}
+        if attach_cards:
+            req["attach_cards"] = attach_cards
+        return req
+    if attach:
+        raise vcards.CardError("status --attach goes with a board: TEXT, --doing, --open, --done or -f")
     if project is not None:
         raise ValueError("status --project goes with a board: TEXT, --doing, --open, --done or -f")
     return {"cmd": "status"}
@@ -4018,6 +4102,7 @@ def _run_client(args) -> int:
     except (OSError, ValueError) as e:
         print(json.dumps({"ok": False, "type": "error", "error": str(e)}, ensure_ascii=False), flush=True)
         return 1
+    attach_cards = req.pop("attach_cards", None)  # 0.25.0 status --attach
     if req.get("cmd") in RELAY_CMDS:
         # 0.16.0: a Claude Code session without its own join, while another session of
         # this machine is in the call: decide/board go over relay.json as a helper.
@@ -4026,7 +4111,7 @@ def _run_client(args) -> int:
         # its sender); ring shapes and --panel alone stay with the join.
         rel = _helper_relay(args.session)
         if rel is not None:
-            return _run_relay_client(args, req, rel)
+            return _run_relay_client(args, req, rel, attach_cards)
         bad = vrelayops.helper_problem(args.session)  # 0.25.0: never another session's join
         if bad is not None:
             print(json.dumps(bad, ensure_ascii=False), flush=True)
@@ -4038,6 +4123,14 @@ def _run_client(args) -> int:
         sock_timeout = None if args.cmd == "next" else PHONE_SOCK_TIMEOUT_S.get(req["cmd"], 30.0)
         if req.get("cmd") == "next":
             req = {**req, "lease": True}  # 0.21.5: acked below, after the print (spool.py)
+        if attach_cards:  # 0.25.0: each file as a card first, then the board with their ids
+            att, err = _attach_upload(attach_cards, lambda c: vsession.request(
+                sock, c, timeout=PHONE_SOCK_TIMEOUT_S["card"]))
+            if err is not None:
+                print(json.dumps(err, ensure_ascii=False), flush=True)
+                print(f"[error] {err['error']}", file=sys.stderr, flush=True)
+                return 1
+            req["board"]["attach"] = att
         reply = vsession.request(sock, req, timeout=sock_timeout)
     except vsession.ForeignJoin as e:  # 0.25.0: never another session's join
         print(json.dumps(_foreign_reply(e), ensure_ascii=False), flush=True)
@@ -4186,7 +4279,7 @@ def _print_json(obj: dict) -> None:
     print(json.dumps(obj, ensure_ascii=False), flush=True)
 
 
-def _run_relay_client(args, req: dict, rel: dict) -> int:
+def _run_relay_client(args, req: dict, rel: dict, attach_cards: list[dict] | None = None) -> int:
     """0.16.0 helper session: decide / status board over relay.json (remote: HTTP,
     local: request file of the join). One JSON line, plus "via":"relay"."""
     if req["cmd"] == "visual" or (req["cmd"] == "card" and not req.get("kind")):
@@ -4219,14 +4312,25 @@ def _run_relay_client(args, req: dict, rel: dict) -> int:
                     out["timeout"] = True
         elif req["cmd"] == "card":  # 0.23.1: a helper's card (image: server relay only)
             body = vrelayops.card_body(req)
-            if local and body.get("kind") == "image":
-                raise vrelayops.RelayError("image cards of a helper need the server relay (the "
-                                           "server of this call is too old); text, code and link work", 422)
+            if local and body.get("kind") in ("image", *vcards.FILE_KINDS):
+                raise vrelayops.RelayError(f"{body['kind']} cards of a helper need the server relay "
+                                           "(the server of this call is too old); text, code and "
+                                           "link work", 422)
             res = (vrelayops.local_request(rel, frm, "card", body) if local
                    else vrelayops.remote_show(rel, frm, body))
             out = {**res, "type": "card", "via": "relay"}
         else:
             board = req.get("board") or {}
+            if attach_cards:  # 0.25.0: each file to relay/show first (the server shows it)
+                if local:
+                    raise vrelayops.RelayError("status --attach of a helper needs the server relay "
+                                               "(the server of this call is too old)", 422)
+                att, err = _attach_upload(attach_cards, lambda c: vrelayops.remote_show(
+                    rel, frm, vrelayops.card_body(c)))
+                if err is not None:
+                    _print_json({**err, "via": "relay"})
+                    return 1
+                board = {**board, "attach": att}
             body = vrelayops.status_body(board)
             # 0.22.2: --faq goes per item in meta; warn only when a pair really stays behind
             if board.get("faq") and _meta_faq_n(body.get("meta")) < max(
@@ -4655,10 +4759,17 @@ def main(argv: list[str] | None = None) -> None:
                           help="0.21.0: your project (1-40 chars, e.g. voicehook, salesengine, kunden, "
                                "sonstiges), sent as board field project; overrides the project the "
                                "server derives for the focus filter. Also over the relay (helper)")
+    p_status.add_argument("--attach", action="append", default=[], metavar="FILE",
+                          help="0.25.0: attach a file to the board (repeatable, max "
+                               f"{vcards.ATTACH_MAX}): .pdf (max 10 MB), .csv/.md (max 2 MB UTF-8) "
+                               "or an image. Each is first shown as a card (like show --file), "
+                               "then the board carries attach [{id, name, kind}]. One upload "
+                               "fails: exit 1, the status is not sent")
     _add_session(p_status)
     p_show = sub.add_parser(
         "show", help="draw a shape in the ring (operator.visual), or 0.21.0 --card: a text, code, "
-                     "link or image card on the call page",
+                     "link or image card on the call page; 0.25.0 also pdf, csv, md files "
+                     "(show --file PATH picks the kind from the extension)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=SHOW_HELP)
     p_show.add_argument("--preset", action="append", default=[], metavar="NAME",
@@ -4690,7 +4801,11 @@ def main(argv: list[str] | None = None) -> None:
                              "chars; '-' reads stdin")
     p_show.add_argument("--file", default=None, metavar="PATH",
                         help="text/code/link: UTF-8 text file; image: svg (max 300 KB, no scripts or "
-                             "external refs), png, jpeg or webp (max 1 MB)")
+                             "external refs), png, jpeg or webp (max 1 MB); 0.25.0 pdf (max 10 MB), "
+                             "csv/md (max 2 MB UTF-8), shown as a file card with name and size. "
+                             "Without --card the kind comes from the extension (.pdf .csv "
+                             ".md/.markdown .png .jpg .jpeg .webp .svg); title default = file name, "
+                             "--text = caption for pdf/csv/md")
     p_show.add_argument("--panel", default=None, choices=vcards.PANELS,
                         help="open on the human's page: cards (card view) board log decisions, "
                              "none = close all; alone or with --card")

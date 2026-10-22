@@ -38,7 +38,7 @@ MCP/bridge = one agent in the call; activity lines are only what that agent writ
 | **Bridge** (`/api/bridge/*`, Quickstart A) | **Protocol underneath + fallback.** Plain HTTPS/REST for any agent. | No MCP client and no CLI; or a feature the other path lacks right now. |
 
 - **Why the CLI stays:** MCP runs on the server and cannot see the sessions on the user's machine. Only a local process knows which Claude Code sessions run, what each does and when one waits for a decision, and feeds that into the call without hand-written notes.
-- **Cards from the CLI (0.21.0+):** `cli show --card text|code|link|image` puts the same cards on the call page as bridge/MCP `show` ("Cards on the call page" below); older CLIs only draw ring shapes.
+- **Cards from the CLI (0.21.0+):** `cli show --card text|code|link|image` puts the same cards on the call page as bridge/MCP `show` ("Cards on the call page" below); older CLIs only draw ring shapes. 0.25.0: also PDF, CSV and Markdown files (`show --file PATH`) and attachments on the status board (`status --attach FILE`).
 - **CLI install without git** (git blocked, e.g. Xcode license on macOS; PyPI lags), pinned to the reviewed commit, only with the user's OK: `uv tool install --force https://github.com/voicehook-ai/voicehook-agent/archive/75a29390504df7dad491af42b6cb68826b5c6c0f.zip`. Check `voicehook-agent --version` before every call.
 
 ## Agent loop without polling (0.5.0)
@@ -1149,7 +1149,7 @@ that loaded it, `not_loaded` when some failed) only then. Otherwise `ok:false`, 
 old page, ask the human to reload) or `type:"no_human"` (nobody in the call; the card is kept
 and shows up when someone opens the page). Never tell the human an image is there without
 `ok:true`. Since 0.23.1 the control socket takes requests up to 4 MB (before: 64 KB, a real
-screenshot dropped the connection with `no-session`).
+screenshot dropped the connection with `no-session`); 0.25.0: 16 MB for PDF cards.
 
 Helper sessions (0.23.1): a session without its own join, while `~/.voicehook/relay.json` of
 the main agent exists (same machine, or `helper-import` on another one), sends the same
@@ -1161,6 +1161,57 @@ image only as file data (never a URL), no `--panel`/`--large` (they belong to th
 exit 1). Main agent joined over WebRTC: the server hands the card to this join (helper pump,
 kind `card`), the join publishes it as itself and waits for the pages like for its own cards.
 A local relay (older server) takes text, code and link cards only.
+
+## Artefakt-Karten: PDF, CSV, Markdown (`show --file`, `status --attach`, 0.25.0)
+
+A report, a table or a document as a card in the call, plus attachments on the status board.
+
+```bash
+voicehook-agent show --file Quartalsbericht.pdf                 # kind from the extension
+voicehook-agent show --card csv --file zahlen.csv --title "Zahlen" --text "Stand heute"
+voicehook-agent show --file notes.md --large
+voicehook-agent status --doing "Bericht ist fertig, bitte lesen" --attach bericht.pdf --attach zahlen.csv
+```
+
+| Kind | Extension | Limit |
+|------|-----------|-------|
+| `pdf` | `.pdf` | max 10 MB, must start with `%PDF-` |
+| `csv` | `.csv` | max 2 MB, valid UTF-8, no NUL bytes |
+| `md` | `.md`, `.markdown` | max 2 MB, valid UTF-8, no NUL bytes |
+| `image` | `.png .jpg .jpeg .webp .svg` | as `--card image` (type from the magic bytes) |
+
+`show --file PATH` without `--card` takes the kind from the extension (any other extension:
+exit 2, pass `--card text|code` for plain text). Title default = file name, `--text` = optional
+caption (pdf/csv/md). Everything is checked before anything is sent: too large or wrong =
+exit 2, nothing sent, never cut. The file content is never logged, only kind and size.
+
+Transport: WebRTC join -> `POST /api/card/file {kind, name, data(base64)}` (same Bearer as
+`/api/card/image`), answer `{ok, id, url, mime, name, size, kind}`; then the join publishes
+`operator.card {id, seq, kind, title, text, at, url, mime, name, size}` and waits (up to 30 s)
+for `vh.card_ack` of the call pages like for images: `ok:true` with `shown` only once a page
+loaded the file, else `not_shown`/`no_human`. Errors: 413 too large, 422 wrong type, 429 rate
+limit, 404/405 = older server ("pdf, csv and md cards need a newer server", text, code, link and
+image still work). Bridge join -> `POST /api/bridge/show {kind, title, text, name, data}`.
+Helper session -> `POST /api/activity/relay/show {from, kind, title, text, name, data}`, the
+server publishes and confirms (409 = not shown, reason in `detail`); a local relay has no
+route for files (exit 1).
+
+The control socket takes requests up to 16 MB (a 10 MB PDF is ~13.4 MB base64): the request
+stays self-contained, the join never reads a path of the calling process (other cwd, sandbox
+or a temp file deleted meanwhile would break that).
+
+`status ... --attach FILE` (repeatable, max 8, goes with a board): every file is first shown
+as a card (join: `/api/card/file` + publish as above; helper: `relay/show`), the ids are
+collected, then the board goes out with `attach: [{"id": "<16 hex>", "name": "x.pdf",
+"kind": "pdf"}]` (relay: same field on `relay/status`). One upload fails: exit 1 with the
+reason (`type:"attach"`), the status is NOT sent, so nothing goes missing silently. Own join
+and nobody in the call (`no_human`): the file is stored and attached anyway. The helper pump
+passes `attach` of a helper's board through unchanged.
+
+Routing is the same as for every other command (0.25.0 fail-closed): `show --file` and
+`status --attach` only use this session's own join or its own helper relay. Only another
+session's join running: `foreign-join`, exit 3; own helper entry dead/expired/unusable:
+`relay-dead`/`relay-expired`/`relay-unusable`, exit 3. In both cases nothing is uploaded.
 
 ## Speech recognition vocabulary (`vocab add`, 0.21.0)
 

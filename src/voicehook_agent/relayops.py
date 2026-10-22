@@ -427,12 +427,30 @@ def status_body(board: dict) -> dict:
         out["project"] = board["project"]
     if board.get("state") in ("arbeitet", "wartet", "frage", "leerlauf", "problem"):
         out["state"] = board["state"]  # 0.21.6 `status --waiting`: frage (server field state)
+    att = clean_attach(board.get("attach"))  # 0.25.0 status --attach
+    if att:
+        out["attach"] = att
     if board.get("meta"):  # 0.21.4: per item {context, faq}; a server without it ignores it
         from . import relay as vrelay
         meta = vrelay.clean_board_meta(board["meta"], out)
         if meta:
             out["meta"] = meta
     return out
+
+
+FILE_KINDS = ("pdf", "csv", "md")
+ATTACH_KINDS = (*FILE_KINDS, "image")
+ATTACH_MAX = 8
+
+
+def clean_attach(v: object) -> list[dict]:
+    """0.25.0 board field attach [{id: 16 hex, name, kind}] (max ATTACH_MAX); bad items dropped."""
+    out: list[dict] = []
+    for a in v if isinstance(v, list) else []:
+        if (isinstance(a, dict) and isinstance(a.get("id"), str) and re.fullmatch(r"[0-9a-f]{16}", a["id"])
+                and a.get("kind") in ATTACH_KINDS and isinstance(a.get("name"), str)):
+            out.append({"id": a["id"], "name": a["name"][:120], "kind": a["kind"]})
+    return out[:ATTACH_MAX]
 
 
 def _valid_decide(body: object) -> dict | None:
@@ -538,11 +556,13 @@ def _http_once(rel: dict, method: str, url: str, body: dict | None,
     req = urllib.request.Request(url, method=method, data=data, headers={
         "authorization": f"Bearer {rel['token']}", "content-type": "application/json",
         "user-agent": "voicehook-agent"})
+    card_id = None
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:  # url from our own 0600 file
             status, raw = r.status, r.read()
     except urllib.error.HTTPError as e:
         status = e.code
+        card_id = (e.headers or {}).get("X-Card-Id") if e.headers is not None else None
         try:
             raw = e.read()
         except Exception:  # noqa: BLE001
@@ -555,7 +575,11 @@ def _http_once(rel: dict, method: str, url: str, body: dict | None,
         out = json.loads(raw.decode("utf-8") or "{}")
     except ValueError:
         out = {}
-    return status, out if isinstance(out, dict) else {}
+    out = out if isinstance(out, dict) else {}
+    # 0.25.0: 409 of relay/show = card is in the call, no page loaded it yet; the server names it
+    if card_id and re.fullmatch(r"[0-9a-f]{16}", str(card_id)):
+        out["_card_id"] = str(card_id)
+    return status, out
 
 
 def _err(status: int, out: dict) -> dict:
@@ -583,14 +607,22 @@ def card_body(req: dict) -> dict:
     if req.get("panel") is not None or req.get("large"):
         raise RelayError("a helper session shows cards only: --panel/--large belong to the main agent", 422)
     if not req.get("kind"):
-        raise RelayError("a helper session needs --card text|code|link|image", 422)
-    return {k: req[k] for k in ("kind", "title", "text", "image") if req.get(k) is not None}
+        raise RelayError("a helper session needs --card text|code|link|image|pdf|csv|md", 422)
+    return {k: req[k] for k in ("kind", "title", "text", "image", "name", "data")
+            if req.get(k) is not None}
 
 
 def remote_show(rel: dict, frm: str, body: dict, timeout: float = SHOW_TIMEOUT_S) -> dict:
     status, out = _http(rel, "POST", endpoint(rel, "show"), {"from": frm, **body}, timeout)
     if status >= 300 or out.get("ok") is False:
-        return _err(status, out)
+        e = _err(status, out)
+        if status == 409 and out.get("_card_id"):   # angelegt, nur noch nicht gezeigt
+            e.update({"id": out["_card_id"], "type": "not_shown"})
+        if body.get("kind") in FILE_KINDS and (status in (404, 405) or (
+                status == 422 and "must be one of" in e["error"])):
+            e["error"] = ("pdf, csv and md cards of a helper need a newer server (relay/show "
+                          "without data/name); text, code, link and image cards work")
+        return e
     return {"ok": True, **{k: out[k] for k in ("id", "kind", "from", "shown", "not_loaded") if k in out}}
 
 
