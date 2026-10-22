@@ -156,7 +156,7 @@ def _url_ok(url: str) -> bool:
 
 def write_relay(url: str, token: str, room: str, expires_in: float | None, *,
                 owner_pid: int | None = None, owner_session: str | None = None,
-                now: float | None = None) -> Path:
+                owner_agent_pid: int | None = None, now: float | None = None) -> Path:
     """Write relay.json atomically (tmp + rename, 0600, dir 0700). ValueError on bad input."""
     url = str(url or "").strip()
     if not _url_ok(url):
@@ -172,6 +172,7 @@ def write_relay(url: str, token: str, room: str, expires_in: float | None, *,
             "expires_at": int(t + max(0.0, ttl)),
             "owner_pid": int(os.getpid() if owner_pid is None else owner_pid),
             "owner_session": own_session_hash() if owner_session is None else owner_session,
+            **_agent_fields(owner_agent_pid),
             "written_at": int(t)}
     vact._private_dir(vact.state_root())
     path = relay_path()
@@ -183,6 +184,34 @@ def write_relay(url: str, token: str, room: str, expires_in: float | None, *,
     return path
 
 
+def _agent_fields(owner_agent_pid: int | None) -> dict:
+    """0.25.0: the agent process that started the join (session.owned_by), as in session.json."""
+    from . import session as vsession  # lazy
+    ap = vsession._agent_pid() if owner_agent_pid is None else int(owner_agent_pid or 0)
+    return {"owner_agent_pid": ap, "owner_agent_start": vsession.proc_start(ap)} if ap > 1 else {}
+
+
+def relay_owned(rel: dict | None, skey: str) -> bool:
+    """0.25.0: relay.json `rel` belongs to the join of the session `skey` (session.owned_by:
+    the same session id in the same or a gone agent process, or the same agent process after
+    /clear). A helper entry never. A local relay without its own agent pid takes the one of
+    its join's session.json (same owner_session)."""
+    from . import session as vsession  # lazy
+    if not isinstance(rel, dict) or rel.get("helper"):
+        return False
+    info = {k: rel.get(k) for k in ("owner_session", "owner_agent_pid", "owner_agent_start")}
+    if not info["owner_agent_pid"] and _is_local(rel):
+        try:
+            j = vsession.read_info(Path(str(rel.get("dir") or "")))
+        except Exception:  # noqa: BLE001
+            j = {}
+        if isinstance(j, dict) and str(j.get("owner_session") or "") == \
+                str(info["owner_session"] or ""):
+            info["owner_agent_pid"] = j.get("owner_agent_pid")
+            info["owner_agent_start"] = j.get("owner_agent_start")
+    return vsession.owned_by(info, skey)
+
+
 LOCAL = "local"
 LOCAL_TTL_S = 12 * 3600.0
 LOCAL_TAG = vact.RELAY_TOOL  # tool field of a local relay line (server: activity.RELAY_TAG)
@@ -190,7 +219,7 @@ LOCAL_TAG = vact.RELAY_TOOL  # tool field of a local relay line (server: activit
 
 def write_local_relay(dir_: Path, room: str, *, label: str | None = None,
                       owner_pid: int | None = None, owner_session: str | None = None,
-                      now: float | None = None) -> Path:
+                      owner_agent_pid: int | None = None, now: float | None = None) -> Path:
     """WebRTC join: relay.json pointing at the join's own session dir (0600, atomic).
     ValueError when dir_ is not a directory."""
     d = Path(dir_).resolve()
@@ -201,6 +230,7 @@ def write_local_relay(dir_: Path, room: str, *, label: str | None = None,
             "room": str(room or ""), "expires_at": int(t + LOCAL_TTL_S),
             "owner_pid": int(os.getpid() if owner_pid is None else owner_pid),
             "owner_session": own_session_hash() if owner_session is None else owner_session,
+            **_agent_fields(owner_agent_pid),
             "written_at": int(t)}
     vact._private_dir(vact.state_root())
     path = relay_path()
@@ -951,8 +981,7 @@ def handle_event(raw: str, now: float | None = None, post=None) -> str | None:
         if rel is None:
             return None
         skey = sess or "cwd-" + _h(str(event.get("cwd") or ""), "vh-cwd")
-        own = str(rel.get("owner_session") or "")
-        if own and own == skey and not rel.get("helper"):
+        if relay_owned(rel, skey):  # 0.25.0: also after /clear (same agent process)
             return None  # the joining session: its own hook already feeds the call
         got = classify(event)
         if got is None:

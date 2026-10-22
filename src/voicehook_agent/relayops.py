@@ -167,8 +167,8 @@ def client_relay(explicit_session: str | None) -> dict | None:
         return None
     if rel.get("helper"):
         return rel
-    if own:
-        return None if own == str(rel.get("owner_session") or "") else rel
+    if own:  # 0.25.0: session.owned_by (a 2nd agent process with this id is a helper)
+        return None if vmulti.relay_owned(rel, own) else rel
     return None if _socket_answers() else rel
 
 

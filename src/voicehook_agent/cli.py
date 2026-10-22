@@ -3304,7 +3304,10 @@ async def _join(
                                            "owner_session": vmulti.own_session_hash(),
                                            # 0.22.2: the agent process that started us; only
                                            # its hooks get mid-turn events (listenguard)
-                                           "owner_agent_pid": vboardpid()})
+                                           "owner_agent_pid": (apid := vboardpid()),
+                                           # 0.25.0: + its start time (a reused pid is
+                                           # another process, session.owned_by)
+                                           "owner_agent_start": vsession.proc_start(apid)})
             vactivity.write_pointer(sess_dir)  # 0.13.0: hook finds us under any home
             # 0.21.5: durable event spool in the session dir (0600); a restart of this join
             # (self-update) picks up what was not acked yet, an old one is deleted

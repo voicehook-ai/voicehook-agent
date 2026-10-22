@@ -565,8 +565,7 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
             return None
         skey = _session_key(event)
         agent = str(event.get("agent_id") or "").strip()
-        if not skey or (skey == str(rel.get("owner_session") or "") and not agent
-                        and not rel.get("helper")):
+        if not skey or (not agent and vmulti.relay_owned(rel, skey)):  # 0.25.0 owned_by
             return None  # the joining session: own board (status_due), own `next`
         if agent:  # 0.21.1: a subagent (Agent tool) has its own board, name, state, answers
             skey = f"{skey}-a{vmulti._h(agent, 'vh-agent')[:8]}"
@@ -576,7 +575,7 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
         # 0.22.2: this session takes part in the call: its own helper credential (entry, or
         # a legacy helper relay.json), or a subagent of the router (0.21.1 own boards)
         helper = bool(rel.get("helper")) or vmulti.is_legacy_helper(rel) or bool(
-            agent and base_key(skey) == str(rel.get("owner_session") or ""))
+            agent and vmulti.relay_owned(rel, base_key(skey)))
         got = asked = doing_set = None
         seen_answers = 0
         recorded = None

@@ -345,11 +345,11 @@ def route(skey: str) -> tuple[str, Path | None, dict | None]:
     from . import multisession as vmulti
     rel = None if vmulti.relay_disabled() else vmulti.load_relay(session=_base(skey))
     owner = str(rel.get("owner_session") or "") if rel else ""
-    if rel is not None and (rel.get("helper") or (owner and owner != skey)):
+    if rel is not None and (rel.get("helper") or (owner and not vmulti.relay_owned(rel, skey))):
         return "relay", None, rel  # 0.22.2: an own helper entry is always the relay
     env_session = bool((os.environ.get("VOICEHOOK_SESSION") or "").strip())
     d = vact.target_dir()
-    if d is not None and (env_session or not vact._foreign(vact.dir_owner(d), skey)):
+    if d is not None and (env_session or not vact.foreign_dir(d, skey)):
         return "own", d, None
     if rel is not None and not owner:
         return "relay", None, rel   # helper-import on another machine: every session helps
