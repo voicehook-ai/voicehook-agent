@@ -148,6 +148,28 @@ turn) is shown anyway, marked `kam auch über listen`. PostToolUse, not PreToolU
 additionalContext reliably reaches the running turn. Never for subagents or other sessions.
 `VOICEHOOK_MIDTURN_EVENTS=0` turns it off.
 
+### Targeted wake: only the session that is meant (0.24.0)
+
+Server voicehook-v4 #606 stamps every final user turn (`topic=transcript`, `role=user`,
+`final=true`) with `"wake": {"scope": "helper"|"agents"|"main"|"none", "ids": [identities],
+"helper": "<Label>: <from>"}`. The join wakes its agent (`next` / `listen` / mid-turn hook /
+`--notify-url` / stdout `wake` line) only when its own identity is in `wake.ids` and
+`scope != helper`:
+
+| scope | main session in `ids` | other main sessions | helper `wake.helper` | other helpers |
+|---|---|---|---|---|
+| `agents` / `main` | woken | not woken | not woken | not woken |
+| `helper` | forwards only (relay answer file or `POST /api/helper/pump/user_turn`), not woken | not woken | woken | not woken |
+| `none` (Delta or a human is meant, ambiguous helper) | not woken | not woken | not woken | not woken |
+
+Nothing is lost: a turn that does not wake the agent is kept (in memory, last 20, 200 chars
+each) and comes with the next event that does wake it (any wake type: `user`, `decision`,
+`status_request` ...) as `"since_last": [{"text","ts","speaker?","scope","to?"}]`
+(`since_last_dropped`: older ones beyond 20). Context only, never a task by itself. The
+mid-turn hook shows it as `Seit dem letzten Mal im Call (nicht an dich, nur Kontext): ...`.
+The stdout transcript line is still printed for every turn. Without `wake` (older server)
+everything works as before 0.24.0.
+
 ### Question check reaches the helper (0.22.1)
 
 The server checks board and feed lines for hidden questions (`question_check`). `next` brings
@@ -731,6 +753,8 @@ agent joined (WebRTC, bridge, MCP); it ends with the call (410). Helpers use it 
   that helper's inbox (local relay: answer file; else `POST /api/helper/pump/user_turn
   {to, to_key, text, speaker}`); its own `next` keeps the user event as info only
   (`info_only: true`, `addressed_to_you: false`): wake that session, never do it yourself.
+  Since 0.24.0 with a server that sends `wake` (scope `helper`) the forwarding join is not
+  woken at all; the turn comes later as `since_last` (see "Targeted wake").
   The helper gets `{"type":"user_turn","text","to","to_kind","speaker?","ts"}` from
   `relay-next`, MCP `next` and its hooks ("Auftrag von Oliver an dich (im Call)", data
   marked). `to_kind: "helper_ambiguous"`: Delta asks which helper, nobody acts.

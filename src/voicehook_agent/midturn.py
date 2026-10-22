@@ -93,14 +93,32 @@ def _line(ev: dict, now: float, last_say: float | None) -> str:
     return f"Entscheidung im Call zu {ref}{' ' + repr(q) if q else ''}: {verdict}."
 
 
+def since_last_line(ev: dict) -> str:
+    """0.24.0: user turns the server did not mean for this session (targeted wake), delivered
+    with this event; compact, never acted on by themselves."""
+    items = [i for i in (ev.get("since_last") or []) if isinstance(i, dict)][-5:]
+    if not items:
+        return ""
+    parts = []
+    for i in items:
+        who = str(i.get("speaker") or "Mensch").strip()[:40]
+        to = i.get("to") if isinstance(i.get("to"), list) else []
+        tail = f" (an {str(to[0])[:40]})" if to else ""
+        parts.append(f"{who}{tail}: \"{str(i.get('text') or '').strip()[:120]}\"")
+    n = len(ev.get("since_last") or []) + int(ev.get("since_last_dropped") or 0)
+    more = f" (+{n - len(items)} ältere)" if n > len(items) else ""
+    return "Seit dem letzten Mal im Call (nicht an dich, nur Kontext): " + "; ".join(parts) + more + "."
+
+
 def text_for(reply: dict) -> str | None:
     """The additionalContext for a take_wake reply (None: nothing new)."""
     evs = [e for e in (reply.get("events") or []) if isinstance(e, dict)]
     if not evs:
         return None
     now = float(reply.get("now") or time.time())
-    lines = [_line(e, now, reply.get("last_say_at")) + (" (kam auch über listen)" if e.get("delivered")
-                                                         else "") for e in evs]
+    lines = [(since_last_line(e) + " " if e.get("since_last") else "")
+             + _line(e, now, reply.get("last_say_at")) + (" (kam auch über listen)" if e.get("delivered")
+                                                           else "") for e in evs]
     has_user = any(e.get("type") in ("user", "onboarding") for e in evs)
     tail = ("Antworte ZUERST per `voicehook-agent say \"...\"`, delegiere längere Arbeit an einen "
             "Hintergrund-Agenten, dann weiter." if has_user else

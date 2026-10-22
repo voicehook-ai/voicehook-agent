@@ -962,6 +962,9 @@ class _Control:
         # 0.21.5: the join is the listener: events go into a durable spool (spool.py), `next`
         # leases + acks them; _join() points it at the session dir (memory only until then)
         self.events = vspool.SpoolQueue()
+        # 0.24.0 targeted wake: user turns not meant for us, delivered with the next woken event
+        self.quiet = relay.QuietTurns()
+        self.events.before_add = self.quiet.attach
         self.watchdog = vsession.IdleWatchdog(timeout=idle_timeout)
         self.quit = asyncio.Event()
         self.room: rtc.Room | None = None
@@ -2004,13 +2007,29 @@ def _route_helper_user_turn(ctl: _Control, payload: dict, own: set[str]) -> bool
     (to_kind helper, to_op = us). A helper of this machine (to_key = our sender for it) gets
     it in its answer file (local relay: its `relay-next`, MCP `next` and hooks bring it);
     otherwise the server hub's inbox (POST /api/helper/pump/user_turn). Never logs content."""
-    if payload.get("role") != "user" or payload.get("to_kind") != "helper":
+    w = relay.wake_info(payload)
+    if payload.get("role") != "user" or (payload.get("to_kind") != "helper"
+                                         and (w or {}).get("scope") != "helper"):
         return False
     to = payload.get("to") if isinstance(payload.get("to"), list) else []
-    text = " ".join(str(payload.get("text") or "").split())
-    if len(to) != 1 or not text or str(payload.get("to_op") or "") not in own:
+    key = str(payload.get("to_key") or "")
+    if w is not None:
+        # 0.24.0 (server #606): only scope helper, we forward (ids = [to_op]), the helper
+        # named in wake.helper; nobody else is woken
+        if w["scope"] != "helper" or not w["helper"] or not (set(w["ids"]) & own
+                                                             or str(payload.get("to_op") or "") in own):
+            return False
+        if key and key != w["helper"]:
+            return False
+        key = w["helper"]
+        if not to and ": " in key:
+            to = [key.split(": ", 1)[1]]  # the helper's relay name (from)
+    elif str(payload.get("to_op") or "") not in own:
         return False
-    name, key = str(to[0])[:80], str(payload.get("to_key") or "")
+    text = " ".join(str(payload.get("text") or "").split())
+    if len(to) != 1 or not text:
+        return False
+    name = str(to[0])[:80]
     speaker = str(payload.get("speaker") or "")
     frm = key.split(": ", 1)[1] if ": " in key else ""
     if frm and ctl.activity_path is not None and key == vrelayops.sender_for(frm):
@@ -2622,17 +2641,26 @@ async def _connect_and_listen(
                     hf = relay.helper_turn_fields(payload)
                     if hf:  # 0.22.0: the human spoke to a helper by name: info copy for us
                         ev.update(hf)
+                    if hf or (relay.wake_info(payload) or {}).get("scope") == "helper":
                         _route_helper_user_turn(ctl, payload, _own_ids())
-                    ctl.events.put_nowait(ev)
-                    ctl.clock.user()
-                    _print_stale(ctl, json_mode)  # 0.13.0
+                    # 0.24.0 (server #606): wake our LLM only if `wake` names us (scope !=
+                    # helper); otherwise keep the turn for the next woken event (since_last)
+                    woken = relay.wakes_main(payload, _own_ids())
+                    if woken:
+                        ctl.events.put_nowait(ev)
+                        ctl.clock.user()
+                        _print_stale(ctl, json_mode)  # 0.13.0
+                    elif ctl.events.armed:
+                        ctl.quiet.add(ev, (relay.wake_info(payload) or {}).get("scope", ""))
             # #9 — a fresh user turn supersedes any older queued say.
             if role == "user":
                 say_tracker.note_user_turn()
                 turn_event.set()  # graph-per-turn: refresh live context
             # #12 — wake on finalized user turns (deduped, role-filtered).
             decision = notifier.consider(role, text, payload, room=slug)
-            if decision.wake and decision.payload is not None:
+            if role == "user" and not relay.wakes_main(payload, _own_ids()):
+                pass  # 0.24.0: not meant for us, no wake line / webhook
+            elif decision.wake and decision.payload is not None:
                 _emit_wake(json_mode, decision.payload)
                 if notify_url:
                     asyncio.create_task(_post_webhook(http_client, notify_url, decision.payload))
@@ -3189,6 +3217,7 @@ async def _join(
             # 0.21.5: durable event spool in the session dir (0600); a restart of this join
             # (self-update) picks up what was not acked yet, an old one is deleted
             ctl.events = vspool.SpoolQueue(sess_dir)
+            ctl.events.before_add = ctl.quiet.attach  # 0.24.0
             resumed = ctl.events.resume()
             if resumed:
                 _print_event(json_mode, "system", f"event spool: {resumed} unread event(s) "
