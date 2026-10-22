@@ -480,6 +480,49 @@ def wakes_helper(payload: dict | None, key: str) -> bool:
     return w["scope"] == "helper" and bool(key) and w["helper"] == key
 
 
+# --------------------------------------------------------------------------- #
+# 0.24.1 data-channel gate (voicehook, Oliver P1, 22.10.2026)
+# --------------------------------------------------------------------------- #
+# A join started with `--data-channel` is a pure data channel in the call: Delta/the router use
+# it for context but the human does not expect it to answer every turn. It wakes ONLY when the
+# turn is explicitly meant for it (addressed by name/mention, or routed_by_delta), never on a
+# broad turn (addressed_by all = everyone, or a passive followup = wake.scope main / context
+# without a name). Its own decisions / helper_decisions wake it regardless (they bypass this
+# rule, they never flow through here). Broad turns stay as read-only context (since_last); the
+# default (no flag) is unchanged, see wakes_main.
+_DC_WAKE_BY = frozenset({"name", "mention"})   # the human named / mentioned this agent
+
+
+def wakes_data_channel(payload: dict | None, own: set[str] | str | None) -> bool:
+    """A data-channel join wakes its LLM for this user turn only when the turn is explicitly
+    addressed to it: its identity is in `addressed_ids` (or `wake.ids`) AND either
+    `addressed_by` names/mentions it OR `routed_by_delta` is set. A broad turn (addressed_by
+    all, a passive followup, helper/none scope, or an old server that stamps nothing at all) is
+    NOT actionable — it rides along as context (since_last) instead. Conservative by design:
+    unknown / missing addressing means "not for me", never "wake"."""
+    p = payload or {}
+    mine = {own} if isinstance(own, str) else set(own or ())
+    if not mine:
+        return False
+    # the turn must name THIS session as a target
+    ids = p.get("addressed_ids")
+    w = wake_info(p)
+    targeted = (isinstance(ids, list) and bool(mine & {str(i) for i in ids})) \
+        or (w is not None and w["scope"] in ("agents", "main") and bool(mine & set(w["ids"])))
+    if not targeted:
+        return False
+    # and it must be meant for it: named/mentioned, or Delta routed it here
+    if p.get("routed_by_delta"):
+        return True
+    by = str(p.get("addressed_by") or "")
+    if by:
+        return by in _DC_WAKE_BY
+    # no addressed_by but a wake stamp: scope agents (name/mention/context) may be a passive
+    # followup -> stay quiet; only routed_by_delta (handled above) wakes. scope main (all) is
+    # broad -> quiet. So without addressed_by and without routed_by_delta: no wake.
+    return False
+
+
 class QuietTurns:
     """User turns the server did not mean for us (not woken). Nothing is lost: the next woken
     event (spool `before_add`) carries them compactly as `since_last`. In memory only, bounded."""

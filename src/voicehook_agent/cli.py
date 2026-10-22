@@ -988,11 +988,16 @@ class _Control:
 
     def __init__(self, slug: str, ident: str, say_tracker: relay.SayTracker,
                  echo: relay.EchoSuppressor, idle_timeout: float,
-                 no_human_timeout: float = NO_HUMAN_TIMEOUT) -> None:
+                 no_human_timeout: float = NO_HUMAN_TIMEOUT,
+                 data_channel: bool = False) -> None:
         self.slug = slug
         self.ident = ident
         self.say_tracker = say_tracker
         self.echo = echo
+        # 0.24.1 data-channel mode (--data-channel): a user turn wakes only when addressed to
+        # us (name/mention or routed_by_delta); broad turns are read-only context (since_last).
+        # Decisions / helper_decisions wake regardless. Off by default (behaviour unchanged).
+        self.data_channel = data_channel
         # 0.21.5: the join is the listener: events go into a durable spool (spool.py), `next`
         # leases + acks them; _join() points it at the session dir (memory only until then)
         self.events = vspool.SpoolQueue()
@@ -2727,8 +2732,11 @@ async def _connect_and_listen(
                     if hf or (relay.wake_info(payload) or {}).get("scope") == "helper":
                         _route_helper_user_turn(ctl, payload, _own_ids())
                     # 0.24.0 (server #606): wake our LLM only if `wake` names us (scope !=
-                    # helper); otherwise keep the turn for the next woken event (since_last)
-                    woken = relay.wakes_main(payload, _own_ids())
+                    # helper); otherwise keep the turn for the next woken event (since_last).
+                    # 0.24.1 data-channel mode: wake only on a turn explicitly addressed to us
+                    # (name/mention or routed_by_delta); a broad turn is context only.
+                    woken = (relay.wakes_data_channel(payload, _own_ids()) if ctl.data_channel
+                             else relay.wakes_main(payload, _own_ids()))
                     if woken:
                         ctl.events.put_nowait(ev)
                         ctl.clock.user()
@@ -2741,8 +2749,10 @@ async def _connect_and_listen(
                 turn_event.set()  # graph-per-turn: refresh live context
             # #12 — wake on finalized user turns (deduped, role-filtered).
             decision = notifier.consider(role, text, payload, room=slug)
-            if role == "user" and not relay.wakes_main(payload, _own_ids()):
-                pass  # 0.24.0: not meant for us, no wake line / webhook
+            _woken_dc = (relay.wakes_data_channel(payload, _own_ids()) if (ctl is not None and ctl.data_channel)
+                         else relay.wakes_main(payload, _own_ids()))
+            if role == "user" and not _woken_dc:
+                pass  # 0.24.0/0.24.1: not meant for us, no wake line / webhook
             elif decision.wake and decision.payload is not None:
                 _emit_wake(json_mode, decision.payload)
                 if notify_url:
@@ -3191,6 +3201,7 @@ async def _join(
     stale_error: float | None = None,
     updater: _Updater | None = None,
     quiet: bool = False,
+    data_channel: bool = False,
 ) -> int:
     missing = _missing_self_report(agent_name, model)
     if missing:
@@ -3255,7 +3266,12 @@ async def _join(
     http_client = httpx.AsyncClient(headers={"user-agent": _USER_AGENT}) if notify_url else None
 
     # Local control socket for `say` / `next` / `leave` / `status` + idle guard.
-    ctl = _Control(slug, ident, say_tracker, echo, idle_timeout, no_human_timeout)
+    ctl = _Control(slug, ident, say_tracker, echo, idle_timeout, no_human_timeout,
+                   data_channel=data_channel)
+    if data_channel:
+        _print_event(json_mode, "system", "data-channel mode: only turns addressed to this "
+                     "session (name/mention or routed by Delta) and its own decisions wake it; "
+                     "broad turns stay as context", topic="_meta")
     ctl.onboarding = onboarding_event(username)  # 0.21.8: also as the first next/listen event
     if status_due is not None:
         ctl.clock.due_s = status_due
@@ -3304,7 +3320,11 @@ async def _join(
                                            "owner_session": vmulti.own_session_hash(),
                                            # 0.22.2: the agent process that started us; only
                                            # its hooks get mid-turn events (listenguard)
-                                           "owner_agent_pid": vboardpid()})
+                                           "owner_agent_pid": vboardpid(),
+                                           # 0.24.1: data-channel mode (--data-channel); broad
+                                           # turns do not wake, only addressed turns + own
+                                           # decisions. The Stop hook / status read it from here.
+                                           **({"data_channel": True} if data_channel else {})})
             vactivity.write_pointer(sess_dir)  # 0.13.0: hook finds us under any home
             # 0.21.5: durable event spool in the session dir (0600); a restart of this join
             # (self-update) picks up what was not acked yet, an old one is deleted
@@ -4523,6 +4543,16 @@ def main(argv: list[str] | None = None) -> None:
         help=f"0.14.0: no join hint (the one line 'joined via voicehook.ai ...' for you, never "
              f"spoken; env {QUIET_ENV}=1 works too).",
     )
+    p_join.add_argument(
+        "--data-channel", dest="data_channel", action="store_true", default=False,
+        help="0.24.1: join as a pure DATA CHANNEL. A user turn then wakes this session (lets "
+             "`listen` return / `next` wake you) only when it is addressed to you by name or "
+             "mention, or Delta routes it to you (routed_by_delta); your own decisions and "
+             "helper_decisions wake you regardless. Broad turns (to everyone, or a passive "
+             "followup) stay readable in the durable spool as context (since_last) but do NOT "
+             "wake you and do NOT trigger the Stop-hook 'nobody listening' nudge. Without the "
+             "flag every addressed-to-you turn wakes as before.",
+    )
     # one-shot commands against a running join
     def _add_session(p, answer_wait: bool = False):
         p.add_argument("--session", default=None, metavar="SLUG",
@@ -4953,6 +4983,7 @@ def main(argv: list[str] | None = None) -> None:
                 transport=args.transport, status_due=args.status_due,
                 activity_due=args.activity_due, stale_error=args.stale_error,
                 voice=args.voice, updater=updater, quiet=args.quiet,
+                data_channel=args.data_channel,
             ))
         except KeyboardInterrupt:
             rc = 130
