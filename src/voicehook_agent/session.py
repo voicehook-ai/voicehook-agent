@@ -513,6 +513,15 @@ def write_info(dir_: Path, info: dict) -> None:
         pass
 
 
+def read_info(dir_: Path) -> dict:
+    """session.json of a running join ({pid, room, identity, cli_version, ...}), or {}."""
+    try:
+        data = json.loads((dir_ / INFO_NAME).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
 def remove_info(dir_: Path) -> None:
     try:
         (dir_ / INFO_NAME).unlink()

@@ -3,6 +3,28 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.25.0 (unreleased)
+
+Rejoin / join hot-reload with identity: `voicehook-agent rejoin [--session <slug>]` restarts the
+running join IN PLACE using the existing self-update mechanism (the process re-execs itself,
+os.execve), so identity (session slug/label/model), queue/spool and the status board are KEPT —
+instead of leaving the call and re-joining.
+
+- **rejoin command:** a one-shot client command (like `leave`) sends `{"cmd":"rejoin"}` over the
+  control socket; the join returns `RC_RESTART` (not a clean leave) and `main()` re-execs with the
+  same `--identity`. The durable event spool is kept (not cleared), so a `next` blocked across the
+  rejoin gets `{"type":"restarting","reason":"rejoin"}` and re-runs. A rejoin mid-call is allowed,
+  with a visible hint that there may be a short audio gap while the process swaps.
+- **helper credentials survive:** a rejoin (and a self-update) no longer POSTs
+  `/api/helper/pump/end`, which used to 410 every helper credential; the server now binds helper
+  credentials to room + operator identity and survives the re-exec (voicehook-v4
+  feat/helper-cred-survives-rejoin). Only a real `leave` ends the helper hub.
+- **stale-join warning:** a join records its CLI version in `session.json` and the `status` reply;
+  a newer binary (a starting join) warns (never spoken, stderr / `--json` `_meta: stale_join`) when
+  a running join is on an older CLI and names the fix `voicehook-agent rejoin`.
+- **several local joins:** a bare `rejoin` errors and lists the joins (`--session` required); no
+  silent "rejoin all".
+
 ## 0.24.0 (2026-10-22)
 
 Targeted wake, to save tokens: until now every final user turn woke every agent session in the
