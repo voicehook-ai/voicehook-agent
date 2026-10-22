@@ -571,6 +571,39 @@ def _update_text(cmds: list[str]) -> str:
     return f"Update: {cmds[0]}" + "".join(f"  or: {c}" for c in cmds[1:])
 
 
+def stale_running_joins(current: str = _VERSION) -> list[dict]:
+    """0.25.0: running joins on this machine whose CLI version is older than `current` (this
+    binary). Each entry: {session '<slug>/<identity>', version}. A join that records no version
+    (pre-0.25.0) counts as stale too. Best effort, never raises."""
+    out: list[dict] = []
+    try:
+        for d in vsession.live_sessions():
+            info = vsession.read_info(d)
+            ver = info.get("cli_version") if isinstance(info, dict) else None
+            ver = ver if isinstance(ver, str) else None
+            if ver is None or vselfupdate.is_newer(current, ver):
+                out.append({"session": vsession._label(d), "version": ver})
+    except Exception:  # noqa: BLE001
+        return out
+    return out
+
+
+def _emit_stale_join_notice(json_mode: bool, stale: list[dict]) -> None:
+    """0.25.0: warn (never spoken) that a running join is on an older CLI than this binary, and
+    name the fix `voicehook-agent rejoin`. stderr always; --json adds one `_meta: "stale_join"`."""
+    if not stale:
+        return
+    names = ", ".join(f"{s['session']} ({s['version'] or 'unknown'})" for s in stale)
+    text = (f"a running join is on an older voicehook-agent than this one ({_VERSION}): {names}. "
+            "Rejoin it in place (identity, queue and board kept): voicehook-agent rejoin"
+            + (" --session <slug>/<identity>" if len(stale) > 1 else ""))
+    print(f"[warn] {text}", file=sys.stderr, flush=True)
+    if json_mode:
+        print(json.dumps({"role": "system", "topic": "_meta", "_meta": "stale_join",
+                          "text": text, "current": _VERSION, "stale": stale},
+                         ensure_ascii=False), flush=True)
+
+
 def _load_persona(persona: str | None, persona_file: str | None,
                   strict_relay: bool) -> str | None:
     """Resolve --persona / --persona-file / --strict-relay into one text blob.
@@ -984,6 +1017,10 @@ class _Control:
         self.activity_project: str | None = None  # 0.21.0 `activity --project`, kept for later packets
         self.activity_meta: dict[str, dict] = {}  # 0.21.4 line -> {context, faq}
         self.leaving = False
+        # 0.25.0 rejoin: `voicehook-agent rejoin` asked this join to re-exec in place (same
+        # identity, spool and board kept) instead of leaving. Set by the control handler; _join
+        # turns the clean quit into RC_RESTART so main() re-execs with the same --identity.
+        self.rejoining = False
         # 0.10.1: no-human guard. Starts at join (nobody seen yet), stops while a
         # human is in the room, restarts when the last one leaves. Spans reconnects.
         self.no_human_timeout = no_human_timeout
@@ -1744,6 +1781,20 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         acked = ctl.events.ack(req.get("seq"))
         return {"ok": True, "type": "ack", "seq": req.get("seq"), "acked": acked,
                 "pending": len(ctl.events)}
+    if cmd == "rejoin":
+        # 0.25.0: re-exec this join in place (same self-update mechanism, os.execve) so identity
+        # (slug/label/model), spool/queue and the status board survive, instead of leaving and
+        # re-joining. Default: a rejoin mid-call is allowed, with a visible hint that there may be
+        # a short audio gap while the process swaps. The handler only flags it and ends the cycle
+        # cleanly; _join turns that into RC_RESTART (restart with the same --identity).
+        ctl.watchdog.touch()
+        ctl.rejoining = True
+        gap = bool(ctl.room is not None)  # connected -> there may be a short audio gap
+        ctl.quit.set()  # like leave: the reply is written first, then the cycle ends -> RC_RESTART
+        return {"ok": True, "type": "rejoining", "identity": ctl.ident, "room": ctl.slug,
+                "in_call": gap,
+                "note": ("rejoining in place: identity, queue and status board are kept"
+                         + ("; there may be a short audio gap while the process restarts" if gap else ""))}
     if cmd == "leave":
         ctl.watchdog.touch()
         text = str(req.get("say") or "").strip()
@@ -1795,6 +1846,7 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
                               "operator": attrs.get("vh.role") == "agent"
                               and _kind_label(p) != "agent"})
         return {"ok": True, "type": "status", "room": ctl.slug, "identity": ctl.ident,
+                "cli_version": _VERSION,  # 0.25.0: version of the running join (stale-join check)
                 "connected": room is not None, "pending": len(ctl.events),
                 "idle_s": round(ctl.watchdog.idle_for(), 1),
                 # 0.21.5 (listenguard.py): listening = the join + its spool hold the call
@@ -3182,6 +3234,11 @@ async def _join(
         ctl.stale_s = stale_error
     server: vsession.ControlServer | None = None
     sess_dir = vsession.session_dir(slug, ident)
+    # 0.25.0: a join already running on an OLDER CLI than this binary -> one warning (never
+    # spoken) naming `voicehook-agent rejoin`, so it can re-exec in place. Only before we start
+    # our own socket, so this join never flags itself; skipped on a self-update/rejoin re-exec.
+    if control and not vselfupdate.already_restarted():
+        _emit_stale_join_notice(json_mode, stale_running_joins())
     if control and hasattr(asyncio, "start_unix_server"):
         sess_dir.mkdir(parents=True, exist_ok=True)
         server = vsession.ControlServer(vsession.socket_path(sess_dir),
@@ -3208,6 +3265,10 @@ async def _join(
             vsession.write_info(sess_dir, {"pid": os.getpid(), "room": slug,
                                            "identity": ident, "api_base": api_base,
                                            "started": time.time(),
+                                           # 0.25.0: the CLI version this join runs on, so a newer
+                                           # binary (status / a starting join) can spot a stale
+                                           # running join and suggest `voicehook-agent rejoin`
+                                           "cli_version": _VERSION,
                                            # 0.15.0: hash only; hooks of other sessions skip this join
                                            "owner_session": vmulti.own_session_hash(),
                                            # 0.22.2: the agent process that started us; only
@@ -3334,9 +3395,19 @@ async def _join(
                 pass
             except asyncio.CancelledError:
                 break
+        # 0.25.0: `rejoin` asked us to re-exec in place. Any clean quit (rc 0) while rejoining
+        # becomes RC_RESTART, so main() restarts with the same --identity (restart_argv), and the
+        # durable spool + the server-side room keep the queue and the status board.
+        if ctl.rejoining and rc == 0:
+            rc = RC_RESTART
     finally:
         ctl.quit.set()
-        if ctl.helper_pump is not None and ctl.helper_http is not None:  # 0.17.0: helpers -> 410
+        # On a rejoin/self-update we re-exec the SAME operator identity into the SAME room: do NOT
+        # end the helper hub (POST /api/helper/pump/end), or every helper credential would answer
+        # 410. The server binds helper credentials to room+identity and survives the reexec
+        # (voicehook-v4 feat/helper-cred-survives-rejoin); only a real leave ends the hub.
+        if (ctl.helper_pump is not None and ctl.helper_http is not None
+                and rc != RC_RESTART):  # 0.17.0: real leave -> helpers 410
             await ctl.helper_pump.end(ctl.helper_http)
         if ctl.helper_http is not None:
             try:
@@ -3345,9 +3416,12 @@ async def _join(
                 pass
         vmulti.remove_relay(owner_pid=os.getpid(), room=slug)  # 0.15.0: only our own file
         if rc == RC_RESTART:  # a waiting `next` learns why, instead of "ended"
+            _reason = "rejoin" if ctl.rejoining else "self_update"
+            _msg = ("voicehook-agent rejoins the call in place (identity, queue and board kept): "
+                    "run next again" if ctl.rejoining else
+                    "voicehook-agent updated itself and rejoins the call: run next again")
             ctl.events.put_front_nowait({
-                "ok": True, "type": "restarting", "reason": "self_update",
-                "message": "voicehook-agent updated itself and rejoins the call: run next again"})
+                "ok": True, "type": "restarting", "reason": _reason, "message": _msg})
         for t in (idle_task, *guard_tasks):
             t.cancel()
             try:
@@ -3604,6 +3678,8 @@ def _client_request(args) -> dict:
         return {"cmd": "ui", "body": vui.command(args.action, args.args, args.preset)}
     if args.cmd == "leave":
         return {"cmd": "leave", "say": args.say} if args.say else {"cmd": "leave"}
+    if args.cmd == "rejoin":  # 0.25.0: re-exec the join in place (keeps identity/queue/board)
+        return {"cmd": "rejoin"}
     if args.cmd == "send-data":  # 0.21.4
         return _data_request(args)
     if args.cmd in DELTA_KINDS:  # 0.23.0
@@ -4338,6 +4414,12 @@ def main(argv: list[str] | None = None) -> None:
     p_leave = sub.add_parser("leave", help="end the running join cleanly")
     p_leave.add_argument("--say", default=None, metavar="TEXT", help="goodbye line spoken before leaving")
     _add_session(p_leave)
+    p_rejoin = sub.add_parser(
+        "rejoin", help="restart the running join in place (os.execve, same mechanism as "
+        "self-update) so identity (slug/label/model), queue/spool and the status board are kept "
+        "- instead of leaving and re-joining. A rejoin mid-call is allowed (there may be a short "
+        "audio gap while the process swaps). With several local joins: --session is required.")
+    _add_session(p_rejoin)
     p_status = sub.add_parser(
         "status", help="no args: show the running join's state as JSON; with text/flags: send "
         "your status board (operator.status, replaces the last one, never spoken). 0.21.5 "
@@ -4689,8 +4771,8 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(rc)
     if args.cmd == "helper-import":
         sys.exit(_run_helper_import(args))
-    if args.cmd in ("say", "next", "says", "leave", "status", "activity", "decide", "helper-credential",
-                    "vocab", "ui", "notify-me", "call-me", "board", "send-data",
+    if args.cmd in ("say", "next", "says", "leave", "rejoin", "status", "activity", "decide",
+                    "helper-credential", "vocab", "ui", "notify-me", "call-me", "board", "send-data",
                     *DELTA_KINDS):
         sys.exit(_run_client(args))
     if args.cmd == "show":
