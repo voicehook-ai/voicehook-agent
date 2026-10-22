@@ -66,6 +66,9 @@ attachments on status boards. Server side: voicehook-v4 (POST /api/card/file, re
   the status is not sent. The helper pump passes `attach` through unchanged.
 - **Control socket 16 MB** (was 4 MB): a 10 MB PDF is ~13.4 MB base64; the request stays
   self-contained (the join never reads the caller's paths).
+- **Routing fail-closed** like every command (see above): `show --file` and `status --attach`
+  only go over this session's own join or own helper relay; another session's join only:
+  `foreign-join`, dead own helper entry: `relay-dead` (exit 3), nothing uploaded.
 - Never logged: file contents; only kind and size.
 
 ## 0.24.0 (2026-10-22)

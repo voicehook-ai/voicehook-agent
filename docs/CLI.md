@@ -1208,6 +1208,11 @@ reason (`type:"attach"`), the status is NOT sent, so nothing goes missing silent
 and nobody in the call (`no_human`): the file is stored and attached anyway. The helper pump
 passes `attach` of a helper's board through unchanged.
 
+Routing is the same as for every other command (0.25.0 fail-closed): `show --file` and
+`status --attach` only use this session's own join or its own helper relay. Only another
+session's join running: `foreign-join`, exit 3; own helper entry dead/expired/unusable:
+`relay-dead`/`relay-expired`/`relay-unusable`, exit 3. In both cases nothing is uploaded.
+
 ## Speech recognition vocabulary (`vocab add`, 0.21.0)
 
 The call keeps mishearing a word (a product, a name, jargon)? Teach it:

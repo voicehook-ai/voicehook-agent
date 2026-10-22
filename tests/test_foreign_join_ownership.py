@@ -405,3 +405,43 @@ def test_split_owned_unit():
     mine, foreign = vsession.split_owned(list(dirs.values()), "")
     assert len(mine) == 4 and foreign == []
 
+
+
+# --------------------------------------------------------------------------- #
+# 0.25.0 artifact cards (show --file, status --attach) follow the same rule
+# --------------------------------------------------------------------------- #
+def _pdf(tmp_path):
+    p = tmp_path / "bericht.pdf"
+    p.write_bytes(b"%PDF-1.4\n%fake test pdf\n")
+    return str(p)
+
+
+@pytest.mark.parametrize("kind", ["show-file", "status-attach"])
+def test_artifact_cards_other_session_never_use_foreign_join(monkeypatch, foreign_join, capsys,
+                                                             tmp_path, kind):
+    """show --file / status --attach of another session: foreign-join, nothing sent (also no
+    attach upload card ahead of the board)."""
+    _helper_session(monkeypatch)
+    pdf = _pdf(tmp_path)
+    argv = (["show", "--file", pdf, "--wait", "0"] if kind == "show-file" else
+            ["status", "--doing", "Bericht fertig", "--attach", pdf, "--wait", "0"])
+    rc, lines, _ = _cli(argv, capsys)
+    assert foreign_join == [], f"{kind} reached the join of another session"
+    assert rc == 3 and lines[-1]["type"] == "foreign-join", lines
+
+
+@pytest.mark.parametrize("kind", ["show-file", "status-attach"])
+def test_artifact_cards_dead_helper_is_relay_dead(monkeypatch, relay_srv, foreign_join, capsys,
+                                                  tmp_path, kind):
+    url, calls = relay_srv
+    _helper_session(monkeypatch)
+    monkeypatch.setenv(ms.LABEL_ENV, "voicehook-dev-3")
+    ms.write_helper("voicehook-dev-3", url, TOKEN, "room-a", 3600,
+                    owner_session=ms.session_hash("dev3"))
+    ms.mark_dead(TOKEN)
+    pdf = _pdf(tmp_path)
+    argv = (["show", "--file", pdf, "--wait", "0"] if kind == "show-file" else
+            ["status", "--doing", "Bericht fertig", "--attach", pdf, "--wait", "0"])
+    rc, lines, _ = _cli(argv, capsys)
+    assert foreign_join == [] and calls == []
+    assert rc == 3 and lines[-1]["type"] == "relay-dead", lines
