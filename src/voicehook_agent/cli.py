@@ -3828,7 +3828,9 @@ def _attach_cards(paths: list[str]) -> list[dict]:
             for f in paths]
 
 
-ATTACH_OK_TYPES = ("no_human",)  # uploaded + published, only nobody in the call yet
+# uploaded + published, only not shown yet (nobody in the call, or no page loaded it): the card
+# is in the call and shows up when the page opens, so the board still links it (hint, no error)
+ATTACH_OK_TYPES = ("no_human", "not_shown")
 
 
 def _attach_upload(cards: list[dict], send) -> tuple[list[dict] | None, dict | None]:
@@ -3846,6 +3848,9 @@ def _attach_upload(cards: list[dict], send) -> tuple[list[dict] | None, dict | N
             return None, {"ok": False, "type": "attach", "error": f"attachment {name} not uploaded, "
                           f"status not sent: {r.get('error') or 'no card id'}",
                           **({"status": r["status"]} if isinstance(r.get("status"), int) else {})}
+        if not r.get("ok"):
+            print(f"[note] attachment {name}: card is in the call, no call page loaded it yet "
+                  f"({r.get('type')}); the board links it anyway", file=sys.stderr, flush=True)
         out.append({"id": cid, "name": str(name)[:vcards.NAME_MAX], "kind": c["kind"]})
     return out, None
 

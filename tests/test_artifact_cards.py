@@ -450,6 +450,44 @@ def test_status_attach_helper_upload_fails_no_status(monkeypatch, tmp_path, caps
     assert [n for n, _ in calls] == ["show", "show"]
 
 
+def test_status_attach_helper_409_with_card_id_still_attaches_with_note(monkeypatch, tmp_path, capsys):
+    """v4 #624: relay/show 409 (no call page loaded it) names the card in X-Card-Id; the card is
+    in the call, so status --attach links it and only prints a note, never aborts."""
+    a, _b = _files(tmp_path)
+    calls = _relay(monkeypatch, {"show": [(409, {"detail": "no call page confirmed the image",
+                                                 "_card_id": CID})]})
+    with pytest.raises(SystemExit) as e:
+        cli.main(["status", "--doing", "Bericht fertig", "--attach", a])
+    cap = capsys.readouterr()
+    assert e.value.code == 0, cap.out
+    assert "[note] attachment Bericht.pdf: card is in the call" in cap.err
+    assert [n for n, _ in calls] == ["show", "status"]
+    assert calls[1][1]["attach"] == [{"id": CID, "name": "Bericht.pdf", "kind": "pdf"}]
+
+
+def test_relay_409_without_card_id_still_aborts(monkeypatch, tmp_path, capsys):
+    a, _b = _files(tmp_path)
+    calls = _relay(monkeypatch, {"show": [(409, {"detail": "no human in the call"})]})
+    rc, _lines = _main(["status", "x", "--attach", a], capsys)
+    assert rc == 1 and [n for n, _ in calls] == ["show"]
+
+
+def test_http_once_reads_x_card_id_header(monkeypatch):
+    import io
+    import urllib.error
+    import urllib.request
+    from email.message import Message
+
+    hdr = Message()
+    hdr["X-Card-Id"] = CID
+
+    def boom(req, timeout):
+        raise urllib.error.HTTPError(req.full_url, 409, "Conflict", hdr, io.BytesIO(b'{"detail": "not shown"}'))
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    st, out = ro._http_once({"token": "t"}, "POST", "https://vh.test/api/activity/relay/show", {}, 1)
+    assert st == 409 and out["_card_id"] == CID and out["detail"] == "not shown"
+
+
 def test_status_body_keeps_only_valid_attach():
     body = ro.status_body({"doing": "x", "attach": [
         {"id": CID, "name": "a.pdf", "kind": "pdf"}, {"id": "nothex", "name": "b", "kind": "pdf"},

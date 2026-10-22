@@ -556,11 +556,13 @@ def _http_once(rel: dict, method: str, url: str, body: dict | None,
     req = urllib.request.Request(url, method=method, data=data, headers={
         "authorization": f"Bearer {rel['token']}", "content-type": "application/json",
         "user-agent": "voicehook-agent"})
+    card_id = None
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:  # url from our own 0600 file
             status, raw = r.status, r.read()
     except urllib.error.HTTPError as e:
         status = e.code
+        card_id = (e.headers or {}).get("X-Card-Id") if e.headers is not None else None
         try:
             raw = e.read()
         except Exception:  # noqa: BLE001
@@ -573,7 +575,11 @@ def _http_once(rel: dict, method: str, url: str, body: dict | None,
         out = json.loads(raw.decode("utf-8") or "{}")
     except ValueError:
         out = {}
-    return status, out if isinstance(out, dict) else {}
+    out = out if isinstance(out, dict) else {}
+    # 0.25.0: 409 of relay/show = card is in the call, no page loaded it yet; the server names it
+    if card_id and re.fullmatch(r"[0-9a-f]{16}", str(card_id)):
+        out["_card_id"] = str(card_id)
+    return status, out
 
 
 def _err(status: int, out: dict) -> dict:
@@ -610,6 +616,8 @@ def remote_show(rel: dict, frm: str, body: dict, timeout: float = SHOW_TIMEOUT_S
     status, out = _http(rel, "POST", endpoint(rel, "show"), {"from": frm, **body}, timeout)
     if status >= 300 or out.get("ok") is False:
         e = _err(status, out)
+        if status == 409 and out.get("_card_id"):   # angelegt, nur noch nicht gezeigt
+            e.update({"id": out["_card_id"], "type": "not_shown"})
         if body.get("kind") in FILE_KINDS and (status in (404, 405) or (
                 status == 422 and "must be one of" in e["error"])):
             e["error"] = ("pdf, csv and md cards of a helper need a newer server (relay/show "
