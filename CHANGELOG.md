@@ -40,9 +40,28 @@ instead of leaving the call and re-joining.
   (`owner_agent_pid`) is the caller's agent process. The owner then keeps its own join for
   every command, also next to an old dead helper entry, and never posts through its own
   relay.json as if it were a helper.
+- **edge cases of foreign joins (follow-up):**
+  - *same session id, another agent process:* `claude --continue` in a second terminal, an
+    inherited `CLAUDE_CODE_SESSION_ID` or Codex started from a Claude shell no longer count as
+    the owner. A join is owned by its session id only while the agent process that started it
+    (`owner_agent_pid`) is unknown, gone (`--resume` in a new process) or the caller's own;
+    otherwise that process is a helper (relay, with sender) or gets `foreign-join`.
+  - *pid reuse:* the join also records the start time of that agent process
+    (`owner_agent_start`, relay.json too); a reused pid is another process.
+  - *join without owner* (started outside any agent session): inside an agent session only with
+    `--session` (`foreign-join`, exit 3); helpers reach that call over its relay.json with a
+    sender. A human or a script outside any agent session: unchanged.
+  - *no session id* (e.g. the local MCP server, which need not inherit
+    `CLAUDE_CODE_SESSION_ID`/`CODEX_THREAD_ID`): no longer "outside an agent session" when an
+    agent process runs above it; it may only use joins that agent process started, else
+    `foreign-join` / MCP tool error.
+  - *hooks* (relay feed, helper board, notify routing, tool activity, subagent bundle, Codex
+    turn lines) use the same ownership rule (`session.owned_by`): the owner keeps its activity
+    in its own join after `/clear` and never posts through its own relay.json as a helper; a
+    second agent process with the same session id feeds the call as a helper.
 - **unchanged:** `--session`, `VOICEHOOK_NO_RELAY=1` (drive the machine's join directly), no
-  agent session at all (a human in a terminal, a script: the only join, as before), a join
-  with no recorded owner (started outside any agent session), a live own helper relay.
+  agent session at all (a human in a terminal, a script: the only join, as before), a live own
+  helper relay.
 - **helper_state** follows `_usable`: an entry with only `expires_in` (copied by hand) counts
   from the file's mtime, `relay.dead` applies to remote entries only, an entry without any
   expiry is `unusable`, not `expired`.

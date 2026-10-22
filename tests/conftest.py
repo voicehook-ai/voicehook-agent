@@ -23,3 +23,15 @@ def _private_state_dir(tmp_path, monkeypatch):
     # 0.21.8: the onboarding is also the first next/listen event of a join; tests about the
     # event flow start without it (tests/test_onboarding.py turns it on)
     monkeypatch.setenv("VOICEHOOK_ONBOARDING_HINT", "0")
+
+
+@pytest.fixture(autouse=True)
+def _no_runner_agent_pid(monkeypatch):
+    """0.25.0 ownership (session.owned_by/split_owned) compares board.agent_pid(): the agent
+    process above the caller. Under a local Claude Code the test runner has one, in CI not;
+    every test starts like CI (no agent process) and sets its own (`lambda *a, **k: pid`).
+    Explicit calls with a `proc` (the walk itself) still run the real function."""
+    from voicehook_agent import board
+    real = board.agent_pid
+    monkeypatch.setattr(board, "agent_pid",
+                        lambda start=None, proc=None: 0 if proc is None else real(start, proc))

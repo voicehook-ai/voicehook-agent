@@ -197,40 +197,89 @@ def _agent_pid() -> int:
         return 0
 
 
+def proc_start(pid: int) -> str:
+    """0.25.0: start time of a process as an opaque string ('' when unknown): field 22 of
+    /proc/<pid>/stat (Linux), else `ps -o lstart=` (macOS). With the pid it names ONE
+    process: a pid reused by another process after the owner died has another start."""
+    if pid <= 1:
+        return ""
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text()
+        return raw[raw.rindex(")") + 2:].split()[19]
+    except (OSError, ValueError, IndexError):
+        pass
+    import subprocess
+    try:
+        return subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True,
+                              text=True, timeout=2, check=False).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _int(v: object) -> int:
+    try:
+        return int(v or 0)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return 0
+
+
+def _owner_agent_alive(info: dict, jp: int) -> bool:
+    """The agent process that started the join (owner_agent_pid) still runs: its pid lives
+    and, when the join recorded it (owner_agent_start), its start time still matches (0.25.0:
+    a reused pid is another process)."""
+    from . import activity as vact  # lazy
+    if jp <= 1 or not vact._pid_alive(jp):
+        return False
+    rec = str(info.get("owner_agent_start") or "")
+    if not rec:
+        return True
+    now = proc_start(jp)
+    return not now or now == rec
+
+
 def owned_by(info: dict, own: str, agent_pid: Callable[[], int] = _agent_pid) -> bool:
-    """0.25.0: is the join of `info` (session.json) owned by the agent session `own`?
-    Its owner_session is `own`, or (after /clear or /resume inside the same agent process:
-    a new session id, the join keeps the old one) the agent process that started the join
-    (owner_agent_pid, alive) is the agent process of this caller. Never a join with no
-    recorded owner (see split_owned)."""
+    """0.25.0: is the join of `info` (session.json, or a relay.json shaped like it) owned by
+    the agent session `own`? Never a join with no recorded owner (see split_owned).
+    * owner_session is `own` AND the agent process that started the join (owner_agent_pid)
+      is unknown, gone (`claude --resume`: a new process) or this caller's agent process.
+      The same session id in ANOTHER live agent process (`claude --continue` in a second
+      terminal, an inherited CLAUDE_CODE_SESSION_ID, Codex started from a Claude shell) is
+      not the owner.
+    * else (after /clear or /resume inside the same agent process: a new session id, the
+      join keeps the old one) the live owner_agent_pid is this caller's agent process."""
     if not own or not isinstance(info, dict):
         return False
     owner = str(info.get("owner_session") or "")
     if not owner:
         return False
+    jp = _int(info.get("owner_agent_pid"))
     if owner == own:
-        return True
-    try:
-        jp = int(info.get("owner_agent_pid") or 0)
-    except (TypeError, ValueError):
+        return jp <= 1 or not _owner_agent_alive(info, jp) or agent_pid() == jp
+    return _owner_agent_alive(info, jp) and agent_pid() == jp
+
+
+def owned_by_process(info: dict, ap: int) -> bool:
+    """0.25.0: the join was started by the live agent process `ap` (a caller without a
+    session id, e.g. the local MCP server the agent started)."""
+    if ap <= 1 or not isinstance(info, dict) or not str(info.get("owner_session") or ""):
         return False
-    if jp <= 1:
-        return False
-    from . import activity as vact  # lazy
-    return vact._pid_alive(jp) and agent_pid() == jp
+    jp = _int(info.get("owner_agent_pid"))
+    return jp == ap and _owner_agent_alive(info, jp)
 
 
 def split_owned(live: list[Path], own: str | None = None,
                 agent_pid: Callable[[], int] = _agent_pid) -> tuple[list[Path], list[Path]]:
     """0.25.0 (live 22.10.2026, crown: helper dev-3 posted as Selfhost): (usable, foreign)
-    live joins for the calling session. Outside an agent session or with VOICEHOOK_NO_RELAY=1
-    all are usable (old rule). In an agent session: its own joins (owned_by) and joins with
-    no recorded owner (started outside any agent session); a join of ANOTHER session never."""
+    live joins for the calling session.
+    * VOICEHOOK_NO_RELAY=1, or outside any agent (no session id and no agent process above
+      the caller: a human in a terminal, a script): all usable (old rule).
+    * In an agent session: only its own joins (owned_by). A join with no recorded owner
+      (started outside any agent session) is not its own either: only with --session
+      (fail-closed; a helper reaches that call over its relay.json, with a sender).
+    * No session id but an agent process above the caller (the local MCP server, which need
+      not see CLAUDE_CODE_SESSION_ID/CODEX_THREAD_ID): the joins that agent process started."""
+    explicit = own is not None
     own = _caller() if own is None else own
-    if not own:
-        return list(live), []
-    mine: list[Path] = []
-    foreign: list[Path] = []
     pid_cache: list[int] = []
 
     def pid() -> int:
@@ -238,20 +287,29 @@ def split_owned(live: list[Path], own: str | None = None,
             pid_cache.append(agent_pid())
         return pid_cache[0]
 
+    if not own:
+        if explicit or _no_relay() or pid() <= 1:
+            return list(live), []
+        mine = [d for d in live if owned_by_process(read_info(d), pid())]
+        return mine, [d for d in live if d not in mine]
+    mine: list[Path] = []
+    foreign: list[Path] = []
     for d in live:
-        info = read_info(d)
-        if not str(info.get("owner_session") or "") or owned_by(info, own, pid):
-            mine.append(d)
-        else:
-            foreign.append(d)
+        (mine if owned_by(read_info(d), own, pid) else foreign).append(d)
     return mine, foreign
 
 
-FOREIGN_HINT = ("a join of another agent session runs on this machine ({names}); this session "
-                "does not own it, so nothing was sent (a session never posts through another "
-                "session's join). Use your own join, your own helper credential "
-                "(`voicehook-agent helper-credential --label <name> | voicehook-agent "
-                "helper-import --as <name>`), or name the join deliberately: --session <slug>/<identity>")
+def _no_relay() -> bool:
+    from . import multisession as vmulti  # lazy
+    return vmulti.relay_disabled()
+
+
+FOREIGN_HINT = ("a join this agent session does not own runs on this machine ({names}): "
+                "another session's, or one without an owner; nothing was sent (a session "
+                "never posts through a join it does not own). Use your own join, your own "
+                "helper credential (`voicehook-agent helper-credential --label <name> | "
+                "voicehook-agent helper-import --as <name>`), or name the join deliberately: "
+                "--session <slug>/<identity>")
 
 
 class SessionBusy(SessionError):

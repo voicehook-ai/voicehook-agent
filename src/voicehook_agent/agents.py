@@ -326,7 +326,7 @@ def _own_join_line(event: dict, text: str) -> None:
         if d is None:
             return
         if not (os.environ.get("VOICEHOOK_SESSION") or "").strip() \
-                and vact._foreign(vact.dir_owner(d), vact._event_session(event)):
+                and vact.foreign_dir(d, vact._event_session(event)):
             return
         vact.append_line(d, f"{vact._ts(None)} {AGENT_TOOL}: {vact.scrub(text)[:vact.DESC_MAX]}")
     except Exception:  # noqa: BLE001

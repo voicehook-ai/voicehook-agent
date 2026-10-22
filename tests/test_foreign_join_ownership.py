@@ -309,14 +309,6 @@ def test_outside_an_agent_session_the_only_join_is_used(monkeypatch, foreign_joi
     assert rc == 0 and [r["cmd"] for r in foreign_join] == ["say"]
 
 
-def test_join_without_recorded_owner_stays_usable(monkeypatch, foreign_join, capsys):
-    """A join started outside any agent session (no owner_session) is nobody else's."""
-    _info(owner_session="")
-    _helper_session(monkeypatch)
-    rc, _lines, _ = _cli(["say", "Hallo", "--wait", "0"], capsys)
-    assert rc == 0 and [r["cmd"] for r in foreign_join] == ["say"]
-
-
 def test_live_helper_relay_still_goes_over_the_relay(monkeypatch, relay_srv, foreign_join,
                                                      capsys):
     url, calls = relay_srv
@@ -385,7 +377,7 @@ def test_show_card_dead_helper_is_relay_dead(monkeypatch, relay_srv, foreign_joi
 
 
 def test_split_owned_unit():
-    """split_owned: own hash, same agent process, unattributed, foreign."""
+    """split_owned: own hash, same agent process; unattributed and foreign are foreign."""
     root = vsession.sessions_root()
     dirs = {}
     for name, info in (("mine", {"owner_session": ms.session_hash("a")}),
@@ -400,8 +392,284 @@ def test_split_owned_unit():
         dirs[name] = d
     mine, foreign = vsession.split_owned(list(dirs.values()), ms.session_hash("a"),
                                          agent_pid=lambda: JOIN_PID)
-    assert {d.name for d in mine} == {"mine", "proc", "none"}
-    assert [d.name for d in foreign] == ["other"]
+    assert {d.name for d in mine} == {"mine", "proc"}
+    # Folge-PR Randfall 2: a join without owner is no own join of an agent session
+    assert {d.name for d in foreign} == {"none", "other"}
     mine, foreign = vsession.split_owned(list(dirs.values()), "")
     assert len(mine) == 4 and foreign == []
 
+
+
+# =========================================================================== #
+# 0.25.0 Folge-PR: Randfaelle fremder Joins
+# =========================================================================== #
+OTHER_PROC = 4242  # a second agent process (a live pid is faked via _alive)
+
+
+def _alive(monkeypatch, *pids):
+    """These pids count as live agent processes (besides the real ones)."""
+    from voicehook_agent import activity as vact
+    real = vact._pid_alive
+    monkeypatch.setattr(vact, "_pid_alive", lambda p: p in pids or real(p))
+
+
+# --------------------------------------------------------------------------- #
+# Randfall 1: same session id, another LIVE agent process is no owner
+# --------------------------------------------------------------------------- #
+def test_same_session_id_in_another_agent_process_is_not_the_owner(monkeypatch, foreign_join,
+                                                                   capsys):
+    """`claude --continue` in a second terminal (or an inherited CLAUDE_CODE_SESSION_ID, Codex
+    started from a Claude shell): the same session id, the join's agent process still lives,
+    this is another one. Before: owner_session matched, it drove the join."""
+    _info(owner_session=ms.session_hash("selfhost"), owner_agent_pid=JOIN_PID)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "selfhost")
+    _agent_pid(monkeypatch, OTHER_PROC)
+    rc, lines, _ = _cli(["say", "Hallo", "--wait", "0"], capsys)
+    assert foreign_join == [] and rc == 3, lines
+    assert lines[-1]["type"] == "foreign-join", lines
+
+
+@pytest.mark.parametrize("join_pid,me", [(JOIN_PID, JOIN_PID),   # the owner itself
+                                         (0, OTHER_PROC),        # join without agent pid
+                                         (99999999, OTHER_PROC)],  # resume: old process gone
+                         ids=["same-process", "pid-unknown", "pid-dead"])
+def test_same_session_id_owner_rules(monkeypatch, foreign_join, capsys, join_pid, me):
+    _info(owner_session=ms.session_hash("selfhost"), owner_agent_pid=join_pid)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "selfhost")
+    _agent_pid(monkeypatch, me)
+    rc, lines, _ = _cli(["say", "Hallo", "--wait", "0"], capsys)
+    assert rc == 0 and [r["cmd"] for r in foreign_join] == ["say"], lines
+
+
+def test_owned_by_unit(monkeypatch):
+    own = ms.session_hash("a")
+    _alive(monkeypatch, 5001, 5002)
+    me = 5001
+    def ob(**info):
+        return vsession.owned_by(info, own, agent_pid=lambda: me)
+    assert ob(owner_session=own)                                    # no pid recorded
+    assert ob(owner_session=own, owner_agent_pid=5001)              # same process
+    assert ob(owner_session=own, owner_agent_pid=99999999)          # recorded process gone
+    assert not ob(owner_session=own, owner_agent_pid=5002)          # other live process
+    assert ob(owner_session=ms.session_hash("old"), owner_agent_pid=5001)  # after /clear
+    assert not ob(owner_session=ms.session_hash("b"), owner_agent_pid=5002)
+    assert not ob(owner_session="", owner_agent_pid=5001)           # no owner: never "owned"
+
+
+def test_owned_by_pid_reuse_start_time(monkeypatch):
+    """Optional hardening: a recorded start time of the agent process must still match, a
+    reused pid (another process now) is no ownership."""
+    own = ms.session_hash("a")
+    monkeypatch.setattr(vsession, "proc_start", lambda pid: "111" if pid == JOIN_PID else "")
+    after_clear = {"owner_session": ms.session_hash("old"), "owner_agent_pid": JOIN_PID}
+    assert vsession.owned_by({**after_clear, "owner_agent_start": "111"}, own,
+                             agent_pid=lambda: JOIN_PID)
+    assert not vsession.owned_by({**after_clear, "owner_agent_start": "222"}, own,
+                                 agent_pid=lambda: JOIN_PID)
+    same_id = {"owner_session": own, "owner_agent_pid": JOIN_PID}
+    # a reused pid counts as gone: the same session id owns again (resume rule)
+    assert vsession.owned_by({**same_id, "owner_agent_start": "222"}, own,
+                             agent_pid=lambda: OTHER_PROC)
+    assert not vsession.owned_by({**same_id, "owner_agent_start": "111"}, own,
+                                 agent_pid=lambda: OTHER_PROC)
+
+
+def test_join_records_agent_start_time():
+    assert vsession.proc_start(os.getpid()) != ""
+    assert vsession.proc_start(99999999) == ""
+
+
+# --------------------------------------------------------------------------- #
+# Randfall 2: a join without owner needs --session inside an agent session
+# --------------------------------------------------------------------------- #
+def test_join_without_owner_needs_session_in_an_agent_session(monkeypatch, foreign_join,
+                                                              capsys):
+    """Before: a join without owner_session was usable by EVERY agent session, so a session
+    without a helper entry posted into it without a sender."""
+    _info(owner_session="")
+    _helper_session(monkeypatch)
+    rc, lines, _ = _cli(["say", "Hallo", "--wait", "0"], capsys)
+    assert foreign_join == [] and rc == 3, lines
+    assert lines[-1]["type"] == "foreign-join" and "--session" in lines[-1]["error"]
+
+
+def test_join_without_owner_with_explicit_session(monkeypatch, foreign_join, capsys):
+    _info(owner_session="")
+    _helper_session(monkeypatch)
+    rc, _lines, _ = _cli(["say", "Hallo", "--session", SESS, "--wait", "0"], capsys)
+    assert rc == 0 and [r["cmd"] for r in foreign_join] == ["say"]
+
+
+def test_join_without_owner_outside_an_agent_session(monkeypatch, foreign_join, capsys):
+    """A human or a script (no session id, no agent process): unchanged."""
+    _info(owner_session="")
+    rc, _lines, _ = _cli(["say", "Hallo", "--wait", "0"], capsys)
+    assert rc == 0 and [r["cmd"] for r in foreign_join] == ["say"]
+
+
+def test_join_without_owner_helper_goes_over_the_relay(monkeypatch, relay_srv, foreign_join,
+                                                       capsys):
+    """Positive control: the join's relay.json carries a helper session (with sender)."""
+    url, calls = relay_srv
+    _info(owner_session="")
+    ms.write_relay(url, TOKEN, "orbit-prime-brisk-2V59", 3600, owner_pid=os.getpid(),
+                   owner_session="")
+    _helper_session(monkeypatch)
+    rc, lines, _ = _cli(OWNER_ARGVS[0], capsys)
+    assert rc == 0 and lines[-1]["via"] == "relay" and foreign_join == [], lines
+    assert [c["name"] for c in calls] == ["decide"]
+
+
+# --------------------------------------------------------------------------- #
+# Randfall 3: no session id (local MCP server): ownership by the agent process
+# --------------------------------------------------------------------------- #
+def test_mcp_without_session_id_never_takes_a_foreign_join(monkeypatch, foreign_join):
+    """`voicehook-agent mcp` is started by the agent (Codex, Claude Code) and need not see
+    CLAUDE_CODE_SESSION_ID/CODEX_THREAD_ID. Before: _caller()=='' switched the filter off and
+    it drove the join of another session."""
+    _info(owner_agent_pid=JOIN_PID)
+    _agent_pid(monkeypatch, OTHER_PROC)
+    with pytest.raises(mcpserver.ToolError) as e:
+        mcpserver._route()
+    assert "--session" in str(e.value) and foreign_join == []
+
+
+def test_mcp_without_session_id_owns_by_agent_process(monkeypatch, foreign_join):
+    _info(owner_agent_pid=JOIN_PID)
+    _agent_pid(monkeypatch, JOIN_PID)
+    assert mcpserver._route() == ("own", None)
+
+
+def test_mcp_without_session_id_join_without_owner_is_closed(monkeypatch, foreign_join):
+    _info(owner_session="", owner_agent_pid=0)
+    _agent_pid(monkeypatch, OTHER_PROC)
+    with pytest.raises(mcpserver.ToolError):
+        mcpserver._route()
+    assert foreign_join == []
+
+
+def test_cli_without_session_id_in_an_agent_process(monkeypatch, foreign_join, capsys):
+    _info(owner_agent_pid=JOIN_PID)
+    _agent_pid(monkeypatch, OTHER_PROC)
+    rc, _lines, _ = _cli(["say", "Hallo", "--wait", "0"], capsys)
+    assert rc == 3 and foreign_join == []
+
+
+# --------------------------------------------------------------------------- #
+# Randfall 4: the hooks use the same ownership (owner after /clear keeps its join)
+# --------------------------------------------------------------------------- #
+def _tool_event(sid, **kw):
+    return json.dumps({"hook_event_name": "PostToolUse", "session_id": sid, "cwd": "/tmp",
+                       "tool_name": "Edit", "tool_use_id": "tu-" + sid,
+                       "tool_input": {"file_path": "/tmp/x/notes.txt"},
+                       "tool_response": {}, **kw})
+
+
+def _log():
+    from voicehook_agent import activity as vact
+    p = _join_dir() / vact.ACTIVITY_NAME
+    return p.read_text(encoding="utf-8") if p.exists() else ""
+
+
+def _after_clear(monkeypatch, *, local_relay=True):
+    """Selfhost runs the join (old session id, its agent process JOIN_PID), now /clear."""
+    _info(owner_session=ms.session_hash("selfhost-old"), owner_agent_pid=JOIN_PID)
+    if local_relay:
+        ms.write_local_relay(_join_dir(), "orbit-prime-brisk-2V59", owner_pid=JOIN_PID,
+                             owner_session=ms.session_hash("selfhost-old"))
+    _agent_pid(monkeypatch, JOIN_PID)
+
+
+def test_activity_hook_owner_after_clear_writes_own_join(monkeypatch, foreign_join):
+    from voicehook_agent import activity as vact
+    _after_clear(monkeypatch)
+    assert vact._handle(_tool_event("selfhost-after-clear"), "post", None) is True
+    assert _log().strip(), "the owner's tool line is missing in its own join"
+
+
+def test_activity_hook_other_session_never_writes_the_join(monkeypatch, foreign_join):
+    """Positive control: another session (and the same id in another live process)."""
+    from voicehook_agent import activity as vact
+    _after_clear(monkeypatch)
+    _agent_pid(monkeypatch, OTHER_PROC)
+    _alive(monkeypatch, OTHER_PROC)
+    assert vact._handle(_tool_event("dev3"), "post", None) is False
+    _info(owner_session=ms.session_hash("selfhost"))
+    _info(owner_agent_pid=JOIN_PID)
+    assert vact._handle(_tool_event("selfhost"), "post", None) is False
+    assert _log() == ""
+
+
+def test_relay_hook_owner_after_clear_is_silent(monkeypatch, foreign_join):
+    """Before: the new id did not match relay.json's owner_session, so the owner's own turn
+    went over its own relay as a 'Helfer' line."""
+    _after_clear(monkeypatch)
+    sent: list[str] = []
+    ev = json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "selfhost-after-clear",
+                     "prompt": "Bitte die Tests reparieren", "cwd": "/tmp"})
+    assert ms.handle_event(ev, post=sent.append) is None and sent == []
+
+
+def test_relay_hook_helper_session_still_posts(monkeypatch, foreign_join):
+    _after_clear(monkeypatch)
+    _agent_pid(monkeypatch, OTHER_PROC)
+    sent: list[str] = []
+    ev = json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "dev3",
+                     "prompt": "Bitte die Tests reparieren", "cwd": "/tmp"})
+    assert ms.handle_event(ev, post=sent.append) and len(sent) == 1
+
+
+def test_relay_hook_same_id_other_process_posts_as_helper(monkeypatch, foreign_join):
+    _info(owner_session=ms.session_hash("selfhost"), owner_agent_pid=JOIN_PID)
+    ms.write_local_relay(_join_dir(), "orbit-prime-brisk-2V59", owner_pid=JOIN_PID,
+                         owner_session=ms.session_hash("selfhost"))
+    _agent_pid(monkeypatch, OTHER_PROC)
+    sent: list[str] = []
+    ev = json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "selfhost",
+                     "prompt": "Bitte die Tests reparieren", "cwd": "/tmp"})
+    assert ms.handle_event(ev, post=sent.append) and len(sent) == 1
+
+
+def test_notify_route_owner_after_clear_is_own(monkeypatch, foreign_join):
+    from voicehook_agent import notify
+    _after_clear(monkeypatch)
+    kind, d, _rel = notify.route(ms.session_hash("selfhost-after-clear"))
+    assert kind == "own" and d is not None and d.resolve() == _join_dir().resolve()
+
+
+def test_notify_route_helper_is_relay(monkeypatch, foreign_join):
+    from voicehook_agent import notify
+    _after_clear(monkeypatch)
+    _agent_pid(monkeypatch, OTHER_PROC)
+    assert notify.route(ms.session_hash("dev3"))[0] == "relay"
+
+
+def test_board_hook_owner_after_clear_is_its_own_board(monkeypatch, foreign_join):
+    """The joining session has its own board (status_due, own `next`): the helper board
+    hook stays silent for it, also after /clear."""
+    from voicehook_agent import board
+    _after_clear(monkeypatch)
+    posted: list = []
+    ev = json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "selfhost-after-clear",
+                     "prompt": "weiter", "cwd": "/tmp"})
+    assert board.handle(ev, spawn=lambda *a, **k: posted.append(a),
+                        post=lambda *a, **k: posted.append(a),
+                        fetch=lambda *a, **k: None, watch=lambda *a, **k: None) is None
+    assert posted == []
+    st = board.vact.state_root() / board.STATE_NAME
+    assert not st.exists() or ms.session_hash("selfhost-after-clear") not in st.read_text()
+
+
+def test_codex_own_join_line_owner_after_clear(monkeypatch, foreign_join):
+    from voicehook_agent import agents
+    _after_clear(monkeypatch, local_relay=False)
+    agents._own_join_line({"session_id": "selfhost-after-clear"}, "Turn fertig")
+    assert "Turn fertig" in _log()
+
+
+def test_codex_own_join_line_other_session(monkeypatch, foreign_join):
+    from voicehook_agent import agents
+    _after_clear(monkeypatch, local_relay=False)
+    _agent_pid(monkeypatch, OTHER_PROC)
+    agents._own_join_line({"session_id": "dev3"}, "Turn fertig")
+    assert _log() == ""

@@ -463,6 +463,15 @@ def dir_owner(dir_: Path) -> str:
     return v if isinstance(v, str) else ""
 
 
+def foreign_dir(dir_: Path, session: str) -> bool:
+    """0.25.0: the join in dir_ belongs to ANOTHER agent session (session.owned_by: also
+    the same session id in another live agent process); its owner after /clear (same agent
+    process, new id) is no stranger. Unknown owner or session: old behavior (False)."""
+    info = vsession.read_info(dir_)
+    return bool(str(info.get("owner_session") or "")) and bool(session) \
+        and not vsession.owned_by(info, session)
+
+
 def _foreign(owner: str, session: str) -> bool:
     """True when the join belongs to ANOTHER Claude Code session: that session's tool lines
     reach the call only labeled through the relay (multisession.py), never as the joining
@@ -706,7 +715,7 @@ def _handle(raw: str, phase: str, now: float | None) -> bool:
         sess_key = _event_session(event)
         dir_ = target_dir()
         if dir_ is not None and not (os.environ.get("VOICEHOOK_SESSION") or "").strip() \
-                and _foreign(dir_owner(dir_), sess_key):
+                and foreign_dir(dir_, sess_key):
             dir_ = None  # 0.15.0: another session's join, the relay carries this session
         if dir_ is not None and not (phase == "post" and tid and _take_id(dir_ / IDS_NAME, tid)):
             append_line(dir_, format_line(event, now))
@@ -731,7 +740,7 @@ def _subagent_once(event: dict, agent: str, now: float | None) -> bool:
     ("Hintergrund-Agent für <agent_type> arbeitet"), nothing of its single steps."""
     from . import activityfilter
     dir_ = target_dir()
-    if dir_ is None or _foreign(dir_owner(dir_), _event_session(event)):
+    if dir_ is None or foreign_dir(dir_, _event_session(event)):
         return False
     key = "agent:" + re.sub(r"[^A-Za-z0-9_.-]", "_", agent)[:80]
     ids = dir_ / IDS_NAME
