@@ -222,6 +222,7 @@ import httpx
 from livekit import rtc
 
 from . import __version__, relay
+from . import a2a as va2a
 from . import activity as vactivity
 from . import boardlist as vboardlist
 from . import cards as vcards
@@ -1768,6 +1769,14 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         if seq is not None:
             out["seq"] = seq  # 0.21.5: the consumer sends {"cmd":"ack","seq":N} once it has it
         return out
+    if cmd == "task_wake":  # 0.24.0 (a2a.py): a2a `send` nudged this join; drain its inbox and
+        # enqueue the pending tasks as front events so its `next`/`listen` wakes at once. The
+        # durable copy stays the inbox until it is consumed here; never logs the task text.
+        ctl.watchdog.touch()
+        ctl.events.arm()
+        label = va2a._clean_label(req.get("label"))
+        n = _drain_tasks_into_spool(ctl, label)
+        return {"ok": True, "type": "task_wake", "queued": n}
     if cmd == "take_wake":  # 0.21.7 (midturn.py): the hook shows them inside the running turn
         types = [t for t in (req.get("types") or vmidturn.TYPES) if t in vmidturn.TYPES]
         try:
@@ -2095,6 +2104,28 @@ def _route_helper_user_turn(ctl: _Control, payload: dict, own: set[str]) -> bool
         asyncio.ensure_future(ctl.helper_pump.user_turn(ctl.helper_http, name, key, text, speaker))
         return True
     return False
+
+
+def _drain_tasks_into_spool(ctl: _Control, label: str) -> int:
+    """0.24.0: take the pending `task` events out of `label`'s inbox and put them as front
+    events into this join's spool (so `next`/`listen` wakes at once), acking each back to its
+    sender. Returns how many were queued. Never raises, never logs the task text."""
+    if not label:
+        return 0
+    try:
+        tasks = vrelayops.take_jsonl(vrelayops.inbox_path(label),
+                                     lambda o: o.get("type") == va2a.TASK)
+    except (OSError, vrelayops.RelayError):
+        return 0
+    n = 0
+    for raw in tasks:
+        ev = va2a.valid_task(raw)
+        if ev is None:
+            continue
+        ctl.events.put_front_nowait(ev)
+        _ack_task_back(label, ev)
+        n += 1
+    return n
 
 
 def _route_question_check(ctl: _Control, payload: dict, transport: str) -> bool:
@@ -3620,6 +3651,135 @@ def _decide_faq(args) -> list[dict]:
                            limit=relay.ITEM_FAQ_MAX)
 
 
+# --------------------------------------------------------------------------- #
+# 0.24.0 agent-to-agent tasks: `voicehook-agent send --to <label> "<task>"` (a2a.py)
+# --------------------------------------------------------------------------- #
+def _session_registry() -> dict:
+    """{hash: {label, at, ...}} of the sessions that reported recently (relay-state.json), {}
+    on any error. Each is a session of THIS machine (helper or joined)."""
+    try:
+        st = json.loads((vactivity.state_root() / vmulti.STATE_NAME).read_text(encoding="utf-8"))
+        sessions = st.get("sessions") if isinstance(st, dict) else None
+        return {str(k): v for k, v in (sessions or {}).items() if isinstance(v, dict)}
+    except (OSError, ValueError):
+        return {}
+
+
+def _local_session_labels() -> list[str]:
+    """Labels of other sessions of this machine we can hand a task to: the recent registry
+    labels plus any live join's owner-session label. Directed send targets one of these."""
+    return vlocal.registry_labels()
+
+
+def _live_join_for_hash(session_hash: str) -> Path | None:
+    """The live join dir owned by the session with this hash (a session running its own join),
+    or None. Used to wake it instantly over its control socket."""
+    if not session_hash:
+        return None
+    from . import session as vsession
+    for d in vactivity.live_join_dirs():
+        try:
+            info = json.loads((d / vsession.INFO_NAME).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(info, dict) and str(info.get("owner_session") or "") == session_hash:
+            return d
+    return None
+
+
+def _wake_target_join(label: str) -> bool:
+    """Instant wake: if `label`'s session owns a live join, push a front task-wake into its
+    spool over the control socket. Best effort; the durable inbox copy is the real delivery."""
+    reg = _session_registry()
+    skey = next((k for k, v in reg.items() if va2a._clean_label(v.get("label")) == label), "")
+    d = _live_join_for_hash(skey)
+    if d is None:
+        return False
+    from . import session as vsession
+    try:
+        sock = d / vsession.SOCKET_NAME
+        reply = vsession.request(sock, {"cmd": "task_wake", "label": label}, timeout=5.0)
+        return bool(reply.get("ok"))
+    except (vsession.SessionError, OSError, ValueError):
+        return False
+
+
+def _run_send(args) -> int:
+    """`send --to <label> "<task>"`: hand a directed task to another local session (Phase 1).
+    Resolves the label, appends a `task` event to that session's inbox (durable, read by its
+    relay-next / listen / hook), and wakes it instantly if it owns a live join. One JSON line."""
+    text = args.text
+    if text == "-":
+        text = sys.stdin.read()
+    text = va2a.clean_text(text)
+    if not text:
+        _print_json({"ok": False, "type": "task", "error": "send needs a task text"})
+        return 2
+    try:
+        me = vrelayops.session_label()
+    except vrelayops.RelayError:
+        me = ""
+    try:
+        target = va2a.resolve_target(args.to, _local_session_labels(), me=me)
+    except va2a.TaskError as e:
+        _print_json({"ok": False, "type": "task", "status": e.status, "error": e.detail})
+        return 1
+    task_id = va2a.new_id()
+    ev = va2a.task_event(task_id, me or "?", target, text)
+    try:
+        vrelayops.append_jsonl(vrelayops.inbox_path(target), ev)
+        if me:  # durable record for OUR board ("Auftrag offen bei X seit ...")
+            vrelayops.append_jsonl(vrelayops.outbox_path(me), ev)
+    except (OSError, vrelayops.RelayError) as e:
+        _print_json({"ok": False, "type": "task", "status": 503,
+                     "error": f"inbox not writable: {type(e).__name__}"})
+        return 1
+    woke = _wake_target_join(target)
+    _print_json({"ok": True, "type": "task", "id": task_id, "to": target, "woke": woke,
+                 "note": "delivered to the target's inbox; it acks via relay-next/listen"})
+    return 0
+
+
+def _run_tasks(args) -> int:
+    """`tasks [--to-me]`: the tasks THIS session has open (sent, not yet acked), reconstructed
+    from the inbox on disk. --to-me: the tasks addressed TO this session that are still in its
+    inbox waiting to be consumed. One JSON line."""
+    try:
+        me = vrelayops.check_from(vrelayops.session_label())
+    except vrelayops.RelayError as e:
+        _print_json({"ok": False, "type": "tasks", "error": str(e)})
+        return 1
+    try:
+        inbox = vrelayops.read_inbox(vrelayops.inbox_path(me))
+    except (OSError, vrelayops.RelayError) as e:
+        _print_json({"ok": False, "type": "tasks", "status": 503,
+                     "error": f"inbox not readable: {type(e).__name__}"})
+        return 1
+    if getattr(args, "to_me", False):
+        incoming = [va2a.valid_task(e) for e in inbox]
+        incoming = [t for t in incoming if t is not None]
+        _print_json({"ok": True, "type": "tasks", "incoming":
+                     [{"id": t["id"], "from": t["from"], "text": t["text"]} for t in incoming]})
+        return 0
+    # our board: the tasks WE sent (outbox) closed by the acks/dues that came back (inbox)
+    try:
+        events = vrelayops.read_jsonl(vrelayops.outbox_path(me)) + inbox
+    except (OSError, vrelayops.RelayError):
+        events = inbox
+    open_ = va2a.open_tasks(events)
+    # a long-open task nags the sender: write the owed task_due into our OWN inbox so the next
+    # relay-next / listen surfaces it (the inbox is the state, so a fresh process agrees)
+    due = va2a.due_reminders(open_, me)
+    for ev in due:
+        try:
+            vrelayops.append_jsonl(vrelayops.inbox_path(me), ev)
+        except (OSError, vrelayops.RelayError):
+            pass
+    _print_json({"ok": True, "type": "tasks", "open": open_, "due": len(due),
+                 "board": [va2a.board_line(t) for t in open_]})
+    return 0
+
+
 def _client_request(args) -> dict:
     if args.cmd == "say":
         text = " ".join(args.text)
@@ -4178,6 +4338,22 @@ def _run_relay_next(args) -> int:
     return _relay_next_out(rel, frm, args.timeout)
 
 
+def _ack_task_back(frm: str, ev: dict) -> None:
+    """0.24.0: this session consumed a `task` event; write a `task_acked` back to the SENDER's
+    inbox so its board shows "angenommen". Best effort, never raises, never logs the task text."""
+    if ev.get("type") != va2a.TASK:
+        return
+    sender = va2a._clean_label(ev.get("from"))
+    tid = str(ev.get("id") or "")
+    if not sender or not tid or sender.lower() == va2a._clean_label(frm).lower():
+        return
+    try:
+        vrelayops.append_jsonl(vrelayops.inbox_path(sender),
+                               va2a.task_acked_event(tid, sender, frm))
+    except (OSError, vrelayops.RelayError) as e:
+        print(f"[warn] task ack not written ({type(e).__name__})", file=sys.stderr, flush=True)
+
+
 def _relay_next_out(rel: dict, frm: str, timeout) -> int:
     """The events of one relay-next round, one JSON line each (or one timeout line)."""
     try:
@@ -4192,6 +4368,7 @@ def _relay_next_out(rel: dict, frm: str, timeout) -> int:
         _print_json({"ok": True, "type": "timeout", "via": "relay"})
     for ev in evs:
         _print_json({**vrelayops.view(ev), "via": "relay"})
+        _ack_task_back(frm, ev)  # 0.24.0: a consumed task is acked back to the sender
     return 0
 
 
@@ -4635,6 +4812,20 @@ def main(argv: list[str] | None = None) -> None:
     p_sd.add_argument("--mime", default=None, metavar="M", help="mime type, e.g. text/csv")
     p_sd.add_argument("--id", default=None, metavar="ID", help="own message id [A-Za-z0-9._-]")
     _add_session(p_sd)
+    p_send = sub.add_parser(
+        "send", help="0.24.0: hand a directed task to ANOTHER agent session of this machine "
+        "(Phase 1, local only): `send --to <label> \"<Auftrag>\"`. Durable in that session's "
+        "inbox (it reads it via relay-next / listen / its hook) and an instant wake if it runs "
+        "a join; it acks back so your `tasks` shows it accepted. No broadcast (directed only)")
+    p_send.add_argument("--to", required=True, metavar="LABEL",
+                        help="the target session's label (name), case-insensitive")
+    p_send.add_argument("text", metavar="TASK", help="the task ('-' = stdin)")
+    p_tasks = sub.add_parser(
+        "tasks", help="0.24.0: the agent-to-agent tasks of THIS session, reconstructed from the "
+        "inbox on disk: the ones you sent that are still open ('Auftrag offen bei X seit MM:SS'), "
+        "or --to-me the ones addressed to you still waiting to be consumed")
+    p_tasks.add_argument("--to-me", action="store_true", default=False,
+                         help="list the tasks addressed TO this session (incoming), not the ones it sent")
     for dcmd, what in (("delta-rule", "a standing conversation rule (how Delta talks or behaves)"),
                        ("delta-note", "a fact Delta knows and answers from")):
         p_dn = sub.add_parser(
@@ -4779,6 +4970,10 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(_run_client(args))
     if args.cmd == "relay-next":
         sys.exit(_run_relay_next(args))
+    if args.cmd == "send":
+        sys.exit(_run_send(args))
+    if args.cmd == "tasks":
+        sys.exit(_run_tasks(args))
     if args.cmd == "listen":
         sys.exit(_run_listen(args))
     if args.cmd == "log-summary":

@@ -44,8 +44,10 @@ RECENT_KEEP = 20      # 0.21.7: acked events kept in memory after a compaction (
 # never kept across a join restart: only for the waiting `next` of the leaving process
 EPHEMERAL = frozenset({"restarting"})
 # 0.21.5: events that need the agent (the Stop hook warns on them, `listen` wakes on them)
+# 0.24.0 task/task_acked/task_due: agent-to-agent tasks (a2a.py), additive & backward compatible
 WAKE_TYPES = ("user", "decision", "helper_decision", "voicebot_left", "missed",
-              "status_request", "revise", "call_end", "data", "onboarding")  # 0.21.8 onboarding
+              "status_request", "revise", "call_end", "data", "onboarding",  # 0.21.8 onboarding
+              "task", "task_acked", "task_due")  # 0.24.0 a2a.WAKE_TYPES
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 
