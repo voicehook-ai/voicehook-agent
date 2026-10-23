@@ -112,7 +112,11 @@ Activity feed (0.10.0): Delta sees what you are doing, one line per tool call.
     hook install [--settings PATH]   add the Claude Code PreToolUse + PostToolUse hooks to
                                      settings.json (0.13.0: idempotent, adds Pre to an
                                      older Post-only install)
-    hook print                       print the settings.json snippet
+    hook install --agent codex       0.20.0: Codex hooks.json + notify + MCP server ($CODEX_HOME)
+    hook install --agent opencode    0.25.0: an opencode plugin (~/.config/opencode/plugin/
+                                     voicehook.js) that shells out to voicehook-agent-hook;
+                                     feeds tool calls + turn ends, backup first
+    hook print [--agent ...]         print the settings.json snippet (or the codex/opencode one)
     hook pre-tool-use|post-tool-use  the hooks themselves (fast path: voicehook-agent-hook)
     hook notification|permission-request  0.18.0: a session waits for the human (permission
                                      prompt, AskUserQuestion, idle): a decision on the
@@ -456,6 +460,7 @@ ONBOARDING_ENV = "VOICEHOOK_ONBOARDING_HINT"
 ONBOARDING_INVITE = [
     "voicehook-agent hook install",
     "voicehook-agent hook install --agent codex",
+    "voicehook-agent hook install --agent opencode",
     "voicehook-agent join <invite-url> --name <Name> --model <Model> --json",
     "voicehook-agent helper-credential --label <host> | ssh <host> 'voicehook-agent helper-import --as <host>'",
 ]
@@ -4772,11 +4777,16 @@ def main(argv: list[str] | None = None) -> None:
                                            "print", "install"])
     p_hook.add_argument("--settings", default=None, metavar="PATH",
                         help="install: settings.json to merge into (default ~/.claude/settings.json)")
-    p_hook.add_argument("--agent", choices=["claude", "codex"], default=None,
-                        help="0.20.0 print/install: claude (default, settings.json) or codex "
-                             "(hooks.json + notify + MCP server in $CODEX_HOME, backup first)")
+    p_hook.add_argument("--agent", choices=["claude", "codex", "opencode"], default=None,
+                        help="0.20.0 print/install: claude (default, settings.json), codex "
+                             "(hooks.json + notify + MCP server in $CODEX_HOME, backup first) or "
+                             "0.25.0 opencode (a plugin in ~/.config/opencode/plugin/ that shells "
+                             "out to voicehook-agent-hook, backup first)")
     p_hook.add_argument("--codex-home", default=None, metavar="DIR",
                         help="install --agent codex: Codex config dir (default $CODEX_HOME or ~/.codex)")
+    p_hook.add_argument("--opencode-home", default=None, metavar="DIR",
+                        help="install --agent opencode: opencode config dir "
+                             "(default $XDG_CONFIG_HOME/opencode or ~/.config/opencode)")
     # 0.21.0: hooks installed and runnable for sessions started without ~/.local/bin in PATH
     p_doc = sub.add_parser(
         "doctor", help="check the Claude Code hooks: installed in settings.json and runnable under "
