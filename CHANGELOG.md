@@ -3,7 +3,11 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
-## 0.25.0 (unreleased)
+## 0.25.0
+
+- **data-channel mode (`join --data-channel`):** a data-only session is only woken for turns addressed to it (name/mention or routed by Delta) or its own decisions; broad turns stay in the history silently. Saves plan budget and distraction. Server gate is live.
+- **no contentless auto-cards:** a generic "waiting / needs input" notification no longer creates an empty decision card (no options, no context); it stays an activity line. The Klartext rule now applies to automatic cards too.
+
 
 Rejoin / join hot-reload with identity: `voicehook-agent rejoin [--session <slug>]` restarts the
 running join IN PLACE using the existing self-update mechanism (the process re-execs itself,

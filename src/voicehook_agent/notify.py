@@ -101,6 +101,26 @@ WAIT_TEXT = "wartet auf Eingabe"
 PERM_TEXT = "wartet auf Freigabe"
 ASK_TEXT = "hat eine Frage"
 
+# A notification message that is ONLY a generic "waiting/needs input" phrase (no concrete
+# question) must never become a decision card: contentless, no options, no context, nobody
+# could answer it. The Klartext rule applies to automatic cards too -> such a message stays a
+# wait (activity line only). A real elicitation question (a concrete ask) does not match this.
+_CONTENTLESS = re.compile(
+    r"(?i)^(?:claude\s+|the\s+agent\s+|der\s+agent\s+)?(?:is\s+|ist\s+)?"
+    r"(?:waiting\s+for\s+(?:your\s+)?(?:input|response|reply|answer)"
+    r"|needs?\s+(?:your\s+)?input"
+    r"|input\s+needed"
+    r"|wartet\s+auf\s+(?:deine\s+)?(?:eingabe|antwort|freigabe)"
+    r"|eingabe\s+ben(?:ö|oe)tigt"
+    r"|ready(?:\s+for\s+input)?"
+    r"|bereit(?:\s+f(?:ü|ue)r\s+eingabe)?)\.?$")
+
+
+def _contentless(q: str) -> bool:
+    """True when the question is only a generic waiting/needs-input phrase (no concrete ask)."""
+    return bool(_CONTENTLESS.match(str(q or "").strip()))
+
+
 _URL = re.compile(r"(?i)\b(?:https?|wss?|ftp)://([^\s/?#'\"<>]+)[^\s'\"<>]*")
 _PATH = re.compile(r"(?<![\w.:/\-~])(?:~|\.{1,2})?(?:/[^\s/'\"`<>()\[\]{},;]+)+/?")
 _PERM_TOOL = re.compile(r"(?i)permission to use ([A-Za-z0-9_.:\-]{1,40})")
@@ -297,7 +317,8 @@ def classify(event: dict, label: str = "") -> dict | None:
                 # PermissionRequest of the same prompt asks with the concrete action
                 return {"kind": "wait", "text": f"{PERM_TEXT}: {tool}" if tool else PERM_TEXT}
             q = clean_text(msg)
-            if not q:
+            if not q or _contentless(q):
+                # generic "waiting/needs input" with no concrete question: activity only, no card
                 return {"kind": "wait", "text": ASK_TEXT}
             return {"kind": "ask", "text": f"{ASK_TEXT}: {tool}" if tool else ASK_TEXT,
                     "question": q, "options": [], "tool": tool, "prio": PRIO_GENERIC}
