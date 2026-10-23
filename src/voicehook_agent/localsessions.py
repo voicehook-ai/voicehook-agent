@@ -34,6 +34,7 @@ ENV_OFF = "VOICEHOOK_SESSIONS_HINT"
 CLAUDE, CODEX = "claude", "codex"
 INSTALL_CLAUDE = "voicehook-agent hook install"
 INSTALL_CODEX = "voicehook-agent hook install --agent codex"
+INSTALL_OPENCODE = "voicehook-agent hook install --agent opencode"
 
 
 def _off(env=None) -> bool:

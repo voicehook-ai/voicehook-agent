@@ -102,12 +102,14 @@ def session_hash(session_id: object) -> str:
     return _h(sid, "vh-session") if sid else ""
 
 
-SESSION_ID_ENVS = ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID")  # 0.20.0: Codex CLI too
+SESSION_ID_ENVS = ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID",
+                   "OPENCODE_SESSION_ID")  # 0.20.0 Codex CLI, 0.25.0 opencode too
 
 
 def own_session_id() -> str:
     """Id of the calling agent session: Claude Code (CLAUDE_CODE_SESSION_ID in the Bash tool
-    env), else Codex CLI (CODEX_THREAD_ID in its shell env, the session_id of its hooks)."""
+    env), else Codex CLI (CODEX_THREAD_ID) or opencode (OPENCODE_SESSION_ID) in its shell
+    env, the session_id of its hooks."""
     for name in SESSION_ID_ENVS:
         v = (os.environ.get(name) or "").strip()
         if v:
