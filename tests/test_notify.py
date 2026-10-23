@@ -91,8 +91,16 @@ def test_classify_notification_types():
                                           notification_type="idle_prompt")))
     assert idle == {"kind": "wait", "text": "wartet auf Eingabe"}
     for t in ("elicitation_dialog", "agent_needs_input"):
-        assert notify.classify(json.loads(_ev("Notification", message="Need input",
-                                              notification_type=t)))["kind"] == "ask"
+        # a concrete question becomes a decision
+        c = notify.classify(json.loads(_ev("Notification", message="Welche Datenbank nehmen?",
+                                           notification_type=t)))
+        assert c["kind"] == "ask" and c["question"] == "Welche Datenbank nehmen?"
+        # but a generic "waiting/needs input" phrase must NOT become a contentless card
+        for generic in ("Need input", "Needs your input", "Claude is waiting for your input",
+                        "wartet auf Eingabe", "waiting for response"):
+            g = notify.classify(json.loads(_ev("Notification", message=generic,
+                                               notification_type=t)))
+            assert g == {"kind": "wait", "text": notify.ASK_TEXT}, (t, generic, g)
     assert notify.classify(json.loads(_ev("Notification", message="x",
                                           notification_type="elicitation_complete"))) == {"kind": "done"}
     for t in ("auth_success", "agent_completed", "quota_auto_resume_fired"):
