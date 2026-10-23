@@ -7,6 +7,7 @@ voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the vers
 
 - **data-channel mode (`join --data-channel`):** a data-only session is only woken for turns addressed to it (name/mention or routed by Delta) or its own decisions; broad turns stay in the history silently. Saves plan budget and distraction. Server gate is live.
 - **no contentless auto-cards:** a generic "waiting / needs input" notification no longer creates an empty decision card (no options, no context); it stays an activity line. The Klartext rule now applies to automatic cards too.
+- **delivery receipt for helper answers (card 9):** when a helper session consumes the human's answer to one of its decision cards (via `relay-next`, MCP `next`, or its PostToolUse/Stop hook), the CLI sends a delivery receipt to the server (`POST /api/activity/relay/ack` with `{from, ids}`), so the asking card shows "beim Helfer angekommen". Remote relay only, best effort, never a steady poll, never an approval, content never logged; local relay is a no-op.
 
 
 Rejoin / join hot-reload with identity: `voicehook-agent rejoin [--session <slug>]` restarts the

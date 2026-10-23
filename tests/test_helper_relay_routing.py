@@ -157,7 +157,10 @@ def test_next_as_helper_returns_relay_events(monkeypatch, server, capsys):
                                           "verdict": "option", "option": 0, "text": "Ja"}]}
     rc, lines, _ = _cli(["next", "--timeout", "1"], capsys)
     assert rc == 0 and lines[0]["type"] == "decision" and lines[0]["via"] == "relay"
-    assert server.calls[-1]["path"] == "/api/activity/relay/next"
+    # the decision came from GET /next; card 9: consuming it sends a delivery receipt afterwards
+    assert [c["path"] for c in server.calls[-2:]] == [
+        "/api/activity/relay/next", "/api/activity/relay/ack"]
+    assert server.calls[-1]["body"] == {"from": "Strategie", "ids": ["d0a1b2c3d"]}
 
 
 def test_show_card_as_helper_goes_over_relay(monkeypatch, server, capsys):

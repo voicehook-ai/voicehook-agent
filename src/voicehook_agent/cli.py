@@ -4409,7 +4409,22 @@ def _relay_next_out(rel: dict, frm: str, timeout) -> int:
     for ev in evs:
         _print_json({**vrelayops.view(ev), "via": "relay"})
         _ack_task_back(frm, ev)  # 0.24.0: a consumed task is acked back to the sender
+    _ack_decisions(rel, frm, evs)  # card 9: a consumed decision answer is acked to the server
     return 0
+
+
+def _ack_decisions(rel: dict, frm: str, evs: list[dict]) -> None:
+    """Card 9 delivery receipt: this helper session consumed decision answers -> tell the server
+    (POST relay/ack) so the asking card shows "delivered to the helper". Best effort, never raises,
+    never logs content; local relay is a no-op (remote_ack handles both)."""
+    ids = [str(e.get("id")) for e in evs
+           if isinstance(e, dict) and e.get("type") == "decision" and e.get("id")]
+    if not ids:
+        return
+    try:
+        vrelayops.remote_ack(rel, frm, ids)
+    except (vrelayops.RelayError, OSError) as e:
+        print(f"[warn] delivery ack not sent ({type(e).__name__})", file=sys.stderr, flush=True)
 
 
 def _run_self_update(dry_run: bool = False, runner=None) -> int:

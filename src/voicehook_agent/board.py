@@ -831,9 +831,25 @@ def fetch_answers(rel: dict, frm: str) -> list[dict]:
                     if isinstance(e, dict) and relayops._is_stale(e):
                         vact._private_dir(vact.state_root())
                         relayops.append_jsonl(relayops.inbox_path(frm), e)
+                # card 9: GET /next consumed decision answers here too -> delivery receipt to the
+                # server (POST relay/ack), so the asking card shows "delivered to the helper".
+                _ack_decisions(rel, frm, evs)
     except Exception:  # noqa: BLE001, S110 - best effort, the next hook run polls again
         pass
     return out
+
+
+def _ack_decisions(rel: dict, frm: str, evs: list[dict]) -> None:
+    """Card 9: the hook consumed decision answers for `frm` over the remote relay -> ack their ids
+    to the server. Best effort, never raises, never logs content (ids only)."""
+    from . import relayops
+    ids = [str(e.get("id")) for e in evs
+           if isinstance(e, dict) and relayops._is_decision(e) and e.get("id")]
+    if ids:
+        try:
+            relayops.remote_ack(rel, frm, ids)
+        except (relayops.RelayError, OSError):
+            pass
 
 
 def _deliverable(o: dict) -> bool:

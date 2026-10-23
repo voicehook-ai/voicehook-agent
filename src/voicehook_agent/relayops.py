@@ -577,6 +577,23 @@ def remote_status(rel: dict, frm: str, body: dict, timeout: float = HTTP_TIMEOUT
     return {"ok": True}
 
 
+ACK_IDS_MAX = 50
+
+
+def remote_ack(rel: dict, frm: str, ids: list[str], timeout: float = HTTP_TIMEOUT_S) -> dict:
+    """0.25.x delivery receipt (voicehook-v4 card 9): tell the server this helper session (`frm`)
+    consumed the answers to these decisions (`ids`) via relay-next, so the asking card shows
+    "delivered to the helper". Best effort, a display signal only, never an approval. Never logs
+    content. On a local relay nothing is sent (the main agent sees the board itself)."""
+    ids = [str(i) for i in (ids or []) if isinstance(i, str) and i][:ACK_IDS_MAX]
+    if not ids or vmulti._is_local(rel):
+        return {"ok": True, "acked": 0}
+    status, out = _http(rel, "POST", endpoint(rel, "ack"), {"from": frm, "ids": ids}, timeout)
+    if status >= 300 or out.get("ok") is False:
+        return _err(status, out)
+    return {"ok": True, "acked": int(out.get("acked") or 0)}
+
+
 def card_body(req: dict) -> dict:
     """0.23.1 `show --card` of a helper -> relay body {kind, title?, text?, image?}. Panels belong
     to the main agent: --panel/--large -> RelayError 422."""
