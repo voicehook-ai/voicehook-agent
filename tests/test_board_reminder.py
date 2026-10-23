@@ -406,14 +406,16 @@ def test_fetch_answers_remote_and_inbox(monkeypatch):
     seen = []
 
     def http(rel, m, url, body, to):
-        seen.append((m, url, to))
-        return 200, {"events": [ANS]}
+        seen.append((m, url, body))
+        return 200, {"events": [ANS]} if url.endswith("timeout=0") else {"ok": True, "acked": 1}
     monkeypatch.setattr(relayops, "_http", http)
     got = REAL_FETCH(ms.load_relay(T0), "A B")
     assert [e["id"] for e in got] == ["d0a1b2c3d"]
     assert [e["id"] for e in got] == ["dinbox0001", "d0a1b2c3d"][1:] or True
-    assert seen == [("GET", "https://voicehook.ai/api/activity/relay/next?from=A%20B&timeout=0",
-                     board.FETCH_TIMEOUT_S)]
+    # GET /next consumes the decision; card 9: it is acked back to the server (delivery receipt)
+    assert seen[0] == ("GET", "https://voicehook.ai/api/activity/relay/next?from=A%20B&timeout=0", None)
+    assert seen[1] == ("POST", "https://voicehook.ai/api/activity/relay/ack",
+                       {"from": "A B", "ids": ["d0a1b2c3d"]})
     got = REAL_FETCH(ms.load_relay(T0), "A")
     assert got[0]["id"] == "dinbox0001"
 

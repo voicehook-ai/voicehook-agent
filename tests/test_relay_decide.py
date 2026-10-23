@@ -275,6 +275,52 @@ def test_relay_next_without_relay(capsys):
     assert rc == 3 and lines[0]["type"] == "no-relay"
 
 
+# --------------------------------------------------------------------------- #
+# card 9: a consumed decision answer is acked back to the server (delivery receipt)
+# --------------------------------------------------------------------------- #
+def test_relay_next_acks_consumed_decisions_to_server(monkeypatch, server, capsys):
+    _remote(server)
+    _helper(monkeypatch)
+    ev = {"type": "decision", "id": "d0a1b2c3d", "number": 3, "verdict": "yes", "by": "Oliver"}
+    server.reply("next", 200, {"events": [ev, dict(ev, id="d0000ffff", number=4)]})
+    rc, lines, err = _cli(["relay-next", "--timeout", "0"], capsys)
+    assert rc == 0 and err == ""
+    # the two decisions came out AND exactly one ack POST carried both ids, in order
+    assert [ln.get("id") for ln in lines if ln.get("type") == "decision"] == ["d0a1b2c3d", "d0000ffff"]
+    acks = [c for c in server.calls if c["path"] == "/api/activity/relay/ack"]
+    assert len(acks) == 1 and acks[0]["method"] == "POST"
+    assert acks[0]["auth"] == f"Bearer {TOKEN}" and TOKEN not in acks[0]["raw_path"]
+    assert acks[0]["body"] == {"from": "SE Refill", "ids": ["d0a1b2c3d", "d0000ffff"]}
+
+
+def test_relay_next_timeout_sends_no_ack(monkeypatch, server, capsys):
+    _remote(server)
+    _helper(monkeypatch)
+    server.reply("next", 200, {"events": []})
+    rc, lines, _ = _cli(["relay-next", "--timeout", "0"], capsys)
+    assert rc == 0 and lines == [{"ok": True, "type": "timeout", "via": "relay"}]
+    # no decisions consumed -> no delivery receipt (no extra POST, no steady poll)
+    assert not any(c["path"].endswith("/relay/ack") for c in server.calls)
+
+
+def test_relay_next_user_turn_is_not_acked(monkeypatch, server, capsys):
+    _remote(server)
+    _helper(monkeypatch)
+    # a user_turn (human spoke to the helper) is no decision answer -> never acked
+    server.reply("next", 200, {"events": [{"type": "user_turn", "text": "hi", "to": ["SE Refill"]}]})
+    rc, _, _ = _cli(["relay-next", "--timeout", "0"], capsys)
+    assert rc == 0
+    assert not any(c["path"].endswith("/relay/ack") for c in server.calls)
+
+
+def test_remote_ack_is_noop_on_local_relay(tmp_path):
+    """A local relay has no server board for the card, so remote_ack sends nothing (and never
+    builds a URL) — determinism, no network in the local path."""
+    rel = {"kind": "local", "dir": str(tmp_path), "label": "Mac", "room": "room-a"}
+    assert ro.remote_ack(rel, "SE Refill", ["d0a1b2c3d"]) == {"ok": True, "acked": 0}
+    assert ro.remote_ack(rel, "SE Refill", []) == {"ok": True, "acked": 0}  # empty ids: no-op
+
+
 def test_decide_wait_keeps_other_answers(monkeypatch, server, capsys):
     _remote(server)
     _helper(monkeypatch)
@@ -291,7 +337,11 @@ def test_decide_wait_keeps_other_answers(monkeypatch, server, capsys):
     assert stat.S_IMODE(os.stat(inbox).st_mode) == 0o600
     n = len(server.calls)
     rc, lines, _ = _cli(["relay-next", "--timeout", "0"], capsys)
-    assert lines == [dict(other, via="relay")] and len(server.calls) == n  # from the inbox
+    assert lines == [dict(other, via="relay")]                  # the leftover comes from the inbox
+    # card 9: consuming it (even from the inbox) sends its delivery receipt, nothing is re-fetched
+    new = server.calls[n:]
+    assert [c["path"] for c in new] == ["/api/activity/relay/ack"]
+    assert new[0]["body"] == {"from": "SE Refill", "ids": ["dOLD"]}
 
 
 def test_decide_wait_timeout(monkeypatch, server, capsys):
