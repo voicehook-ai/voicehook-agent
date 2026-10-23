@@ -1231,8 +1231,8 @@ voicehook-agent say "Test first, then roll out." --shape-preset arrow_right
 | `--json SHAPE` | full shape (`preset`, `polygon`, `path`, `multi` with `items`) |
 | `--label TEXT` / `--hold-ms N` / `--emotion LABEL` | caption <= 24 chars / 800..8000 ms / ring tint |
 
-Several `--preset/--polygon/--path` become one `multi` (max 4 items). Coordinates 0..1,
-(0,0) top left, max 200 points, a path `d` max 2 KB, the whole shape max 8 KB; label max
+Several `--preset/--polygon/--path` become one `multi` (max 12 items, e.g. a chart: axes, bars, trend line). Coordinates 0..1,
+(0,0) top left, max 400 points, a path `d` max 2 KB, the whole shape max 12 KB; label max
 24 chars without control characters, emoji or `<>`. The CLI validates like the server:
 invalid input prints `{"ok":false,"type":"invalid","error":...}` and exits 2, nothing is
 sent. At most one shape per 2 s per operator: faster returns `{"type":"rate_limited"}`
