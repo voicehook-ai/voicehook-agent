@@ -398,7 +398,20 @@ def own_helper_entry(*, session: str | None = None) -> tuple[Path, dict] | None:
             if e.get("owner_session") == skey:
                 return p, e
     free = [(p, e) for p, e in entries if not e.get("owner_session")]
-    return free[0] if len(free) == 1 else None
+    if len(free) == 1:
+        return free[0]
+    # 0.24.x: imported helper (helper-import wrote helpers/<name>.json with an owner_session
+    # bound to the importing session, never relay.json). When the hook fires without a
+    # VOICEHOOK_SESSION_LABEL and with a session hash that does not match the stored
+    # owner_session (own VOICEHOOK_STATE_DIR per helper = unambiguous), use the single
+    # usable entry even though it is bound to a different session. Only when no relay.json
+    # exists: if relay.json is present the main agent handles other-session routing via
+    # load_main_relay and the single-entry fallback must not hijack that path.
+    if load_main_relay() is not None:
+        return None
+    t = time.time()
+    usable = [(p, e) for p, e in entries if _usable(e, p, t) is not None]
+    return usable[0] if len(usable) == 1 else None
 
 
 def helper_state(entry: dict, path: Path | None = None, now: float | None = None) -> str:

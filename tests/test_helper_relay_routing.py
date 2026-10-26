@@ -302,10 +302,18 @@ def test_single_unbound_entry_serves_like_before(monkeypatch, server, capsys):
     assert rc == 0 and ro.client_relay(None)["token"] == TOKEN
 
 
-def test_never_another_sessions_entry(monkeypatch, server):
+def test_never_another_sessions_entry_with_two_entries(monkeypatch, server):
+    """Two entries, different sessions, no label: ambiguous -> each session only finds its own."""
     ms.write_helper("Zapmail", server.url, "tok.zap", "room-a", 3600,
                     owner_session=ms.session_hash("s-zap"))
+    ms.write_helper("Strat", server.url, "tok.strat", "room-a", 3600,
+                    owner_session=ms.session_hash("s-strat"))
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "s-strat")
+    assert ms.load_helper()["token"] == "tok.strat"
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "s-zap")
+    assert ms.load_helper()["token"] == "tok.zap"
+    # A third, unrelated session sees None (multiple entries, no match)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "s-other")
     assert ms.load_helper() is None and ro.client_relay(None) is None
 
 
@@ -391,3 +399,65 @@ def test_helper_sees_only_its_routed_events_bystander_nothing(monkeypatch, serve
     monkeypatch.delenv(ms.LABEL_ENV)
     for name in ("PostToolUse", "UserPromptSubmit", "Stop"):  # a bystander: nothing at all
         assert _hook(name, "bystander") is None, name
+
+
+# --------------------------------------------------------------------------- #
+# 0.24.x: imported helper (no relay.json) -- single-entry fallback
+# --------------------------------------------------------------------------- #
+def test_imported_helper_single_entry_found_without_label_or_session_match(monkeypatch, server, tmp_path):
+    """Core regression: helper-import wrote helpers/<name>.json with owner_session bound to
+    the importing session. Hook fires without VOICEHOOK_SESSION_LABEL and with a different
+    VOICEHOOK_STATE_DIR (own tmp dir per helper). No relay.json exists.
+    own_helper_entry / load_relay must return the single usable entry even though
+    owner_session does not match the hook's session hash."""
+    monkeypatch.setenv("VOICEHOOK_AGENT_HOME", str(tmp_path / "home"))
+    # Write ONE helper entry, bound to session 's-import' (the session that ran helper-import)
+    ms.write_helper("helper-bot", server.url, TOKEN, "room-a", 3600,
+                    owner_session=ms.session_hash("s-import"))
+    assert not ms.relay_path().exists()  # no relay.json -- the imported-helper case
+    # Hook fires as session 's-hook' (different hash, no VOICEHOOK_SESSION_LABEL set)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "s-hook")
+    sess = ms.session_hash("s-hook")
+    # Without the fix: own_helper_entry returns None -> load_relay returns None
+    # With the fix: single usable entry is returned
+    result = ms.own_helper_entry(session=sess)
+    assert result is not None, "single usable entry must be found even with non-matching owner_session"
+    assert result[1]["helper"] == "helper-bot"
+    assert ms.load_relay(session=sess) is not None
+    assert ms.load_relay(session=sess)["token"] == TOKEN
+
+
+def test_label_match_takes_precedence_over_single_entry_fallback(monkeypatch, server, tmp_path):
+    """Zweig 1 (label match) still wins over the single-entry fallback."""
+    monkeypatch.setenv("VOICEHOOK_AGENT_HOME", str(tmp_path / "home"))
+    ms.write_helper("named-bot", server.url, TOKEN, "room-a", 3600,
+                    owner_session=ms.session_hash("s-other"))
+    ms.write_helper("other-bot", server.url, "fake.other.tok.x", "room-a", 3600,
+                    owner_session=ms.session_hash("s-second"))
+    monkeypatch.setenv(ms.LABEL_ENV, "named-bot")
+    result = ms.own_helper_entry(session=ms.session_hash("s-unrelated"))
+    assert result is not None and result[1]["helper"] == "named-bot"
+    assert ms.load_relay(session=ms.session_hash("s-unrelated"))["token"] == TOKEN
+
+
+def test_session_match_takes_precedence_over_single_entry_fallback(monkeypatch, server, tmp_path):
+    """Zweig 2 (session match) still wins over the single-entry fallback."""
+    monkeypatch.setenv("VOICEHOOK_AGENT_HOME", str(tmp_path / "home"))
+    ms.write_helper("my-bot", server.url, TOKEN, "room-a", 3600,
+                    owner_session=ms.session_hash("s-mine"))
+    monkeypatch.delenv(ms.LABEL_ENV, raising=False)
+    result = ms.own_helper_entry(session=ms.session_hash("s-mine"))
+    assert result is not None and result[1]["helper"] == "my-bot"
+
+
+def test_multiple_bound_entries_no_label_no_match_returns_none(monkeypatch, server, tmp_path):
+    """Several bound entries, no label, no session match: ambiguous -> None."""
+    monkeypatch.setenv("VOICEHOOK_AGENT_HOME", str(tmp_path / "home"))
+    ms.write_helper("bot-a", server.url, TOKEN, "room-a", 3600,
+                    owner_session=ms.session_hash("s-a"))
+    ms.write_helper("bot-b", server.url, "fake.other.tok.y", "room-a", 3600,
+                    owner_session=ms.session_hash("s-b"))
+    monkeypatch.delenv(ms.LABEL_ENV, raising=False)
+    result = ms.own_helper_entry(session=ms.session_hash("s-unrelated"))
+    assert result is None, "multiple entries without label/session match must be None (ambiguous)"
+    assert ms.load_relay(session=ms.session_hash("s-unrelated")) is None
