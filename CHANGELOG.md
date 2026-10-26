@@ -54,6 +54,28 @@ instead of leaving the call and re-joining.
 - **several local joins:** a bare `rejoin` errors and lists the joins (`--session` required); no
   silent "rejoin all".
 
+Artefakt-Karten: PDF, CSV and Markdown (and images, as before) as cards in the call, plus
+attachments on status boards. Server side: voicehook-v4 (POST /api/card/file, relay/show with
+`data`/`name`, board field `attach`), built in parallel.
+
+- **`show --file PATH`:** kind from the extension (.pdf, .csv, .md/.markdown, .png/.jpg/.jpeg/
+  .webp/.svg), or `--card pdf|csv|md|image --file PATH`. Title default = file name, `--text` =
+  caption. Checked before anything is sent (exit 2): pdf max 10 MB and `%PDF-`, csv/md max 2 MB
+  valid UTF-8.
+- **Own join:** upload to `POST /api/card/file`, then `operator.card` with `url, mime, name,
+  size`; ok only once a call page confirmed it (`vh.card_ack`, up to 30 s), else
+  `not_shown`/`no_human` like images. Old server (404/405): a clear message.
+- **Helper:** `relay/show` with `kind, name, data`; the server publishes and confirms.
+- **`status --attach FILE`** (repeatable, max 8): each file is shown as a card first, then the
+  board carries `attach [{id, name, kind}]` (also over `relay/status`). One upload fails: exit 1,
+  the status is not sent. The helper pump passes `attach` through unchanged.
+- **Control socket 16 MB** (was 4 MB): a 10 MB PDF is ~13.4 MB base64; the request stays
+  self-contained (the join never reads the caller's paths).
+- **Routing fail-closed** like every command (see above): `show --file` and `status --attach`
+  only go over this session's own join or own helper relay; another session's join only:
+  `foreign-join`, dead own helper entry: `relay-dead` (exit 3), nothing uploaded.
+- Never logged: file contents; only kind and size.
+
 ## 0.24.0 (2026-10-22)
 
 Targeted wake, to save tokens: until now every final user turn woke every agent session in the

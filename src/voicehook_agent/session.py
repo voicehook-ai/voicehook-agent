@@ -498,7 +498,9 @@ Handler = Callable[[dict], Awaitable[dict]]
 # 0.23.1: one request line may carry an image card (PNG/JPEG/WebP max 1 MB -> base64
 # ~1.4 MB, SVG max 300 KB). asyncio's default line limit is 64 KiB: a real screenshot
 # overran it, the join dropped the connection without an answer (live 21.10.2026).
-REQUEST_MAX = 4 * 1024 * 1024
+# 0.25.0: a pdf card (max 10 MB -> base64 ~13.4 MB + JSON) goes through the same socket, so the
+# limit is 16 MB (the request stays self-contained: the join never reads the caller's paths).
+REQUEST_MAX = 16 * 1024 * 1024
 
 
 class ControlServer:
