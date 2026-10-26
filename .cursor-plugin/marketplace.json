@@ -1,0 +1,17 @@
+{
+  "name": "voicehook",
+  "owner": {
+    "name": "voicehook.ai",
+    "email": "support@voicehook.ai"
+  },
+  "metadata": {
+    "description": "voicehook.ai plugins for Cursor. Talk with your agents."
+  },
+  "plugins": [
+    {
+      "name": "voicehook-join",
+      "source": "plugins/voicehook-join",
+      "description": "Talk with your agents. Talk to your coding agents from your phone while they keep working, with a shared board and decisions across sessions."
+    }
+  ]
+}
