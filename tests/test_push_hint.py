@@ -2,9 +2,6 @@
 from __future__ import annotations
 
 import json
-import sys
-
-import pytest
 
 from voicehook_agent import activity, relayops
 
