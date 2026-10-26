@@ -122,3 +122,58 @@ def decision_ref(value: object) -> str | None:
     if _DID_RX.match(v) or (v.isdigit() and 0 < int(v) < 10000):
         return v
     return None
+
+
+# --------------------------------------------------------------------------- #
+# Stop hook: extract a candidate question sentence from the last turn's text
+# --------------------------------------------------------------------------- #
+_SENT_SEP = re.compile(r"(?<=[.!?])\s+")
+_VERB_LIKE = re.compile(r"(?i)\b(?:"
+                        r"soll(?:en|te)?|will(?:st|en)?|kann(?:st)?|darf(?:st)?|muss(?:t)?|"
+                        r"mag(?:st)?|wäre|würde(?:st)?|ist|sind|hat|haben|bin|bist|warte[nt]?|"
+                        r"shall|should|will|can|may|must|would|could|is|are|have|has|do|does|did|"
+                        r"sagen|machen|tun|schicken|starten|prüfen|deployen|freigeben|fortfahren|"
+                        r"weiterma(?:chen)?|proceed|continue|confirm|start|send|deploy|check|approve"
+                        r")\b")
+_Q_MIN, _Q_MAX = 12, 160
+
+
+def extract_question(text: object) -> str | None:
+    """Deterministic: the last sentence ending with '?' or the one matching `waiting()`.
+
+    Returns the sentence when it is plausible as a whole question:
+    - between _Q_MIN and _Q_MAX chars (after strip)
+    - contains at least one verb-like word (Verb pattern above)
+    - has at least 3 whitespace-separated tokens
+    Otherwise returns None.
+    """
+    t = str(text or "").strip()
+    if not t:
+        return None
+
+    # flatten fences / markdown noise (same approach as asks.py)
+    import re as _re
+    body = _re.sub(r"```.*?(?:```|$)", "", t, flags=_re.DOTALL).strip()
+
+    # split into sentences; consider both "." and "?" boundaries
+    sentences = [s.strip() for s in _SENT_SEP.split(body) if s.strip()]
+
+    # 1) last sentence ending with "?"
+    q_sent = next((s for s in reversed(sentences) if s.rstrip(" )").endswith("?")), None)
+
+    # 2) fallback: sentence that matches waiting()
+    if q_sent is None:
+        q_sent = next((s for s in reversed(sentences) if waiting(s)), None)
+
+    if q_sent is None:
+        return None
+
+    # plausibility checks
+    q = q_sent.strip()
+    if not (_Q_MIN <= len(q) <= _Q_MAX):
+        return None
+    if len(q.split()) < 3:
+        return None
+    if not _VERB_LIKE.search(q):
+        return None
+    return q

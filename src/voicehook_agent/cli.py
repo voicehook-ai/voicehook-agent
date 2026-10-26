@@ -4274,6 +4274,9 @@ def _run_relay_client(args, req: dict, rel: dict) -> int:
             res = (vrelayops.local_request(rel, frm, "decide", body) if local
                    else vrelayops.remote_decide(rel, frm, body))
             out = {**res, "type": "decide", "via": "relay"}
+            if res.get("ok"):
+                from . import activity as _vact
+                _vact.mark_turn_decided()  # 0.25.x: stop hook knows a decide was sent this turn
             if res.get("ok") and getattr(args, "wait", None) == WAIT_ANSWER and res.get("id"):
                 evs = vrelayops.next_events(rel, frm, max(0.0, float(args.timeout)),
                                             match_id=str(res["id"]))
@@ -4370,6 +4373,8 @@ def _run_waiting(args) -> int:
             if not res.get("ok"):
                 return _waiting_out({**res, "ok": False, "type": "decide",
                                      "error": res.get("error") or "decide failed, board not set"}, 1)
+            from . import activity as _vact
+            _vact.mark_turn_decided()  # 0.25.x: stop hook knows a decide was sent this turn
             decision = {"id": res.get("id"), "number": res.get("number"), "question": q}
         else:
             r = vwait.decision_ref(ref)

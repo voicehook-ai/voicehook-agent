@@ -1157,6 +1157,108 @@ def listen_guard(raw: str) -> dict | None:
         return None
 
 
+# --------------------------------------------------------------------------- #
+# Stop hook: "decided this turn" marker (stophook-decided.json in state_root)
+# --------------------------------------------------------------------------- #
+_DECIDED_NAME = "stophook-decided.json"
+
+
+def mark_turn_decided() -> None:
+    """Write a marker so the Stop hook knows a decide-card was sent this turn. Never raises."""
+    try:
+        import time
+        _private_dir(state_root())
+        _write_private(state_root() / _DECIDED_NAME, json.dumps({"at": time.time()}))
+    except Exception:  # noqa: BLE001, S110
+        pass
+
+
+def clear_turn_decided() -> None:
+    """UserPromptSubmit: new turn starts, clear the marker. Never raises."""
+    try:
+        (state_root() / _DECIDED_NAME).unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001, S110
+        pass
+
+
+def _turn_decided() -> bool:
+    """True when the marker exists (decide was sent during this turn)."""
+    try:
+        return (state_root() / _DECIDED_NAME).exists()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def stop_force_decide(raw: str, event: dict) -> dict | None:
+    """0.25.x Stop hook: if the last assistant turn ended with a question/waiting text and no
+    decide-card was sent, auto-post one (or block with exit-3 hint when no clean sentence
+    found). Never raises. Returns {"decision":"block","reason":...} or None."""
+    try:
+        from . import waitcheck as vwait
+        if vwait.off():
+            return None
+        from . import multisession as vmulti
+        if vmulti.load_relay() is None:
+            return None  # not in a call
+        if vmulti.own_helper_entry() is None:
+            return None  # not a helper session
+        if _turn_decided():
+            return None  # decide-card already sent this turn
+
+        from . import asks as vasks
+        text = vasks.last_message(event)
+        if not text:
+            return None
+
+        # is there any question/waiting signal at all?
+        has_q = "?" in text
+        has_wait = vwait.waiting(text) is not None
+        if not has_q and not has_wait:
+            return None
+
+        q = vwait.extract_question(text)
+        if q is not None:
+            # auto-post a decide card
+            _auto_decide(q, event, vmulti)
+            return None  # card sent, don't block
+
+        # question/waiting detected but no clean sentence -> block
+        return {
+            "decision": "block",
+            "reason": (
+                "Du beendest den Turn mit einer Frage/Warten an den Menschen, aber ohne "
+                "Entscheidungskarte. Stelle eine:\n"
+                "  voicehook-agent decide --question '<ganzer Satz mit ?>'"
+                " --context '<was passiert, Ja/Nein-Konsequenzen>'"
+            ),
+        }
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _auto_decide(question: str, event: dict, vmulti: object) -> None:
+    """Post a decide-card for `question` over the relay. Best-effort, never raises."""
+    try:
+        from . import relayops as vrelayops
+        rel = vmulti.load_relay()  # type: ignore[union-attr]
+        if rel is None:
+            return
+        frm = vrelayops.check_from(vrelayops.session_label())
+        body = {
+            "question": question,
+            "context": ("Automatisch aus deinem Turn erzeugt, weil er mit einer Frage/Warten "
+                        "endete. Bitte entscheiden."),
+        }
+        local = vmulti._is_local(rel)  # type: ignore[union-attr]
+        if local:
+            vrelayops.local_request(rel, frm, "decide", body)
+        else:
+            vrelayops.remote_decide(rel, frm, body)
+        mark_turn_decided()
+    except Exception:  # noqa: BLE001, S110
+        pass
+
+
 def notify_progress(raw: str) -> None:
     try:
         from . import notify
@@ -1226,6 +1328,8 @@ def main(argv: list[str] | None = None) -> int:
                 raw = ""
             if cmd == "stop":  # 0.21.4: own join connected, nobody listens -> block the stop
                 guard = listen_guard(raw)
+            if cmd == "user-prompt-submit":  # 0.25.x: new turn starts, reset decided marker
+                clear_turn_decided()
             if cmd in ("notification", "permission-request"):
                 notify_hook(raw)  # 0.18.0: question/permission -> Decision Board + feed
             elif cmd == "pre-tool-use":
@@ -1239,6 +1343,15 @@ def main(argv: list[str] | None = None) -> int:
                 notify_progress(raw)  # 0.18.0: the session goes on, its question leaves
             # 0.21.0 (board.py): session state, board reminder, answers to own questions
             out = board_hook(raw)
+            if cmd == "stop":  # 0.25.x: helper ends turn with question/waiting -> force decide
+                try:
+                    _ev = json.loads(raw) if raw and raw.strip() else {}
+                except Exception:  # noqa: BLE001
+                    _ev = {}
+                fd_out = stop_force_decide(raw, _ev if isinstance(_ev, dict) else {})
+                if fd_out is not None:
+                    from . import listenguard
+                    out = listenguard.merge(out, fd_out)
         if guard:
             from . import listenguard
             out = listenguard.merge(out, guard)
