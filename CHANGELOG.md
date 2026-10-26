@@ -3,6 +3,10 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.26.0
+
+- **helper activity reaches the call (fix):** the automatic activity hook resolves its relay via `multisession.load_relay`, which now falls back to the session's imported helper credential (`helpers/<name>.json`) when there is no `relay.json`. An imported relay helper had a credential (so `status`/`decide` worked as direct calls) but no `relay.json`, so the hook posted nowhere and the helper's activity feed never showed in the call. `own_helper_entry` additionally uses the single usable helper entry in its state dir even when bound to another session (a dedicated `VOICEHOOK_STATE_DIR` per helper is unambiguous); with several entries and no label/session match it stays `None`, and when a real `relay.json` exists the main join never borrows a foreign token.
+
 ## 0.25.0
 
 - **data-channel mode (`join --data-channel`):** a data-only session is only woken for turns addressed to it (name/mention or routed by Delta) or its own decisions; broad turns stay in the history silently. Saves plan budget and distraction. Server gate is live.
