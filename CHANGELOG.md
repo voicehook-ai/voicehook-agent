@@ -3,6 +3,12 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.27.0
+
+- **no PushNotification during a live call:** the activity hook prints a non-blocking hint when a `PushNotification` tool fires while a call is active (relay present) — report via `activity`/`decide`/`status` instead. `join` and `helper-import` help mention it. Push only when no call is active.
+- **leaner status board (done cap):** a helper's status board sends at most the last 3 `done` entries, so stale completed items stop piling up in the call.
+- **board hygiene (CLI half of server #703):** `decide --ttl-s` (per-card TTL) and `delete` now reports `{deleted, hidden}`; `status --ttl-s` per entry with expired entries dropped on the 10-minute repeat; `operator.leave {}` is published on leave / join-end and a pump `leave` packet publishes `operator.leave {sub}`; `board`/`recent` pass through `hidden`, `closed`, `unresolved`, `ttl_s`, `expires_in_s`; verdict `expired` is accepted for agent cards; `status --waiting` without `--question`/`--context` is now a CLI error.
+
 ## 0.26.0
 
 - **helper activity reaches the call (fix):** the automatic activity hook resolves its relay via `multisession.load_relay`, which now falls back to the session's imported helper credential (`helpers/<name>.json`) when there is no `relay.json`. An imported relay helper had a credential (so `status`/`decide` worked as direct calls) but no `relay.json`, so the hook posted nowhere and the helper's activity feed never showed in the call. `own_helper_entry` additionally uses the single usable helper entry in its state dir even when bound to another session (a dedicated `VOICEHOOK_STATE_DIR` per helper is unambiguous); with several entries and no label/session match it stays `None`, and when a real `relay.json` exists the main join never borrows a foreign token.
