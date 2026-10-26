@@ -199,7 +199,8 @@ def test_pump_and_relay_boards_land_in_ledger(monkeypatch):
     ctl.helper_pump, ctl.helper_http = SimpleNamespace(), object()
     seen = {}
 
-    async def run_pump(http, publish_status, decide, append_activity, stop, show_card=None):
+    async def run_pump(http, publish_status, decide, append_activity, stop, show_card=None,
+                       **_kw):  # board-hygiene: accept publish_leave + future kwargs
         await publish_status({"sub": "crown: Armin-Box", "doing": "Update", "open": [], "done": []})
         seen["d"] = await decide({"question": "Neustart?", "sender": "crown: Armin-Box"})
     ctl.helper_pump.run = run_pump

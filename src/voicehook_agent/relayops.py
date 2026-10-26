@@ -405,7 +405,8 @@ def clear_dir(dir_: Path) -> None:
 # request bodies (both relay kinds)
 # --------------------------------------------------------------------------- #
 DECIDE_KEYS = ("question", "options", "recommend", "id", "delete", "context", "recent",  # 0.21.0
-               "faq")  # 0.21.4: hidden follow-up questions for the voicebot
+               "faq",  # 0.21.4: hidden follow-up questions for the voicebot
+               "ttl_s")  # board-hygiene: optional TTL in seconds
 STATUS_KEYS = ("doing", "open", "done", "project")
 
 
@@ -416,9 +417,10 @@ def decide_body(req: dict) -> dict:
 DONE_CAP = 3   # relay: send only the last 3 done entries (oldest drop silently)
 
 
-def status_body(board: dict) -> dict:
+def status_body(board: dict, now: float | None = None) -> dict:
     """{doing, open, done, project?} of a CLI board (faq is not part of the relay contract;
-    0.21.0: project = `status --project`). done[] is capped to the newest DONE_CAP entries."""
+    0.21.0: project = `status --project`). done[] is capped to the newest DONE_CAP entries.
+    board-hygiene: `now` = current time; items whose `_expires_at` is past are dropped from meta."""
     out: dict = {}
     if isinstance(board.get("doing"), str):
         out["doing"] = board["doing"]
@@ -431,11 +433,38 @@ def status_body(board: dict) -> dict:
         out["project"] = board["project"]
     if board.get("state") in ("arbeitet", "wartet", "frage", "leerlauf", "problem"):
         out["state"] = board["state"]  # 0.21.6 `status --waiting`: frage (server field state)
-    if board.get("meta"):  # 0.21.4: per item {context, faq}; a server without it ignores it
+    if board.get("meta"):  # 0.21.4: per item {context, faq, ttl_s?}; a server without it ignores it
         from . import relay as vrelay
-        meta = vrelay.clean_board_meta(board["meta"], out)
-        if meta:
-            out["meta"] = meta
+        raw_meta = board["meta"]
+        if now is not None:  # board-hygiene: filter expired items BEFORE clean_board_meta
+            raw_meta = _filter_expired_meta(raw_meta, now)
+        if raw_meta:
+            meta = vrelay.clean_board_meta(raw_meta, out)
+            if meta:
+                out["meta"] = meta
+    return out
+
+
+def _filter_expired_meta(meta: dict, now: float) -> dict:
+    """Drop raw meta entries whose `_expires_at` (unix ts) is in the past (board-hygiene)."""
+    out: dict = {}
+    for k, v in meta.items():
+        if k == "doing":
+            if isinstance(v, dict):
+                exp = v.get("_expires_at")
+                if exp is None or now < exp:
+                    out["doing"] = v
+        else:  # open / done lists
+            filtered = []
+            for item in (v if isinstance(v, list) else []):
+                if isinstance(item, dict):
+                    exp = item.get("_expires_at")
+                    if exp is None or now < exp:
+                        filtered.append(item)
+                else:
+                    filtered.append(item)
+            if filtered:
+                out[k] = filtered
     return out
 
 
@@ -465,6 +494,11 @@ def _valid_decide(body: object) -> dict | None:
             return None
         if m.get("faq"):
             out["faq"] = m["faq"]
+    if body.get("ttl_s") is not None:  # board-hygiene
+        v = body["ttl_s"]
+        if not isinstance(v, int) or isinstance(v, bool) or v < 1:
+            return None
+        out["ttl_s"] = v
     return out if out.get("question") or out.get("id") else None
 
 
@@ -571,7 +605,7 @@ def remote_decide(rel: dict, frm: str, body: dict, timeout: float = HTTP_TIMEOUT
     status, out = _http(rel, "POST", endpoint(rel, "decide"), {"from": frm, **body}, timeout)
     if status >= 300 or out.get("ok") is False:
         return _err(status, out)
-    return {"ok": True, **{k: out[k] for k in ("id", "number") if k in out}}
+    return {"ok": True, **{k: out[k] for k in ("id", "number", "deleted", "hidden") if k in out}}
 
 
 def remote_status(rel: dict, frm: str, body: dict, timeout: float = HTTP_TIMEOUT_S) -> dict:

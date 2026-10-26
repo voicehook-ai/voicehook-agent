@@ -866,7 +866,7 @@ def helper_decision_event(payload: dict, *, frm: str | None = None, label: str |
               "number": payload.get("number"), "question": question, "verdict": payload.get("verdict")}
         if "option" in payload:
             ev["option"] = payload.get("option")
-        if payload.get("verdict") in ("other", "unclear"):  # 0.21.0 unclear: why, as text
+        if payload.get("verdict") in ("other", "unclear", "expired"):  # 0.21.0 unclear/board-hygiene expired: why, as text
             ev["text"] = str(payload.get("answer") or payload.get("text") or "")
         if payload.get("changed"):
             ev["changed"] = True
@@ -960,7 +960,7 @@ def item_meta(context: str | None, faq_raw: list[str] | None, warn=None) -> dict
 
 
 def clean_meta(obj: object) -> dict | None:
-    """One item's {context, faq} from outside (relay request): None = invalid."""
+    """One item's {context, faq, ttl_s?} from outside (relay request): None = invalid."""
     if not isinstance(obj, dict):
         return None
     out: dict = {}
@@ -983,6 +983,11 @@ def clean_meta(obj: object) -> dict | None:
             pairs.append({"q": f["q"], "a": f["a"]})
         if pairs:
             out["faq"] = pairs
+    ttl = obj.get("ttl_s")  # board-hygiene: optional per-item TTL in seconds
+    if ttl is not None:
+        if not isinstance(ttl, int) or isinstance(ttl, bool) or ttl < 1:
+            return None
+        out["ttl_s"] = ttl
     return out
 
 

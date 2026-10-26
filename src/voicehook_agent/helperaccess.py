@@ -83,7 +83,8 @@ class Pump:
     async def run(self, http, *, publish_status: Callable[[dict], Awaitable[None]],
                   decide: Callable[[dict], Awaitable[dict]],
                   append_activity: Callable[[str], None], stop: asyncio.Event,
-                  show_card: Callable[[dict], Awaitable[dict]] | None = None) -> None:
+                  show_card: Callable[[dict], Awaitable[dict]] | None = None,
+                  publish_leave: Callable[[dict], Awaitable[None]] | None = None) -> None:
         """Long-poll until `stop` or the hub ended; a network error waits 2 s and retries."""
         while not stop.is_set() and not self.ended:
             try:
@@ -107,7 +108,7 @@ class Pump:
             for item in data.get("items") or []:
                 try:
                     await self._apply(http, item, publish_status, decide, append_activity,
-                                      show_card)
+                                      show_card, publish_leave)
                 except asyncio.CancelledError:
                     raise
                 except Exception:  # noqa: BLE001, S112  one bad packet never stops the pump
@@ -117,7 +118,7 @@ class Pump:
                 return
 
     async def _apply(self, http, item: dict, publish_status, decide, append_activity,
-                     show_card=None) -> None:
+                     show_card=None, publish_leave=None) -> None:
         kind = item.get("kind") if isinstance(item, dict) else None
         if kind == "activity" and isinstance(item.get("line"), str):
             # server line `HH:MM:SS relay: Helfer <label>: ...`: local time like every line
@@ -134,6 +135,10 @@ class Pump:
             t = asyncio.ensure_future(self._card(http, str(item.get("id") or ""), item["card"], show_card))
             _BG.add(t)
             t.add_done_callback(_BG.discard)
+        elif kind == "leave" and publish_leave is not None and isinstance(item.get("payload"), dict):
+            # board-hygiene: a helper left; publish operator.leave with its sub
+            await publish_leave(item["payload"])
+
 
     async def _card(self, http, rid: str, card: dict, show_card) -> None:
         try:
