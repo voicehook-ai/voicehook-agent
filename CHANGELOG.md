@@ -3,6 +3,10 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.28.0
+
+- **opencode as a supported local agent:** `hook install --agent opencode` installs a plugin that shells out to `voicehook-agent-hook`, so an opencode session's activity, status and decisions feed the call like Claude Code / Codex. Onboarding text lists the opencode line.
+
 ## 0.27.0
 
 - **no PushNotification during a live call:** the activity hook prints a non-blocking hint when a `PushNotification` tool fires while a call is active (relay present) — report via `activity`/`decide`/`status` instead. `join` and `helper-import` help mention it. Push only when no call is active.
