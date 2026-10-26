@@ -3,6 +3,10 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.29.0
+
+- **open questions are forced onto the board (deterministic):** when a helper session in an active call ends its turn with a question (a `?`-sentence) or a waiting-for-the-human phrasing and has not posted a decision card this turn, the Stop hook deterministically (regex, no LLM) extracts the sentence and creates the `decide` card itself; if no clean whole-sentence question can be formed, it blocks the turn and asks for an explicit `decide`. A per-turn marker avoids double cards. Only fires for a helper in an active call; `VOICEHOOK_WAIT_CHECK=0` disables it.
+
 ## 0.28.0
 
 - **opencode as a supported local agent:** `hook install --agent opencode` installs a plugin that shells out to `voicehook-agent-hook`, so an opencode session's activity, status and decisions feed the call like Claude Code / Codex. Onboarding text lists the opencode line.
