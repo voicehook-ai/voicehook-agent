@@ -3,6 +3,10 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.30.0
+
+- **helper liveness (CLI half):** the CLI consumes the server's `operator.helper_stale` / `operator.helper_fresh` events and tracks a per-helper liveness state; `board` and `task` mark a stale helper (`liveness: "stale"` + `grund: "no_poll" | "no_ack"`). The server derives `last_seen` from the existing relay poll (no new heartbeat call); `relay-next` polls well under `VOICEHOOK_HELPER_STALE_S` (90s). The existing ack-on-consume (delivery receipt) is covered by a test, as the `no_ack` reason relies on it.
+
 ## 0.29.0
 
 - **open questions are forced onto the board (deterministic):** when a helper session in an active call ends its turn with a question (a `?`-sentence) or a waiting-for-the-human phrasing and has not posted a decision card this turn, the Stop hook deterministically (regex, no LLM) extracts the sentence and creates the `decide` card itself; if no clean whole-sentence question can be formed, it blocks the turn and asks for an explicit `decide`. A per-turn marker avoids double cards. Only fires for a helper in an active call; `VOICEHOOK_WAIT_CHECK=0` disables it.
