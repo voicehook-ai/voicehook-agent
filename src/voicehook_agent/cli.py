@@ -936,10 +936,18 @@ async def _run_helper_pump(room, ctl: _Control, stop: asyncio.Event) -> None:
         if ctl.activity_path is not None:
             vactivity.append_line(ctl.activity_path.parent, vactivity.scrub_line(line))
 
+    async def publish_leave(payload: dict) -> None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        try:
+            await room.local_participant.publish_data(data, reliable=True, topic="operator.leave")
+        except Exception:  # noqa: BLE001, S110  best effort
+            pass
+
     await pump.run(http, publish_status=publish_status,
                    decide=decide,
                    append_activity=append_activity, stop=stop,
-                   show_card=lambda card: _publish_helper_card(ctl, room, card))
+                   show_card=lambda card: _publish_helper_card(ctl, room, card),
+                   publish_leave=publish_leave)
 
 
 async def _publish_helper_card(ctl: _Control, room, card: dict) -> dict:
@@ -1820,6 +1828,13 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
                                    ctl.say_tracker, ctl.echo)
             except Exception as e:  # noqa: BLE001
                 print(f"[error] leave say failed: {e!r}", file=sys.stderr, flush=True)
+        if ctl.room is not None:  # board-hygiene: notify helpers that this operator left
+            try:
+                await ctl.room.local_participant.publish_data(
+                    json.dumps({}, ensure_ascii=False).encode("utf-8"),
+                    reliable=True, topic="operator.leave")
+            except Exception:  # noqa: BLE001, S110  best effort
+                pass
         ctl.quit.set()
         return {"ok": True, "type": "leaving"}
     if cmd == "activity":
@@ -3894,6 +3909,9 @@ def _client_request(args) -> dict:
                 faq = _decide_faq(args)
                 if faq:
                     req["faq"] = faq
+                ttl_s = getattr(args, "ttl_s", None)
+                if ttl_s is not None:
+                    req["ttl_s"] = ttl_s
                 if len(req) == 2:
                     raise ValueError("decide --id: pass --question, --option, --recommend, --context "
                                      "or --recent (or --delete)")
@@ -3918,6 +3936,9 @@ def _client_request(args) -> dict:
             req["context"] = context
         if recent:
             req["recent"] = recent
+        ttl_s = getattr(args, "ttl_s", None)
+        if ttl_s is not None:
+            req["ttl_s"] = ttl_s
         return req
     faq_raw = getattr(args, "faq", None) or []
     project = vui.project_field(getattr(args, "project", None))  # 0.21.0
@@ -3940,6 +3961,23 @@ def _client_request(args) -> dict:
             warn(w)
         meta = status_meta(getattr(args, "item_seq", None) or [], board,
                            len(args.open or []), len(args.done or []), warn)
+        ttl_s = getattr(args, "ttl_s", None)
+        if ttl_s is not None:
+            # board-hygiene: annotate meta items with _expires_at for filtering on re-publish
+            import time as _time
+            _expires_at = _time.time() + ttl_s
+            if not meta:
+                meta = {}
+            _board_items = list(board.get("open") or []) + list(board.get("done") or [])
+            for _k in ("open", "done"):
+                _lst = meta.setdefault(_k, [{} for _ in board.get(_k) or []])
+                for _it in _lst:
+                    if isinstance(_it, dict):
+                        _it["ttl_s"] = ttl_s
+                        _it["_expires_at"] = _expires_at
+            if board.get("doing"):
+                meta.setdefault("doing", {})["ttl_s"] = ttl_s
+                meta.setdefault("doing", {})["_expires_at"] = _expires_at
         if meta:  # 0.21.4: per item {context, faq}, hidden, for the voicebot
             board["meta"] = meta
         items = [board.get("doing") or ""] + list(board.get("open") or []) + list(board.get("done") or [])
@@ -4286,6 +4324,10 @@ def _run_waiting(args) -> int:
     ref = getattr(args, "decision", None)
     if not text:
         return _waiting_out({"ok": False, "type": "invalid", "error": "--waiting needs a text"}, 2)
+    context_given = bool((getattr(args, "context", None) or "").strip()) if q else False
+    if q and not context_given:
+        return _waiting_out({"ok": False, "type": "invalid",
+                             "error": "status --waiting --question braucht auch --context"}, 2)
     if bool(q) == bool(ref):
         return _waiting_out({"ok": False, "type": "invalid", "error": WAITING_NEEDS}, 2)
     rel = _helper_relay(args.session)
@@ -4705,6 +4747,9 @@ def main(argv: list[str] | None = None) -> None:
                           help="0.21.0: your project (1-40 chars, e.g. voicehook, salesengine, kunden, "
                                "sonstiges), sent as board field project; overrides the project the "
                                "server derives for the focus filter. Also over the relay (helper)")
+    p_status.add_argument("--ttl-s", dest="ttl_s", type=int, default=None, metavar="SEC",
+                          help="board-hygiene: TTL in seconds applied to all items in this board update; "
+                               "items are dropped from meta when republished after this many seconds")
     _add_session(p_status)
     p_show = sub.add_parser(
         "show", help="draw a shape in the ring (operator.visual), or 0.21.0 --card: a text, code, "
@@ -4864,6 +4909,9 @@ def main(argv: list[str] | None = None) -> None:
     p_dec.add_argument("--list", action="store_true", default=False,
                        help="0.21.4: list the open and recent decisions (number, asking label, "
                             "question, options, hidden context) instead of asking; same as `board`")
+    p_dec.add_argument("--ttl-s", dest="ttl_s", type=int, default=None, metavar="SEC",
+                       help="board-hygiene: optional TTL in seconds for this decision card; "
+                            "the server hides it after this many seconds if not answered")
     p_dec.add_argument("--timeout", type=float, default=120.0, metavar="SEC",
                        help="0.16.0, with --wait (no SEC): wait up to SEC for the answer (default 120)")
     _add_session(p_dec, answer_wait=True)
