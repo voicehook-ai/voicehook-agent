@@ -112,7 +112,11 @@ Activity feed (0.10.0): Delta sees what you are doing, one line per tool call.
     hook install [--settings PATH]   add the Claude Code PreToolUse + PostToolUse hooks to
                                      settings.json (0.13.0: idempotent, adds Pre to an
                                      older Post-only install)
-    hook print                       print the settings.json snippet
+    hook install --agent codex       0.20.0: Codex hooks.json + notify + MCP server ($CODEX_HOME)
+    hook install --agent opencode    0.25.0: an opencode plugin (~/.config/opencode/plugin/
+                                     voicehook.js) that shells out to voicehook-agent-hook;
+                                     feeds tool calls + turn ends, backup first
+    hook print [--agent ...]         print the settings.json snippet (or the codex/opencode one)
     hook pre-tool-use|post-tool-use  the hooks themselves (fast path: voicehook-agent-hook)
     hook notification|permission-request  0.18.0: a session waits for the human (permission
                                      prompt, AskUserQuestion, idle): a decision on the
@@ -456,6 +460,7 @@ ONBOARDING_ENV = "VOICEHOOK_ONBOARDING_HINT"
 ONBOARDING_INVITE = [
     "voicehook-agent hook install",
     "voicehook-agent hook install --agent codex",
+    "voicehook-agent hook install --agent opencode",
     "voicehook-agent join <invite-url> --name <Name> --model <Model> --json",
     "voicehook-agent helper-credential --label <host> | ssh <host> 'voicehook-agent helper-import --as <host>'",
 ]
@@ -467,26 +472,26 @@ ONBOARDING_SHARE = [
 _ONBOARDING_TEXT = {
     "de": ("Multi-Agent: du kannst weitere Agenten in diesen Call holen. Frag den Menschen, ob du "
            "das einrichten sollst. (1) Einladen: jede weitere Claude-Code-Session dieses Rechners "
-           "meldet sich nach einmal `{i0}` (Codex: `{i1}`) als Helfer im Call; soll sie mit eigener "
-           "Stimme sprechen (jeder Agent eigene Stimme), tritt sie selbst bei: `{i2}` (derselbe "
-           "Einladungslink). Anderer Rechner: `{i3}` (nie in einen Chat kopieren). (2) Einblenden "
-           "und teilen: Helfer zeigen ihr Status-Board mit `{s0}` und offene Entscheidungen mit "
-           "`{s1}` im Call (über den Relay), ihr Aktivitätslog kommt per Hook von selbst; `{s2}` "
-           "zeigt dir alle Boards und offenen Entscheidungen. (3) Klartext-Regel für alle: "
-           "Entscheidungen und Board-Einträge als ganzer Satz mit Produkt oder Bereich, was "
-           "passiert und wozu, keine nackten PR-Nummern, Ziffernketten oder unerklärten "
+           "meldet sich nach einmal `{i0}` (Codex: `{i1}`, opencode: `{i2}`) als Helfer im Call; "
+           "soll sie mit eigener Stimme sprechen (jeder Agent eigene Stimme), tritt sie selbst bei: "
+           "`{i3}` (derselbe Einladungslink). Anderer Rechner: `{i4}` (nie in einen Chat kopieren). "
+           "(2) Einblenden und teilen: Helfer zeigen ihr Status-Board mit `{s0}` und offene "
+           "Entscheidungen mit `{s1}` im Call (über den Relay), ihr Aktivitätslog kommt per Hook "
+           "von selbst; `{s2}` zeigt dir alle Boards und offenen Entscheidungen. (3) Klartext-Regel "
+           "für alle: Entscheidungen und Board-Einträge als ganzer Satz mit Produkt oder Bereich, "
+           "was passiert und wozu, keine nackten PR-Nummern, Ziffernketten oder unerklärten "
            "Abkürzungen, Entscheidungen mit ? und --context; schlecht: \"{bad}\", gut: "
            "\"{good}\". (4) {wait_de} (5) {midturn_de}"),
     "en": ("Multi-agent: you can bring more agents into this call. Ask the human whether to set "
            "it up. (1) Invite: every other Claude Code session on this machine reports as a "
-           "helper in the call after running `{i0}` once (Codex: `{i1}`); to speak with its own "
-           "voice (every agent has its own voice), it joins itself: `{i2}` (the same invite "
-           "link). Another machine: `{i3}` (never paste it into a chat). (2) Show and share: "
-           "helpers put their status board into the call with `{s0}` and open decisions with "
-           "`{s1}` (over the relay); their activity log comes by itself through the hook; `{s2}` "
-           "shows you every board and open decision. (3) Plain-language rule for everyone: "
-           "decisions and board items as a whole sentence naming the product or area, what "
-           "happens and why, no bare PR numbers, digit chains or unexplained abbreviations, "
+           "helper in the call after running `{i0}` once (Codex: `{i1}`, opencode: `{i2}`); "
+           "to speak with its own voice (every agent has its own voice), it joins itself: `{i3}` "
+           "(the same invite link). Another machine: `{i4}` (never paste it into a chat). "
+           "(2) Show and share: helpers put their status board into the call with `{s0}` and open "
+           "decisions with `{s1}` (over the relay); their activity log comes by itself through the "
+           "hook; `{s2}` shows you every board and open decision. (3) Plain-language rule for "
+           "everyone: decisions and board items as a whole sentence naming the product or area, "
+           "what happens and why, no bare PR numbers, digit chains or unexplained abbreviations, "
            "decisions with ? and --context; bad: \"{bad}\", good: \"{good}\". (4) {wait_en} (5) {midturn_en}"),
 }
 
@@ -4837,11 +4842,16 @@ def main(argv: list[str] | None = None) -> None:
                                            "print", "install"])
     p_hook.add_argument("--settings", default=None, metavar="PATH",
                         help="install: settings.json to merge into (default ~/.claude/settings.json)")
-    p_hook.add_argument("--agent", choices=["claude", "codex"], default=None,
-                        help="0.20.0 print/install: claude (default, settings.json) or codex "
-                             "(hooks.json + notify + MCP server in $CODEX_HOME, backup first)")
+    p_hook.add_argument("--agent", choices=["claude", "codex", "opencode"], default=None,
+                        help="0.20.0 print/install: claude (default, settings.json), codex "
+                             "(hooks.json + notify + MCP server in $CODEX_HOME, backup first) or "
+                             "0.25.0 opencode (a plugin in ~/.config/opencode/plugin/ that shells "
+                             "out to voicehook-agent-hook, backup first)")
     p_hook.add_argument("--codex-home", default=None, metavar="DIR",
                         help="install --agent codex: Codex config dir (default $CODEX_HOME or ~/.codex)")
+    p_hook.add_argument("--opencode-home", default=None, metavar="DIR",
+                        help="install --agent opencode: opencode config dir "
+                             "(default $XDG_CONFIG_HOME/opencode or ~/.config/opencode)")
     # 0.21.0: hooks installed and runnable for sessions started without ~/.local/bin in PATH
     p_doc = sub.add_parser(
         "doctor", help="check the Claude Code hooks: installed in settings.json and runnable under "
