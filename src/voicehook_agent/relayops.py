@@ -413,16 +413,20 @@ def decide_body(req: dict) -> dict:
     return {k: req[k] for k in DECIDE_KEYS if req.get(k) is not None}
 
 
+DONE_CAP = 3   # relay: send only the last 3 done entries (oldest drop silently)
+
+
 def status_body(board: dict) -> dict:
     """{doing, open, done, project?} of a CLI board (faq is not part of the relay contract;
-    0.21.0: project = `status --project`)."""
+    0.21.0: project = `status --project`). done[] is capped to the newest DONE_CAP entries."""
     out: dict = {}
     if isinstance(board.get("doing"), str):
         out["doing"] = board["doing"]
     for k in ("open", "done"):
         v = board.get(k)
         if isinstance(v, list):
-            out[k] = [str(x) for x in v if isinstance(x, str)]
+            items = [str(x) for x in v if isinstance(x, str)]
+            out[k] = items[-DONE_CAP:] if k == "done" else items
     if isinstance(board.get("project"), str) and board["project"]:
         out["project"] = board["project"]
     if board.get("state") in ("arbeitet", "wartet", "frage", "leerlauf", "problem"):
