@@ -705,7 +705,7 @@ def _push_hint(event: dict) -> None:
             file=sys.stderr,
             flush=True,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, S110
         pass
 
 
