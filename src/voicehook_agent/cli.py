@@ -2850,6 +2850,10 @@ async def _connect_and_listen(
                     and payload.get("type") == "helper_decision"):
                 # 0.18.1, bridge transport: the server's copy of a helper's answer
                 ctl.events.put_nowait(relay.helper_decision_event(payload))
+            elif topic == "operator.helper_stale" and ctl is not None:
+                ctl.ledger.liveness_update(payload.get("helper"), "stale", payload.get("grund"))
+            elif topic == "operator.helper_fresh" and ctl is not None:
+                ctl.ledger.liveness_update(payload.get("helper"), "alive", None)
             sender = getattr(pkt.participant, "identity", "?") if pkt.participant else "?"
             line = payload.get("text", "")
             if topic == "operator.say_status":
@@ -4984,7 +4988,10 @@ def main(argv: list[str] | None = None) -> None:
     p_rn = sub.add_parser(
         "relay-next", help="0.16.0 helper session (not itself in the call): print the answers "
         "to your own decide questions as JSON lines (type decision; 0.22.0 also type user_turn: the "
-        "human spoke to you by name in the call); {\"type\":\"timeout\"} if none")
+        "human spoke to you by name in the call); {\"type\":\"timeout\"} if none. "
+        "The poll itself is the helper's heartbeat; poll interval must be less than "
+        "VOICEHOOK_HELPER_STALE_S (default 90 s). A {type: helper_liveness} event may arrive "
+        "when the server changes the helper's liveness state.")
     p_rn.add_argument("--timeout", type=float, default=25.0, metavar="SEC",
                       help="wait up to SEC seconds for an answer (default 25; 0 = only what is there)")
     # 0.17.0 helper access (server /api/helper/*): data only, no voice, no join

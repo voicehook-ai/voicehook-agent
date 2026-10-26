@@ -53,6 +53,8 @@ class Ledger:
         self.items: dict[str, dict] = {}
         self.boards: dict[str, dict] = {}
         self.own_board: dict | None = None
+        # helper liveness: helper-name -> {"state": "stale"|"alive", "grund": str|None}
+        self.liveness: dict[str, dict] = {}
 
     # ----- decisions -----------------------------------------------------------------
     def created(self, req: dict, out: dict, frm: str = "") -> None:
@@ -117,6 +119,16 @@ class Ledger:
         while len(self.boards) > BOARDS_KEEP:
             self.boards.pop(next(iter(self.boards)))
 
+    # ----- liveness -----------------------------------------------------------------
+    def liveness_update(self, helper: str, state: str, grund: str | None) -> None:
+        """Track per-helper liveness state; keyed by helper name from operator.helper_stale/fresh."""
+        if not helper:
+            return
+        if state == "alive":
+            self.liveness.pop(helper, None)
+        else:
+            self.liveness[helper] = {"state": state, "grund": grund}
+
     # ----- listing -------------------------------------------------------------------
     def listing(self, only_open: bool = False) -> dict:
         def num(it: dict) -> int:
@@ -129,7 +141,8 @@ class Ledger:
                           key=lambda it: -(it.get("decided_at") or it.get("closed_at") or it["at"]))
             out["recent"] = done[:RECENT_DECIDED]
             out["own_board"] = self.own_board
-            out["boards"] = list(reversed(list(self.boards.values())))
+            boards = list(reversed(list(self.boards.values())))
+            out["boards"] = self._inject_liveness(boards)
         out["note"] = NOTE
         return out
 
@@ -164,5 +177,19 @@ class Ledger:
         now = self.clock()
         extra = [{**b, "age_s": max(0, int(now - b["at"]))} for b in local.get("boards") or []
                  if str(b.get("from")) not in names and not _cleared(b)]
-        out["boards"] = srv_boards + extra
+        out["boards"] = self._inject_liveness(srv_boards + extra)
         return out
+
+    def _inject_liveness(self, boards: list[dict]) -> list[dict]:
+        """Inject liveness fields into board entries for stale helpers; alive = no extra field."""
+        if not self.liveness:
+            return boards
+        result = []
+        for b in boards:
+            name = str(b.get("from") or b.get("name") or "")
+            lv = self.liveness.get(name)
+            if lv:
+                result.append({**b, "liveness": lv["state"], "liveness_grund": lv["grund"]})
+            else:
+                result.append(b)
+        return result
