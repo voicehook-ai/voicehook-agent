@@ -689,11 +689,33 @@ def _lock(fd: int) -> None:
         pass
 
 
+def _push_hint(event: dict) -> None:
+    """Non-blocking: warn on stderr when a PushNotification tool runs during an active call.
+    Never raises, never blocks the tool."""
+    try:
+        tool = str(event.get("tool_name") or "")
+        if "pushnotification" not in tool.lower():
+            return
+        from . import multisession
+        if multisession.load_relay() is None:
+            return
+        print(
+            "voicehook: im laufenden Call keine PushNotification - "
+            "nutze activity/decide/status.",
+            file=sys.stderr,
+            flush=True,
+        )
+    except Exception:  # noqa: BLE001, S110
+        pass
+
+
 def _handle(raw: str, phase: str, now: float | None) -> bool:
     try:
         event = json.loads(raw) if raw and raw.strip() else {}
         if not isinstance(event, dict):
             return False
+        if phase == "pre":
+            _push_hint(event)
         from . import activityfilter
         sub = activityfilter.subagent(event)
         if sub:  # 0.21.5: a subagent's tool calls are not the operator's own work

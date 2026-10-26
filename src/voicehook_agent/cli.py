@@ -4458,9 +4458,14 @@ def main(argv: list[str] | None = None) -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=vselfupdate.version_text(_VERSION))
     sub = ap.add_subparsers(dest="cmd", required=True)
+    _CALL_TOOLS_HINT = (
+        "Solange ein Call laeuft: Fortschritt per `activity`, Fragen per `decide`, "
+        "Stand per `status` - nie PushNotification. "
+        "Push nur, wenn kein Call aktiv ist (z.B. um zum Beitreten zu holen)."
+    )
     p_join = sub.add_parser(
         "join", help="join a voicehook.ai call as an agent",
-        epilog=__doc__[__doc__.index("Activity log (0.13.0)"):],
+        epilog=_CALL_TOOLS_HINT + "\n\n" + __doc__[__doc__.index("Activity log (0.13.0)"):],
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p_join.add_argument("invite_url", help="full invite link https://voicehook.ai/r/<slug>?invite=<code>  OR  bare <slug>")
     p_join.add_argument("--name", default=None, help="REQUIRED. Your OWN display name in the call (<dein-eigener-Name>). Shown in the web Agent chip as 'Name · model', becomes the identity prefix and the name spoken in the auto-greet. Nenn deinen echten Modell-/Herstellernamen, nie 'Claude', wenn du nicht Claude bist.")
@@ -4957,7 +4962,10 @@ def main(argv: list[str] | None = None) -> None:
         "helper-import", help="read a helper credential (JSON) from stdin and write it for ONE "
         "helper session: ~/.voicehook/helpers/<name>.json (0600, 0.22.2; was the shared "
         "relay.json). Then `status`, `activity`, `decide`, `next`/`relay-next` and the hooks "
-        "of that session feed the call under its own sender")
+        "of that session feed the call under its own sender. "
+        "Solange ein Call laeuft: Fortschritt per `activity`, Fragen per `decide`, "
+        "Stand per `status` - nie PushNotification. "
+        "Push nur, wenn kein Call aktiv ist (z.B. um zum Beitreten zu holen).")
     p_hi.add_argument("--as", dest="as_name", default=None, metavar="NAME",
                       help="name of the entry, bound to no session: a session uses it when its "
                       "VOICEHOOK_SESSION_LABEL is NAME (or it is the only unbound entry). "
