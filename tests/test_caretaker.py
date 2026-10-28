@@ -6,6 +6,8 @@ import os
 import stat
 from typing import ClassVar
 
+import pytest
+
 from voicehook_agent import caretaker as C
 from voicehook_agent import device as D
 from voicehook_agent import multisession as vmulti
@@ -502,3 +504,134 @@ def test_410_after_server_restart_gets_new_credential_while_call_listed():
     net.calls = [[]]                                   # /calls no longer lists it: now it is over
     c.step()
     assert c.watcher is None and w.shut == 1
+
+
+# ------------------------------------------------------------------ Ja holt die Session (Bug 28.10.)
+def test_step_never_hammers_calls_when_server_answers_at_once():
+    """Live 28.10.: a running call made GET /calls?wait=25 return at once and step() returned 0
+    -> ~400 polls a minute, the device rate limit (600/10 min) empty, every /helpers 429."""
+    net, clk = Net(), Clock()
+    c = _caretaker(net, clk)
+    net.calls = [[_call("r1")]]
+    c.step()                                       # starts the call, ticks once
+    d = c.step()                                   # server answered at once (clock unchanged)
+    assert d >= C.CALLS_MIN_GAP_S - 0.01 or d == pytest.approx(c.next_tick - clk.t)
+    assert d > 0
+    gets = [l for l in net.log if l[1] == "/api/device/calls"]
+    assert len(gets) == 2
+
+
+def test_long_poll_wait_ends_at_the_next_tick():
+    net, clk = Net(), Clock()
+    seen = []
+    real = net.__call__
+
+    def http(method, url, body=None, token="", timeout=15.0):
+        if "wait=" in url:
+            seen.append(int(url.split("wait=")[1]))
+        return real(method, url, body, token, timeout)
+    c = _caretaker(net, clk)
+    c.http = http
+    net.calls = [[_call("r1")]]
+    c.step()                                       # tick at NOW, next tick NOW + 45
+    clk.t += 30
+    c.step()
+    assert seen[0] == D.CALLS_WAIT_S and seen[1] == 15   # waits only until the tick is due
+
+
+def test_bind_returns_the_reason_per_label(monkeypatch):
+    net, clk = Net(), Clock()
+    c = _caretaker(net, clk)
+    net.calls = [[_call("r1")]]
+    c.step()
+    real = net.__call__
+    state = {"status": 429}
+
+    def http(method, url, body=None, token="", timeout=15.0):
+        if url.endswith("/helpers") and state["status"]:
+            return state["status"], {}
+        return real(method, url, body, token, timeout)
+    c.http = http
+    items = [{"key": "k1", "label": "api 1a2b", "tp": ""}]
+    got = c.bind(c.rel, items)
+    assert "Ratenlimit" in got["api 1a2b"]
+    assert "Ratenlimit" in c.bind(c.rel, items)["api 1a2b"]      # inside the backoff: same reason
+    state["status"] = 0
+    clk.t += C.BIND_BACKOFF_S + 1
+    assert c.bind(c.rel, items) == {"api 1a2b": ""}              # positive control
+    assert c.bind(c.rel, items) == {"api 1a2b": ""}              # fresh entry: ok without request
+
+
+def _fetch_watcher(monkeypatch, bind_result, post_status=200):
+    rel = {"url": BASE + "/api/activity/relay", "token": RELTOK, "room": "r1", "call_id": "r1",
+           "expires_at": NOW + 3600, "written_at": NOW, "owner_pid": 0, "owner_session": ""}
+    monkeypatch.setattr(W, "server_interval", lambda r: ("ok", None))
+    monkeypatch.setattr(W, "credential", lambda now=None: None)
+    cands = [{"key": "k1", "label": "s1", "tp": "/t/1.jsonl", "active_at": NOW}]
+    answers, boards = [], []
+    monkeypatch.setattr(W, "post_proposal", lambda r, b: {"ok": True, "id": "D1"})
+    monkeypatch.setattr(W, "poll_answers", lambda r: answers)
+    monkeypatch.setattr(W, "delete_decision", lambda *a: {"ok": True})
+
+    def post_board(r, label, body):
+        boards.append((label, body))
+        if label.endswith("(Hausmeister)") or post_status < 300:
+            return {"ok": True, "status": 200}
+        return {"ok": False, "status": post_status}
+    monkeypatch.setattr(W, "post_board", post_board)
+    monkeypatch.setattr(W, "post_activity", lambda *a: {"ok": True})
+    monkeypatch.setattr(W, "get_status", lambda *a: (404, {}))
+    monkeypatch.setattr(W, "classify_state", lambda s, now: (W.ARBEITET, NOW))
+    monkeypatch.setattr(W, "observable", lambda s: True)
+    monkeypatch.setattr(W.Watcher, "duty_kanban", lambda self, *a: False)
+    subs = []
+    monkeypatch.setattr(W.J, "subscribed_sessions", lambda r, taken: list(subs))
+    clk = Clock()
+    w = W.Watcher(clock=clk, discover_fn=lambda r, n: [], cmd=None,
+                  unbound_fn=lambda *a, **k: [x for x in cands if not subs], cred_fn=lambda t=None: rel,
+                  bind_fn=lambda r, items: {i["label"]: bind_result for i in items})
+    assert w.tick() == W.OK                         # single card "s1 dazuholen?"
+    answers.append({"type": "decision", "id": "D1", "verdict": "yes"})
+    subs.append({"key": "k1", "label": "s1", "tp": "/t/1.jsonl"})
+    clk.t += W.TICK_S
+    w.tick()
+    clk.t += W.TICK_S
+    w.tick()
+    return w, boards, clk
+
+
+def _notes(boards):
+    return [b for lab, b in boards if lab == W.fetch_label("s1")]
+
+
+def test_ja_with_failed_helper_credential_reports_why(monkeypatch):
+    _w, boards, _clk = _fetch_watcher(monkeypatch, "der Server zu viele Anfragen dieses Rechners abgelehnt hat")
+    notes = _notes(boards)
+    assert notes, "no feedback card: the Ja failed silently"
+    assert "s1" in notes[0]["doing"] and "nicht" in notes[0]["doing"] and "zu viele Anfragen" in notes[0]["doing"]
+    assert len([n for n in notes if n.get("doing")]) == 1        # once per reason, no spam
+
+
+def test_ja_with_rejected_board_reports_why(monkeypatch):
+    _w, boards, _clk = _fetch_watcher(monkeypatch, "", post_status=422)
+    notes = _notes(boards)
+    assert notes and "422" in notes[0]["doing"]
+
+
+def test_ja_ok_shows_session_and_no_failure_note(monkeypatch):
+    w, boards, _clk = _fetch_watcher(monkeypatch, "")
+    assert not _notes(boards)                                     # positive control
+    assert any(lab in ("s1", W.sub_label("s1")) and b.get("doing") for lab, b in boards)
+    assert w.fetch == {}
+
+
+def test_failure_note_cleared_once_the_session_arrives(monkeypatch):
+    state = {"why": "noch kein Mensch im Call ist"}
+    w, boards, clk = _fetch_watcher(monkeypatch, "x")
+    w.bind_fn = lambda r, items: {i["label"]: state["why"] for i in items}
+    assert _notes(boards)
+    state["why"] = ""
+    clk.t += W.TICK_S
+    w.mem.clear()                                                 # force a post this tick
+    w.tick()
+    assert _notes(boards)[-1] == {} and w.fetch == {}
