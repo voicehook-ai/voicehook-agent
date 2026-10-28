@@ -1349,7 +1349,7 @@ join; the CLI sends its version as `X-VH-CLI`).
 
 - `cli_latest` newer than this CLI: `join` updates in place and restarts itself with the
   same arguments and the same identity (`os.execv`). uv tool installs run
-  `uv tool upgrade voicehook-agent`, everything else
+  `uv tool upgrade --reinstall-package voicehook-agent voicehook-agent` (refreshes the index, so a fresh release is seen), everything else
   `python -m pip install --upgrade [--user] git+https://github.com/voicehook-ai/voicehook-agent`
   (plus `--break-system-packages` on a PEP 668 system python). Only on the first connect,
   never during a running call, and at most once per join (env marker `VOICEHOOK_SELF_UPDATED`).
