@@ -56,8 +56,9 @@ def for_base(key: str | None, api_base: str) -> str | None:
         return key
     if host not in _warned_hosts:
         _warned_hosts.add(host)
-        print(f"[warn] agent key not sent: {host or 'unknown host'} is not trusted",
-              file=sys.stderr, flush=True)
+        # no host or key in the text (CodeQL: clear-text logging of a value next to the key)
+        print("[warn] agent key not sent: the join host is not trusted (only https "
+              f"voicehook.ai or {HOST_ENV})", file=sys.stderr, flush=True)
     return None
 
 
