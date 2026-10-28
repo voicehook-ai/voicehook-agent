@@ -3,6 +3,10 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.31.0
+
+- **image cards carry an invisible `context`:** the voicebot Delta cannot see images, so every image card must carry the full text content of the image (numbers, table rows, labels). `show --card image` now requires `--context TEXT` or `--context-file PATH` (`-` = stdin); without it exit 2, nothing sent. The limit is the card text limit (4000 chars); over it exit 2, never cut. `context` goes into the `operator.card` packet, the bridge `POST /api/bridge/show` body and the helper relay show body; it is optional for text/code/link cards and never shown on the page or logged (only its length appears in errors). The local MCP server gets a `show` tool (card, title, text, file, context) with the same rule; the README, `docs/CLI.md` and the voicehook-join skill tell agents to always send context with an image.
+
 ## 0.30.0
 
 - **helper liveness (CLI half):** the CLI consumes the server's `operator.helper_stale` / `operator.helper_fresh` events and tracks a per-helper liveness state; `board` and `task` mark a stale helper (`liveness: "stale"` + `grund: "no_poll" | "no_ack"`). The server derives `last_seen` from the existing relay poll (no new heartbeat call); `relay-next` polls well under `VOICEHOOK_HELPER_STALE_S` (90s). The existing ack-on-consume (delivery receipt) is covered by a test, as the `no_ack` reason relies on it.

@@ -1,8 +1,8 @@
-"""Local MCP server (0.20.0): status, decide, next and activity for coding agents without
+"""Local MCP server (0.20.0): status, decide, next, activity (and show, 0.31.0) for coding agents without
 Claude Code hooks (Codex CLI first, any MCP client works).
 
 `voicehook-agent-hook mcp [--agent codex]` (also `voicehook-agent mcp`) speaks MCP over
-stdio (JSON-RPC 2.0, one JSON object per line) and offers four tools:
+stdio (JSON-RPC 2.0, one JSON object per line) and offers five tools:
 
 * `status` {doing, open[], done[]}: this session's status board in the call (all empty
   clears it).
@@ -11,6 +11,9 @@ stdio (JSON-RPC 2.0, one JSON object per line) and offers four tools:
 * `next` {timeout_s?}: the next event for this session: the answers to its own decide
   questions (helper), or the next call event of its own join.
 * `activity` {text}: one short line in the call's activity log.
+* `show` {card, title?, text?, file?, context?}: a text, code, link or image card on the call
+  page (0.31.0). The voicebot cannot see images, so an image card REQUIRES `context`: the
+  full text content of the image (numbers, table rows, labels), invisible on the page.
 
 Routing is the CLI's own (relayops.client_relay): a session that runs its own `join`
 (its control socket answers) talks to that join; every other session of the machine is a
@@ -104,6 +107,25 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "text": {"type": "string", "maxLength": 120}},
          "required": ["text"], "additionalProperties": False}},
+    {"name": "show",
+     "description": "Put a card on the call page (never spoken): text, code, link or image. "
+                    "The voicebot cannot see images: an image card REQUIRES `context`, the "
+                    "complete text content of the image (all numbers, table rows, labels, what "
+                    "the shapes mean), max 4000 chars. It is invisible on the page; the bot "
+                    "answers questions about the image from it. Without context the image is "
+                    "refused and nothing is sent.",
+     "inputSchema": {"type": "object", "properties": {
+         "card": {"type": "string", "enum": ["text", "code", "link", "image"]},
+         "title": {"type": "string", "maxLength": 80},
+         "text": {"type": "string", "maxLength": 4000,
+                  "description": "text/code: the content; link: one http(s) URL"},
+         "file": {"type": "string",
+                  "description": "image: path to an svg (max 300 KB), png, jpeg or webp (max 1 MB)"},
+         "context": {"type": "string", "maxLength": 4000,
+                     "description": "REQUIRED for card image: all information in the image "
+                                    "(numbers, table rows, labels) as plain text for the voicebot, "
+                                    "never shown; optional for other cards"}},
+         "required": ["card"], "additionalProperties": False}},
 ]
 
 
@@ -327,8 +349,46 @@ def tool_activity(args: dict, agent: str) -> dict:
     return {"ok": True, "type": "activity", "sent": True, "line": line, "via": "relay"}
 
 
+def tool_show(args: dict, agent: str) -> dict:
+    """0.31.0: a card on the call page; an image only with `context` (checked before anything
+    is sent). Never logs the context, errors name lengths only."""
+    from . import cards as vcards
+    for k in ("card", "title", "text", "file", "context"):
+        if args.get(k) is not None and not isinstance(args[k], str):
+            raise ToolError(f"{k} must be a string")
+    card = args.get("card")
+    if card not in vcards.KINDS:
+        raise ToolError(f"card must be one of {' '.join(vcards.KINDS)}")
+    if card == "image" and args.get("text") is not None:
+        raise ToolError("card image takes file, not text")
+    try:
+        if args.get("file") is not None and card != "image":
+            raise vcards.CardError("file is only for card image")
+        req = vcards.request_from_args(kind=card, title=args.get("title"), text=args.get("text"),
+                                       file=args.get("file"), panel=None,
+                                       context=args.get("context"))
+    except (vcards.CardError, OSError) as e:
+        raise ToolError(str(e)) from None
+    rt, rel = _route()
+    if rt == "own":
+        return _own(req, timeout=60.0)
+    if rt != "relay":
+        raise ToolError(NO_CALL)
+    from . import multisession as vmulti
+    from . import relayops as vrelayops
+    frm = vrelayops.check_from(_label(agent))
+    body = vrelayops.card_body(req)
+    if vmulti._is_local(rel):
+        if body.get("kind") == "image":
+            raise ToolError("image cards of a helper need the server relay; text, code and link work")
+        res = vrelayops.local_request(rel, frm, "card", body)
+    else:
+        res = vrelayops.remote_show(rel, frm, body)
+    return {**res, "type": "card", "from": frm, "via": "relay"}
+
+
 HANDLERS = {"status": tool_status, "decide": tool_decide, "next": tool_next,
-            "activity": tool_activity}
+            "activity": tool_activity, "show": tool_show}
 
 
 # --------------------------------------------------------------------------- #

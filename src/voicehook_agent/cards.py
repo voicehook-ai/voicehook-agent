@@ -18,6 +18,12 @@ image did not load). The join waits up to ACK_WAIT_S for the humans in the call 
 ok only when at least one browser loaded the image; otherwise ok false with the reason
 (not_shown: no browser confirmed or the image did not load; no_human: nobody in the call).
 
+Image context (0.31.0): the voicebot Delta cannot see images. Every image card must carry
+`context`, the complete text content of the image (numbers, table rows, labels), invisible on
+the page; the voicebot answers questions about the image from it. Without it exit 2, nothing
+sent. Max CONTEXT_MAX = TEXT_MAX chars (the card text limit); over the limit exit 2, never cut.
+Other card kinds may carry a context too (optional). It is never logged, only its length.
+
 Limits (checked here before anything is sent, again in the join, and by the server):
 text max 4000 chars, title max 80, SVG max 300 KB (draws anything, but no <script>,
 <foreignObject>, on* attributes or external references), PNG/JPEG/WebP max 1 MB, link one
@@ -41,6 +47,7 @@ KINDS = ("text", "code", "link", "image")
 PANELS = ("cards", "board", "log", "decisions", "none")
 UI_PANELS = ("board", "log", "cards", "decisions")  # `none` closes these four
 TEXT_MAX = 4000
+CONTEXT_MAX = TEXT_MAX  # same limit as the card text, no extra cap
 TITLE_MAX = 80
 SVG_MAX = 300 * 1024
 RASTER_MAX = 1024 * 1024
@@ -89,6 +96,12 @@ _SVG_REF_OK = re.compile(rb"^(#|data:image/(png|jpeg|webp|gif)[;,])", re.IGNOREC
 
 class CardError(ValueError):
     """Invalid card: nothing sent (client exit 2, join answers type invalid)."""
+
+
+IMAGE_CONTEXT_MISSING = (
+    "an image card needs --context TEXT or --context-file PATH: the voicebot cannot see the "
+    "image, so give the full text content of it (all numbers, table rows, labels); it is "
+    "invisible on the page and the bot answers questions about the image from it")
 
 
 def _clean(v: object) -> str:
@@ -159,7 +172,7 @@ def _image_bytes(image: str) -> bytes:
 
 
 def validate(req: dict) -> dict:
-    """Check a card request {kind?, title?, text?, image?, panel?, large?} -> the clean body
+    """Check a card request {kind?, title?, text?, image?, context?, panel?, large?} -> the clean body
     for POST /api/bridge/show (only the fields that are set). CardError when invalid."""
     panel = req.get("panel")
     panel = str(panel).strip().lower() if panel is not None else None
@@ -184,7 +197,13 @@ def validate(req: dict) -> dict:
     if len(title) > TITLE_MAX:
         raise CardError(f"title max {TITLE_MAX} characters")
     text = _clean(req.get("text"))
+    context = _clean(req.get("context")).strip()
+    if len(context) > CONTEXT_MAX:
+        raise CardError(f"context max {CONTEXT_MAX} characters (got {len(context)}): shorten it, "
+                        "it is never cut")
     if kind == "image":
+        if not context:
+            raise CardError(IMAGE_CONTEXT_MISSING)
         if text.strip():
             raise CardError("--card image takes --file, not --text")
         image_kind(_image_bytes(str(image or "")))
@@ -201,6 +220,8 @@ def validate(req: dict) -> dict:
         body.update(kind=kind, text=text)
     if title:
         body["title"] = title
+    if context:
+        body["context"] = context
     if panel is not None:
         body["panel"] = panel
     if large:
@@ -208,16 +229,47 @@ def validate(req: dict) -> dict:
     return body
 
 
+def _read_context(path: str, stdin=None) -> str:
+    """--context-file PATH (or - for stdin): UTF-8 text, over the limit -> CardError (never cut)."""
+    if path == "-":
+        raw = stdin.read() if stdin is not None else ""
+        return raw if isinstance(raw, str) else raw.decode("utf-8", "replace")
+    if os.path.getsize(path) > CONTEXT_MAX * 4:  # CONTEXT_MAX chars are at most 4x that in UTF-8
+        raise CardError(f"context max {CONTEXT_MAX} characters (file is larger): shorten it, "
+                        "it is never cut")
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise CardError("--context-file must be UTF-8 text") from None
+
+
 def request_from_args(*, kind: str | None, title: str | None, text: str | None,
                       file: str | None, panel: str | None, large: bool = False,
+                      context: str | None = None, context_file: str | None = None,
                       stdin=None) -> dict:
     """`show --card KIND [--title T] [--text T | --file PATH] [--panel P] [--large]` -> the join
-    request {cmd: card, ...}. `--text -` reads stdin. Reads the file, checks everything."""
+    request {cmd: card, ...}. `--text -` reads stdin. Reads the file, checks everything.
+    0.31.0 `--context TEXT | --context-file PATH|-` (invisible full text of the card; required
+    for an image)."""
     if text is not None and file is not None:
         raise CardError("--text and --file cannot be combined")
     if kind is None and (title is not None or text is not None or file is not None):
         raise CardError("--title/--text/--file need --card text|code|link|image")
+    if context is not None and context_file is not None:
+        raise CardError("--context and --context-file cannot be combined")
+    if (context is not None or context_file is not None) and kind is None:
+        raise CardError("--context/--context-file need --card text|code|link|image")
+    if (text == "-" or context == "-") and context_file == "-":
+        raise CardError("stdin can feed only one of --text and --context-file")
     req: dict = {"kind": kind, "title": title, "panel": panel, "large": True if large else None}
+    if context_file is not None:
+        context = _read_context(context_file, stdin)
+    elif context == "-":
+        context = stdin.read() if stdin is not None else ""
+    if context is not None:
+        req["context"] = context
     if text == "-":
         text = stdin.read() if stdin is not None else ""
     if kind == "image":
@@ -245,11 +297,14 @@ def request_from_args(*, kind: str | None, title: str | None, text: str | None,
 
 def make_card(*, seq: int, body: dict, url: str | None = None, mime: str | None = None,
               cid: str | None = None, now: float | None = None) -> dict:
-    """The operator.card packet {id, seq, kind, title, text, at, url?, mime?} (same shape the
-    server builds for the bridge)."""
+    """The operator.card packet {id, seq, kind, title, text, context?, at, url?, mime?} (same
+    shape the server builds for the bridge). `context` is the invisible full text of the card for
+    the voicebot, never shown on the page (required for an image, checked in validate)."""
     card = {"id": cid or secrets.token_hex(8), "seq": seq, "kind": body["kind"],
             "title": body.get("title", ""), "text": body.get("text", ""),
             "at": round(now if now is not None else time.time(), 3)}
+    if body.get("context"):
+        card["context"] = body["context"]
     if url is not None:
         card["url"] = url
         card["mime"] = mime or ""
@@ -362,8 +417,14 @@ def relay_card(card: object, seq: int) -> dict | None:
     out = {"id": cid, "seq": seq, "kind": kind, "title": str(card.get("title") or "")[:TITLE_MAX],
            "text": str(card.get("text") or "")[:TEXT_MAX], "from": frm,
            "at": card.get("at") if isinstance(card.get("at"), (int, float)) else round(time.time(), 3)}
+    ctx = card.get("context")
+    if ctx is not None:
+        if not isinstance(ctx, str) or len(ctx) > CONTEXT_MAX:
+            return None  # never cut: a too long context drops the card (the helper got a 422 earlier)
+        if ctx.strip():
+            out["context"] = ctx.strip()
     if kind == "image":
-        if not image_url_ok(card.get("url"), cid):
+        if not out.get("context") or not image_url_ok(card.get("url"), cid):
             return None
         out["url"] = card["url"]
         out["mime"] = str(card.get("mime") or "")[:40]

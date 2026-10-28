@@ -59,7 +59,7 @@ MCP tools (connector and plugin):
 | `next` | wait up to 50 s for the next turn (user, decision, operator, context, ended); call it at least every 10 to 15 s, one loop per agent; after a pause it brings `missed` |
 | `say` | the voicebot speaks the text |
 | `status` | status board (never spoken) the voicebot answers from, optional chip emoji |
-| `show` | a card on the call page (text, code, link or image), never spoken |
+| `show` | a card on the call page (text, code, link or image), never spoken; an image card REQUIRES `context` (all information in the image as text, invisible on the page: the voicebot cannot see images) |
 | `activity` | one line of 3 to 8 words for the activity feed, on every step |
 | `decide` | a question for the Decision Board (yes/no or up to 3 options); the answer comes back in `next` |
 | `leave` | leave the call |

@@ -1326,12 +1326,18 @@ none opens that panel for the humans (none closes all). --large opens the card v
 the middle with this card at full size, for diagrams (swimlanes, many steps and arrows).
 Limits: text 4000 chars, title 80, SVG 300 KB (no <script>, <foreignObject>, on* attributes
 or external references), PNG/JPEG/WebP 1 MB; invalid: exit 2, nothing sent.
+The voicebot cannot see images: every --card image REQUIRES --context TEXT or --context-file PATH
+('-' = stdin) with ALL information in the image (numbers, table rows, labels, what the shapes
+mean), max 4000 chars (never cut). It is invisible on the page; the bot answers from it. No
+context: exit 2, nothing sent.
 An image answers ok (with "shown") only after a call page loaded it; else ok false, exit 1
 (not_shown / no_human). A helper session (no own join, relay.json) sends cards over the
 relay with itself as sender (no --panel/--large).
   voicehook-agent show --card code --title Fix --text "git push origin main"
   voicehook-agent show --card link --text https://voicehook.ai --panel cards
-  voicehook-agent show --card image --title Ablauf --file swimlane.svg --large
+  voicehook-agent show --card image --title Ablauf --file swimlane.svg --large \\
+      --context "Ablauf in 3 Spuren: Sales (Anfrage, Angebot), Tech (Setup), Kunde (Freigabe)"
+  voicehook-agent show --card image --file chart.png --context-file chart.txt
   voicehook-agent show --panel board
 """
 
@@ -1659,8 +1665,8 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
     if cmd == "card":
         ctl.watchdog.touch()
         try:  # same rules as the client, checked again (stdin-free path)
-            body = vcards.validate({k: req.get(k) for k in ("kind", "title", "text", "image", "panel",
-                                                            "large") if req.get(k) is not None})
+            body = vcards.validate({k: req.get(k) for k in ("kind", "title", "text", "image", "context",
+                                                            "panel", "large") if req.get(k) is not None})
         except vcards.CardError as e:
             return {"ok": False, "type": "invalid", "error": str(e)}
         room = await ctl.wait_room(10.0)
@@ -3844,9 +3850,11 @@ def _client_request(args) -> dict:
                                        "(--preset/--polygon/--path/--json/--label/--hold-ms/--emotion)")
             return vcards.request_from_args(kind=args.card, title=args.title, text=args.text,
                                             file=args.file, panel=args.panel, large=args.large,
+                                            context=args.context, context_file=args.context_file,
                                             stdin=sys.stdin)
-        if args.title is not None or args.text is not None or args.file is not None:
-            raise vcards.CardError("--title/--text/--file need --card text|code|link|image")
+        if (args.title is not None or args.text is not None or args.file is not None
+                or args.context is not None or args.context_file is not None):
+            raise vcards.CardError("--title/--text/--file/--context need --card text|code|link|image")
         shape = vvisual.shape_from_args(
             presets=args.preset, polygons=args.polygon, paths=args.path,
             json_text=args.json, open_=args.open, label=args.label, hold_ms=args.hold_ms)
@@ -4800,6 +4808,12 @@ def main(argv: list[str] | None = None) -> None:
     p_show.add_argument("--file", default=None, metavar="PATH",
                         help="text/code/link: UTF-8 text file; image: svg (max 300 KB, no scripts or "
                              "external refs), png, jpeg or webp (max 1 MB)")
+    p_show.add_argument("--context", default=None, metavar="TEXT",
+                        help=f"0.31.0 REQUIRED for --card image: the full text content of the card (all "
+                             "numbers, table rows, labels) for the voicebot, which cannot see images; "
+                             f"invisible on the page, max {vcards.CONTEXT_MAX} chars, never cut; '-' reads stdin")
+    p_show.add_argument("--context-file", default=None, metavar="PATH",
+                        help="like --context, from a UTF-8 text file ('-' = stdin)")
     p_show.add_argument("--panel", default=None, choices=vcards.PANELS,
                         help="open on the human's page: cards (card view) board log decisions, "
                              "none = close all; alone or with --card")

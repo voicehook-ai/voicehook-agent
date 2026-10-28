@@ -568,7 +568,7 @@ def test_helper_show_image_goes_over_relay(monkeypatch, server, tmp_path, capsys
     f.write_bytes(PNG1)
     server.reply("show", 200, {"ok": True, "type": "card", "id": "a" * 16, "kind": "image",
                                "from": "Mac: Scout", "shown": 1})
-    code, lines, _ = _cli(["show", "--card", "image", "--title", "Bild", "--file", str(f)], capsys)
+    code, lines, _ = _cli(["show", "--card", "image", "--title", "Bild", "--file", str(f), "--context", "Bild: ein Quadrat"], capsys)
     assert code == 0 and lines[-1]["ok"] and lines[-1]["via"] == "relay" and lines[-1]["shown"] == 1
     call = server.calls[-1]
     assert call["path"].endswith("/api/activity/relay/show") and call["auth"] == f"Bearer {TOKEN}"
@@ -582,7 +582,7 @@ def test_helper_show_not_shown_is_an_error(monkeypatch, server, tmp_path, capsys
     f = tmp_path / "shot.png"
     f.write_bytes(PNG1)
     server.reply("show", 409, {"detail": "the image did not load in the call page"})
-    code, lines, _ = _cli(["show", "--card", "image", "--file", str(f)], capsys)
+    code, lines, _ = _cli(["show", "--card", "image", "--file", str(f), "--context", "Bild: ein Quadrat"], capsys)
     assert code == 1 and lines[-1]["ok"] is False and lines[-1]["status"] == 409
 
 
