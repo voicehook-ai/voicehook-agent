@@ -136,6 +136,11 @@ went on. Interval 1/5/10/15 min (call page > `--interval` > 15); it ends with th
 `VOICEHOOK_WATCH=0` turns it off
 ([watcher](docs/CLI.md#the-watcher-one-process-per-machine-keeps-the-board-current-watch-0320)).
 
+Caretaker (0.34.0): `voicehook-agent connect` once (approve the code in the browser), then
+`voicehook-agent caretaker install`: the watcher is active in every call of yours automatically, no
+per-call start and no keys to create
+([caretaker](docs/CLI.md#caretaker-hausmeister-connect-once-active-in-every-call-0340)).
+
 ## Pricing
 
 About 10 minutes free every day. Prepaid from 10 EUR, no subscription.
