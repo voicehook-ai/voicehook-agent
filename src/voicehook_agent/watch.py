@@ -217,17 +217,28 @@ def spawn_detached(extra: list[str] | None = None, *, popen=subprocess.Popen) ->
 # credential: is a call active?
 # --------------------------------------------------------------------------- #
 def credential(now: float | None = None) -> dict | None:
-    """The usable relay.json of a join on this machine, else the first usable helper entry
-    (helper-import). None = no call (gone, expired, marked dead, owner gone)."""
+    """The credential of the NEWEST call on this machine: among the usable relay.json of a
+    join and the usable helper entries (helper-import), the most recently written one.
+    0.33.3: before, the first helper entry by name won, so after a new call the watcher kept
+    working for the old one (live 28.10.: Kunde-Talents of the morning call). None = no call
+    (gone, expired, marked dead, owner gone)."""
     t = time.time() if now is None else now
+    cands = []
     rel = vmulti.load_main_relay(t)
     if rel is not None:
-        return rel
+        cands.append(rel)
     for p, e in vmulti._helper_entries():
         u = vmulti._usable(e, p, t)
         if u is not None:
-            return u
-    return None
+            cands.append(u)
+    if not cands:
+        return None
+    return max(cands, key=lambda d: (float(d.get("written_at") or 0), str(d.get("helper") or "")))
+
+
+def call_key(rel: dict | None) -> str:
+    """Which call a credential belongs to (hash of its token, never the token)."""
+    return J.call_hash(rel) if rel else ""
 
 
 # --------------------------------------------------------------------------- #
@@ -279,6 +290,18 @@ def _boards_rw(fn):
         return res
     finally:
         os.close(fd)
+
+
+def forget_boards_before(t: float) -> None:
+    """0.33.3: a new call started at `t` (its credential was written then): boards remembered
+    before belong to the old call and must not be merged into the new one."""
+    def step(d: dict) -> None:
+        for k in [k for k, v in d.items() if not isinstance(v, dict) or float(v.get("at") or 0) < t]:
+            d.pop(k, None)
+    try:
+        _boards_rw(step)
+    except OSError:
+        pass
 
 
 OWN_KEEP_S = 43200.0
@@ -816,6 +839,7 @@ class Watcher:
         self.mem: dict[str, dict] = {}       # session key -> {state, post_at, call_at, call_last}
         self.fails = 0
         self.over: list[float] = []          # times of 401/403/410 answers in a row
+        self.greeted = False                 # 0.33.3: one summary card per call
         self.not_found_until = 0.0
         self.server_min: int | None = None
         self.rel: dict | None = None
@@ -829,6 +853,22 @@ class Watcher:
         self.over.append(now)
         self.over = self.over[-OVER_CONFIRM:]
         return len(self.over) >= OVER_CONFIRM and now - self.over[0] >= OVER_CONFIRM_S
+
+    def switch_call(self, now: float) -> None:
+        """A newer call's credential appeared (new helper-import / join): clear the watcher
+        boards of the old call and start fresh for the new one (proposals, interval, counters)."""
+        log("switch", why="newer-call")
+        try:
+            if self.rel is not None:
+                self.duty_cleanup(self.rel, set())   # the old call's watcher boards
+        except Exception:  # noqa: BLE001, S110
+            pass
+        forget_boards_before(float((credential(now) or {}).get("written_at") or now))
+        self.mem = {}
+        self.over = []
+        self.server_min = None
+        self.not_found_until = 0.0
+        self.greeted = False
 
     def shutdown(self) -> None:
         """Exit: clear every watcher board this machine remembers (call end, SIGTERM)."""
@@ -1076,16 +1116,48 @@ class Watcher:
                     continue
                 key = by_id[a[0]]
                 prop[key]["answer"] = a[1]
+                if key == J.ALL_KEY:     # the summary card: one answer for every listed session
+                    for m in prop[key].get("members") or []:
+                        prop[m["key"]] = {"id": None, "at": now, "label": m["label"], "tp": m["tp"],
+                                          "last_active": now, "answer": a[1]}
+                        if a[1] == "ja":
+                            st["subscribed"][m["key"]] = {"label": m["label"], "tp": m["tp"], "at": now}
+                    log("join", label="alle", count=len(prop[key].get("members") or []), answer=a[1])
+                    continue
                 if a[1] == "ja":
                     st["subscribed"][key] = {"label": prop[key]["label"], "tp": prop[key]["tp"], "at": now}
                 log("join", label=prop[key]["label"], answer=a[1])
             cands = self.unbound(rel, now, ACTIVE_S, bound_keys={x["key"] for x in sessions},
                                  bound_tps={x["tp"] for x in sessions if x.get("tp")})
-            is_open = lambda e: not e.get("answer") and now - float(e.get("at") or 0) < J.TTL_S
-            n_open = sum(1 for e in prop.values() if is_open(e))
             host = vmulti.machine_label()
+            # 0.33.3: at the start of a call ONE card for all sessions working in parallel
+            # ("3 Sessions arbeiten parallel ... alle abonnieren?"), single cards only later
+            fresh = [c for c in cands if c["key"] not in prop and not J.is_never(c["label"], c["tp"])]
+            if J.ALL_KEY not in prop and len(fresh) >= 2:
+                members = []
+                for c in fresh[:J.ALL_MAX]:
+                    try:
+                        members.append({"key": c["key"], "label": vrelayops.check_from(c["label"]),
+                                        "tp": c["tp"]})
+                    except vrelayops.RelayError:
+                        continue
+                res = post_proposal(rel, J.summary_body([m["label"] for m in members], host, now))
+                if res.get("ok") and res.get("id"):
+                    prop[J.ALL_KEY] = {"id": res["id"], "at": now, "label": "alle", "tp": "",
+                                       "members": members, "answer": None, "last_active": now}
+                    for m in members:   # asked in the summary: no single card meanwhile
+                        prop[m["key"]] = {"id": None, "at": now, "label": m["label"], "tp": m["tp"],
+                                          "last_active": now, "answer": None, "in_all": True}
+                    log("join", label="alle", count=len(members), why="proposed")
+                    J.save(st)
+                    return
+                log("join", label="alle", why="post-failed", status=res.get("status"))
+            is_open = lambda e: not e.get("answer") and now - float(e.get("at") or 0) < J.TTL_S
+            n_open = sum(1 for e in prop.values() if is_open(e) and e.get("id"))
             for c in cands:
                 e = prop.get(c["key"])
+                if e is not None and e.get("in_all") and not e.get("answer"):
+                    continue        # waits for the summary card
                 if e is not None:
                     gap = now - float(e.get("last_active") or 0)
                     e["last_active"] = now
@@ -1215,6 +1287,8 @@ class Watcher:
         if rel is None or now >= float(rel.get("expires_at") or 0):
             log("end", why="no-call")
             return END
+        if self.rel is not None and call_key(self.rel) != call_key(rel):
+            self.switch_call(now)
         if now >= self.not_found_until:
             try:
                 verdict, minutes = server_interval(rel)

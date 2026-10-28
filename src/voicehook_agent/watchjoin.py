@@ -202,6 +202,32 @@ def label_for(stem: str, tp: str) -> str:
 # --------------------------------------------------------------------------- #
 # card + answers
 # --------------------------------------------------------------------------- #
+ALL_KEY = "__alle__"   # 0.33.3: the summary card at the start of a call
+ALL_MAX = 12
+
+
+def summary_body(labels: list[str], host: str, now: float) -> dict:
+    """One card for every session working in parallel that is not in the call yet: names and
+    host only, never transcript content."""
+    n = len(labels)
+    names = ", ".join(labels)
+    return {
+        "question": f"{n} Sessions arbeiten gerade parallel auf {host} und sind nicht im Call, "
+                    f"alle abonnieren?"[:300],
+        "options": ["Ja, alle abonnieren", "Nein"],
+        "context": (f"Auf {host} arbeiten gerade {n} Sessions, die noch nicht zu diesem Call gehören: "
+                    f"{names}. Bei Ja zeigt der Wächter ab dem nächsten Durchlauf für jede ihren Stand "
+                    "auf dem Board, schreibt Aktivität und pflegt das Kanban. Bei Nein fragt er in "
+                    "diesem Call nicht wieder; später neu startende Sessions fragt er einzeln.")[:2000],
+        "faq": [{"q": "Welche Sessions sind das?", "a": names[:200]},
+                {"q": "Was passiert bei Ja?",
+                 "a": "Der Wächter meldet Stand, Aktivität und Aufträge dieser Sessions in diesem Call."},
+                {"q": "Sieht jemand Inhalte daraus?",
+                 "a": "Auf der Karte stehen nur Namen und Rechner, nichts aus den Gesprächen."}],
+        "ttl_s": int(TTL_S),
+    }
+
+
 def _named(label: str) -> str:
     """'Session <label>' unless the label already starts with Session."""
     return label if label.lower().startswith("session") else f"Session {label}"

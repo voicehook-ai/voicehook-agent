@@ -1146,25 +1146,47 @@ def test_repropose_only_after_two_hours_inactive(monkeypatch):
     assert len(f.proposals) == 2
 
 
-def test_at_most_three_open_proposals_rest_queued_not_dropped(monkeypatch):
+def test_call_start_one_summary_card_ja_subscribes_all(monkeypatch):
+    """0.33.3 (Oliver, new call): at the start ONE card '5 Sessions arbeiten parallel ...
+    alle abonnieren?', Ja subscribes every listed session; no single cards meanwhile."""
     f = Fake(monkeypatch)
     f.unbound = [_cand(key=f"u{i}", label=f"S{i}") for i in range(5)]
     w = f.watcher(cmd=None)
     w.tick()
-    assert len(f.proposals) == 3
+    assert len(f.proposals) == 1
+    q = f.proposals[0]["question"]
+    assert q.startswith("5 Sessions arbeiten gerade parallel") and "alle abonnieren" in q
+    assert "S0" in f.proposals[0]["context"] and "S4" in f.proposals[0]["context"]
     f.t += 50
     w.tick()
-    assert len(f.proposals) == 3
+    assert len(f.proposals) == 1                       # waits for the answer
+    f.answers = [{"type": "decision", "id": "d00000001", "verdict": "yes"}]
+    f.t += 50
+    w.tick()
+    sub = J.load(W.credential())["subscribed"]
+    assert {f"u{i}" for i in range(5)} <= set(sub)
+
+
+def test_after_summary_single_cards_capped_at_three(monkeypatch):
+    f = Fake(monkeypatch)
+    f.unbound = [_cand(key=f"u{i}", label=f"S{i}") for i in range(2)]
+    w = f.watcher(cmd=None)
+    w.tick()
     f.answers = [{"type": "decision", "id": "d00000001", "verdict": "no"}]
     f.t += 50
+    w.tick()                                           # summary answered Nein: never again
+    f.unbound = [_cand(key=f"n{i}", label=f"N{i}") for i in range(5)]
+    f.answers = []
+    f.t += 50
     w.tick()
-    assert len(f.proposals) == 4
+    singles = [p for p in f.proposals[1:]]
+    assert len(singles) == 3 and all("parallel" not in p["question"] for p in singles)
 
 
 def test_never_env_filters_label_and_all_env_skips_asking(monkeypatch):
     f = Fake(monkeypatch)
     f.unbound = [_cand(key="a", label="Kunde Mueller"), _cand(key="b", label="Okay")]
-    monkeypatch.setenv(J.ENV_NEVER, "kunde, geheim")
+    monkeypatch.setenv(J.ENV_NEVER, "kunde, geheim")   # one left after the filter: single card
     f.watcher(cmd=None).tick()
     assert [q["question"].split()[1] for q in f.proposals] == ["Okay"]
     assert J.is_never("Projekt GEHEIM 1", "") and not J.is_never("Okay", "")
@@ -1236,3 +1258,22 @@ def test_unbound_label_uses_transcript_cwd_not_bare_session(tmp_path):
     q = J.proposal_body(label, "crown", 0.0, 120.0)["question"]
     assert q.startswith("Session wt-shop ") and "Session Session" not in q
     assert J.proposal_body("Session 1a2b", "crown", 0.0, 120.0)["question"].startswith("Session 1a2b arbeitet")
+
+
+def test_credential_is_the_newest_call_not_the_first_by_name():
+    """Live 28.10.: after a new call the watcher kept the morning credential of the helper
+    first by name (Kunde-Talents) and never came along."""
+    vmulti.write_helper("Aaa-alt", URL, "tok" + "old1", "room", 3600, owner_session="", now=time.time() - 3000)
+    vmulti.write_helper("Zzz-neu", URL, "tok" + "new1", "room", 3600, owner_session="", now=time.time())
+    assert W.credential()["helper"] == "Zzz-neu"
+
+
+def test_watcher_switches_to_a_newer_call(monkeypatch):
+    f = Fake(monkeypatch, [])
+    w = f.watcher(cmd=None)
+    w.tick()
+    old = W.call_key(w.rel)
+    f.rel = {**f.rel, "token": "tok" + "new2"}          # a newer call's credential appears
+    f.t += 50
+    w.tick()
+    assert W.call_key(w.rel) != old and w.greeted is False
