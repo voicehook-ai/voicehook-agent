@@ -63,6 +63,7 @@ from . import activity as vact
 from . import multisession as vmulti
 from . import notify
 from . import relayops as vrelayops
+from . import watchkanban as K
 
 ALLOWED_INTERVALS = (1, 5, 10, 15)
 DEFAULT_INTERVAL = 15
@@ -354,7 +355,7 @@ def known_board(label: str, now: float | None = None) -> dict | None:
     return None
 
 
-def doing_meta(label: str, state: str, last: float, now: float) -> dict:
+def doing_meta(label: str, state: str, last: float, now: float, card: int | None = None) -> dict:
     """Mandatory background of the `doing` entry (context + 3 faq), from the state alone."""
     ago = ago_text(now - last) if last else "unbekannter Zeit"
     ctx = f"Sitzung {label}: {STATE_TEXT[state]}, zuletzt aktiv vor {ago}. Stand vom Beobachter, nicht von der Sitzung selbst."
@@ -368,7 +369,10 @@ def doing_meta(label: str, state: str, last: float, now: float) -> dict:
          "a": "Ja, die Sitzung wartet auf eine Eingabe oder Freigabe." if waiting
          else "Nein, im Moment wartet sie auf nichts."},
     ]
-    return {"context": ctx[:2000], "faq": [{"q": f["q"][:200], "a": f["a"][:200]} for f in faq]}
+    out = {"context": ctx[:2000], "faq": [{"q": f["q"][:200], "a": f["a"][:200]} for f in faq]}
+    if card:
+        out["card"] = card   # 0.33.0: the server mirror links the item to this Kanban card
+    return out
 
 
 STATE_FIELD = {ARBEITET: "arbeitet", STILL: "leerlauf", FRAGE: "frage"}   # server board states
@@ -683,8 +687,23 @@ def clean_sentence(text: object) -> str:
     return s if len(s.split()) >= 3 else ""
 
 
+def with_system(cmd: list[str], system: str) -> list[str]:
+    """The model command with its --system-prompt replaced (the default command's one asks
+    for a sentence); a custom command without that flag stays as it is."""
+    if "--system-prompt" not in cmd:
+        return list(cmd)
+    i = cmd.index("--system-prompt")
+    return [*cmd[:i + 1], system, *cmd[i + 2:]]
+
+
 def ask_model(cmd: list[str], prompt: str, run=None) -> tuple[str, int]:
-    """(sentence, tokens) from the model command (prompt on stdin; JSON like `claude -p
+    """(sentence, tokens) from the model command; ('', tokens) on any failure."""
+    text, toks = ask_raw(cmd, prompt, run)
+    return clean_sentence(text), toks
+
+
+def ask_raw(cmd: list[str], prompt: str, run=None) -> tuple[str, int]:
+    """(text, tokens) from the model command (prompt on stdin; JSON like `claude -p
     --output-format json`: {result, usage}; plain text also works). ('', tokens) on any
     failure. Never raises."""
     env = {**os.environ, ENV_CHILD: "1", "VOICEHOOK_NO_RELAY": "1"}
@@ -702,10 +721,10 @@ def ask_model(cmd: list[str], prompt: str, run=None) -> tuple[str, int]:
         toks = _tokens(d.get("usage"))
         if d.get("is_error") or r.returncode != 0:
             return "", toks
-        return clean_sentence(d.get("result")), toks
+        return str(d.get("result") or ""), toks
     if r.returncode != 0:
         return "", 0
-    return clean_sentence(out), (len(prompt) + len(out)) // 4
+    return out, (len(prompt) + len(out)) // 4
 
 
 def build_prompt(label: str, state: str, ago_s: float, text: str) -> str:
@@ -780,6 +799,7 @@ class Watcher:
         self.not_found_until = 0.0
         self.server_min: int | None = None
         self.rel: dict | None = None
+        self.kanban_off_until = 0.0          # old server (404 on /tasks): ask again later
         self.status_off_until = 0.0          # old server (404 on GET /status): ask again later
         self.un: dict[str, dict] = {}        # label -> {sig, since, post_at} of unobservable sessions
 
@@ -837,13 +857,13 @@ class Watcher:
 
     # ----- duties (one function each; a Kanban duty is added here later) -----
     def duty_status(self, rel: dict, label: str, sentence: str, state: str, last: float,
-                    now: float) -> dict:
+                    now: float, card: int | None = None) -> dict:
         """Post the sentence. A relay /status REPLACES the whole board of a sender, so:
         * the session's board is known locally (its own `status` posts of a CLI >= 0.32.0,
           or our earlier merge): merge into it, replace only `doing` + meta and `state`;
         * not known (older CLIs post their boards themselves): never touch the main board,
           post to the separate watcher board (sender `<label> Wächter`) instead."""
-        meta = doing_meta(label, state, last, now)
+        meta = doing_meta(label, state, last, now, card)
         base = known_board(label, self.clock())
         if base is None:
             sub = sub_label(label)
@@ -861,6 +881,157 @@ class Watcher:
                 post_board(rel, sub, {})
                 forget_board(sub)
         return res
+
+    def classify_order(self, order: str, cards: list[dict], now: float) -> tuple[str, int | None, str]:
+        """(action, nr, title) for one order: the cheapest model within the token cap, else
+        `new` with the first sentence as title."""
+        fallback = ("new", None, K.fallback_title(order))
+        if not self.model_allowed(now):
+            return fallback
+        text, toks = ask_raw(with_system(self.cmd, K.CLASSIFY_SYSTEM), K.build_classify_prompt(order, cards))
+        if toks:
+            self.spent.append((now, toks))
+        got = K.parse_classification(text, {c["nr"] for c in K.open_cards(cards)})
+        log("classify", tokens=toks, ok=bool(got))
+        if not got:
+            return fallback
+        return got[0], got[1], got[2] or fallback[2]
+
+    def _kanban_status(self, st: int, now: float, label: str) -> bool:
+        """True = stop for this tick (route missing, credential refused or server error)."""
+        if st == 404:
+            self.kanban_off_until = now + NOT_FOUND_RECHECK_S
+            log("kanban", label=label, why="no-route")
+            return True
+        if st in OVER or st >= 500:
+            log("error", where="kanban", label=label, status=st)
+            return True
+        return False
+
+    def duty_kanban(self, rel: dict, s: dict, label: str, state: str, m: dict, now: float) -> bool:
+        """Maintain the owner's Kanban for one observable session (see watchkanban.py).
+        True when the card the session works on changed (the board post is then due).
+        Never raises; logs labels, card numbers, counts only."""
+        if (now < self.kanban_off_until or vmulti._is_local(rel) or s.get("agent") == "codex"
+                or not s.get("tp")):
+            return False
+        key = s["key"]
+        cur = K.load_cursor(key)
+        first = cur is None or cur.get("tp") != s["tp"]
+        if first:
+            try:
+                start = max(0, os.stat(s["tp"]).st_size - K.READ_MAX)
+            except OSError:
+                return False
+            cur = {"tp": s["tp"], "off": start, "since": now - K.BACKFILL_S, "card": None,
+                   "linked": [], "tries": {}}
+        else:
+            cur = dict(cur)
+        card0 = cur.get("card")
+        try:
+            orders, new_off, pending = K.read_orders(s["tp"], int(cur.get("off") or 0),
+                                                     float(cur.get("since") or 0), first)
+            if first or new_off != cur.get("off"):
+                cur["off"] = new_off if not orders else cur["off"]
+                K.save_cursor(key, cur, now)
+            cards: list[dict] | None = None
+            done = 0
+            if orders:
+                st, cards = K.get_cards(rel, label)
+                if self._kanban_status(st, now, label):
+                    return False
+                for o in orders:
+                    wording, cut = K.fit_wording(o["text"])
+                    if cut:
+                        log("kanban", label=label, why="wording-cut")
+                    action, nr, title = self.classify_order(wording, cards, now)
+                    nr_out, st = None, 0
+                    if action == "sub" and nr:
+                        st, out = K.call(rel, "POST", f"tasks/{nr}/points",
+                                         {"from": label, "text": title[:200], "wording": wording})
+                        if st == 404:
+                            action = "new"       # the card is gone: a new one
+                        elif st < 300:
+                            nr_out = nr
+                            for c in cards:
+                                if c.get("nr") == nr:
+                                    c["points"] = [*(c["points"] if isinstance(c.get("points"), list) else []), title]
+                    if action == "new":
+                        body = {"from": label, "title": title, "wording": wording, "assignee": label,
+                                "state": "in_arbeit" if state == ARBEITET else "beauftragt"}
+                        st, out = K.call(rel, "POST", "tasks", body)
+                        if st < 300:
+                            nr_out = K.card_nr(out)
+                            if nr_out:
+                                cards.append({"nr": nr_out, "title": title, "state": body["state"]})
+                                m["card_state"] = body["state"]
+                    if st >= 300 and st not in (400, 409, 422):
+                        self._kanban_status(st, now, label)
+                        break
+                    if st >= 300:
+                        log("kanban", label=label, why="refused", status=st)
+                    done += 1
+                    cur["off"] = o["end"]
+                    if nr_out:
+                        cur["card"] = nr_out
+                        if action == "sub":
+                            m["card_state"] = None
+                    K.save_cursor(key, cur, now)
+                if done == len(orders):   # all consumed: skip over trailing non-order lines
+                    cur["off"] = max(cur["off"], new_off) if not pending else cur["off"]
+                    K.save_cursor(key, cur, now)
+                log("kanban", label=label, orders=len(orders), done=done, pending=pending,
+                    card=cur.get("card") or 0)
+            card = cur.get("card")
+            if card and state == ARBEITET and m.get("card_state") != "in_arbeit":
+                self._kanban_pick(rel, label, card, cards, cur, m, now)
+            if card:
+                self._kanban_links(rel, key, label, card, cur, now)
+        except vrelayops.RelayError:
+            log("error", where="kanban", label=label, status=503)
+        except Exception as e:  # noqa: BLE001
+            log("error", where="kanban", label=label, type=type(e).__name__)
+        m["card"] = cur.get("card")
+        return cur.get("card") != card0
+
+    def _kanban_pick(self, rel: dict, label: str, card: int, cards: list[dict] | None,
+                     cur: dict, m: dict, now: float) -> None:
+        """The card the session works on goes to in_arbeit (never done: that needs proof)."""
+        if cards is None:
+            st, cards = K.get_cards(rel, label)
+            if st >= 300:
+                return
+        c = next((x for x in cards if x.get("nr") == card), None)
+        if c is None or not K.is_open(c):
+            cur["card"] = None
+            m["card_state"] = None
+            return
+        if str(c.get("state") or "") == "in_arbeit":
+            m["card_state"] = "in_arbeit"
+            return
+        st, _out = K.call(rel, "POST", f"tasks/{card}/pick", {"from": label})
+        log("kanban", label=label, card=card, pick=st)
+        m["card_state"] = "in_arbeit" if st < 300 else "other"
+
+    def _kanban_links(self, rel: dict, skey: str, label: str, card: int, cur: dict, now: float) -> None:
+        """Link the open decisions this session created (notify-state) to its card."""
+        linked, tries = list(cur.get("linked") or []), dict(cur.get("tries") or {})
+        for slot_key, slot in notify.relay_slots():
+            if slot_key != skey and str(slot.get("from") or "") != label:
+                continue
+            for dec in dict.fromkeys([slot.get("id"), *(slot.get("ids") or [])]):
+                if not isinstance(dec, str) or not dec or dec in linked:
+                    continue
+                st, _o = K.call(rel, "POST", f"tasks/{card}/link", {"from": label, "decision": dec})
+                if st < 300 or st == 409:
+                    linked.append(dec)
+                elif st == 404:
+                    tries[dec] = int(tries.get(dec) or 0) + 1
+                    if tries[dec] >= K.LINK_TRIES:
+                        linked.append(dec)
+                log("kanban", label=label, card=card, link=st)
+        cur["linked"], cur["tries"] = linked[-50:], {k: v for k, v in tries.items() if k not in linked}
+        K.save_cursor(skey, cur, now)
 
     def duty_unobserved(self, rel: dict, label: str, now: float, interval_s: float) -> None:
         """A session the watcher cannot see (no transcript, no hook events): read its board
@@ -1013,14 +1184,17 @@ class Watcher:
             prev = m.get("state")
             changed = prev is not None and prev != state
             m["state"] = state
-            if not (prev is None or changed or now - m.get("post_at", 0.0) >= interval_s):
+            card_changed = self.duty_kanban(rel, s, label, state, m, now)
+            if card_changed:
+                m["post_at"] = 0.0
+            if not (prev is None or changed or card_changed or now - m.get("post_at", 0.0) >= interval_s):
                 continue
             if now - self_posted_at(label) < interval_s:
                 log("skip", label=label, why="self-reporting")
                 m["post_at"] = now
                 continue
             sent, toks, how = self.sentence(s, state, last, now, m, interval_s)
-            res = self.duty_status(rel, label, sent, state, last, now)
+            res = self.duty_status(rel, label, sent, state, last, now, m.get('card'))
             if res.get("status") in OVER:
                 if self.over_confirmed(now):
                     log("end", why="post-over")

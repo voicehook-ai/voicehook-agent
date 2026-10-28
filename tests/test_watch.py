@@ -794,3 +794,266 @@ def test_unobservable_old_server_404_skips_silently(monkeypatch):
     w = f.watcher(cmd=None, interval_flag=1)
     w.tick()
     assert f.posts == [] and w.status_off_until > f.t
+
+
+# ----- 0.33.0 Part B: Kanban maintenance --------------------------------------------------
+from voicehook_agent import watchkanban as K
+
+
+def _iso(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+
+def _user(text, ts=None, **kw):
+    ts = ts or _iso(NOW - 100)
+    return json.dumps({"type": "user", "timestamp": ts, "message": {"role": "user", "content": text}, **kw}) + "\n"
+
+
+def _tp(tmp_path, *texts):
+    tp = tmp_path / "s.jsonl"
+    tp.write_text("".join(_user(t) for t in texts))
+    os.utime(tp, (NOW - 5, NOW - 5))
+    return tp
+
+
+class KB:
+    """Fake Kanban server behind watchkanban.call."""
+
+    def __init__(self, monkeypatch):
+        self.cards: list[dict] = []
+        self.calls: list[tuple[str, str, dict | None]] = []
+        self.fail = {}                      # path prefix -> status
+        monkeypatch.setattr(K, "call", self.call)
+
+    def call(self, rel, method, path, body=None):
+        self.calls.append((method, path, body))
+        for pre, st in self.fail.items():
+            if path.startswith(pre):
+                return st, {}
+        if method == "GET":
+            return 200, {"states": [], "cards": self.cards}
+        if path == "tasks":
+            for c in self.cards:
+                if c["orders"][0]["wording"] == body["wording"]:
+                    return 200, {"nr": c["nr"]}
+            nr = len(self.cards) + 1
+            self.cards.append({"nr": nr, "title": body["title"], "state": body["state"],
+                               "orders": [{"wording": body["wording"]}], "points": []})
+            return 201, {"nr": nr}
+        if path.endswith("/points"):
+            nr = int(path.split("/")[1])
+            next(c for c in self.cards if c["nr"] == nr)["points"].append(body["text"])
+            return 201, {}
+        if path.endswith("/pick"):
+            nr = int(path.split("/")[1])
+            next(c for c in self.cards if c["nr"] == nr)["state"] = "in_arbeit"
+            return 200, {}
+        return 200, {}
+
+    def writes(self, suffix=""):
+        return [c for c in self.calls if c[0] == "POST" and c[1].endswith(suffix)]
+
+
+def _kw(f, tp, state_ev="turn", label="Alpha"):
+    return f.watcher(cmd=None, interval_flag=5), [sess(label=label, ev=state_ev, ev_at=NOW - 5, tp=str(tp))]
+
+
+def test_new_order_creates_card_with_wording_and_assignee(monkeypatch, tmp_path):
+    kb = KB(monkeypatch)
+    tp = _tp(tmp_path, "Baue die Kartenansicht fertig. Danach den Export.")
+    f = Fake(monkeypatch)
+    w, f.sessions = _kw(f, tp)
+    w.tick()
+    (_m, _path, body), = kb.writes("tasks")
+    assert body["from"] == "Alpha" and body["assignee"] == "Alpha" and body["state"] == "in_arbeit"
+    assert body["wording"] == "Baue die Kartenansicht fertig. Danach den Export."
+    assert body["title"] == "Baue die Kartenansicht fertig."          # no model: first sentence
+    # the card nr lands in the doing meta of the board post
+    board = [p for p in f.posts if p[0] == "board"][-1][2]["body"]
+    assert board["meta"]["doing"]["card"] == 1
+
+
+def test_idle_session_gets_beauftragt(monkeypatch, tmp_path):
+    kb = KB(monkeypatch)
+    tp = _tp(tmp_path, "Mach bitte den Import")
+    os.utime(tp, (NOW - 3000, NOW - 3000))
+    f = Fake(monkeypatch)
+    w, f.sessions = _kw(f, tp, "stop")
+    f.sessions[0]["ev_at"] = NOW - 3000
+    w.tick()
+    assert kb.writes("tasks")[0][2]["state"] == "beauftragt"
+
+
+def test_cursor_prevents_duplicates_across_ticks_and_restart(monkeypatch, tmp_path):
+    kb = KB(monkeypatch)
+    tp = _tp(tmp_path, "Erster Auftrag hier")
+    f = Fake(monkeypatch)
+    w, f.sessions = _kw(f, tp)
+    w.tick()
+    f.t += 50
+    w.tick()
+    w2 = f.watcher(cmd=None, interval_flag=5)      # a restarted watcher: cursor is on disk
+    f.t += 50
+    w2.tick()
+    assert len(kb.writes("tasks")) == 1
+    with open(tp, "a") as fh:
+        fh.write(_user("Zweiter Auftrag da"))
+    f.t += 50
+    w2.tick()
+    assert len(kb.writes("tasks")) == 2
+
+
+def test_second_order_classified_sub_adds_point(monkeypatch, tmp_path):
+    kb = KB(monkeypatch)
+    tp = _tp(tmp_path, "Baue die Kartenansicht")
+    f = Fake(monkeypatch)
+    w, f.sessions = _kw(f, tp)
+    w.tick()
+    w.cmd = ["fake-model"]
+    seen = []
+
+    def run(cmd, input=None, **kw):
+        seen.append((cmd, input))
+        class R:
+            returncode = 0
+            stdout = json.dumps({"result": '{"action":"sub","nr":1,"title":"Farben anpassen"}',
+                                 "usage": {"input_tokens": 100, "output_tokens": 10}})
+        return R()
+    monkeypatch.setattr(W.subprocess, "run", run)
+    with open(tp, "a") as fh:
+        fh.write(_user("Und die Farben der Karten anpassen"))
+    f.t += 50
+    w.tick()
+    (_m, path, body), = kb.writes("/points")
+    assert path == "tasks/1/points" and body["text"] == "Farben anpassen"
+    assert body["wording"] == "Und die Farben der Karten anpassen"
+    assert "1: Baue die Kartenansicht" in seen[0][1] and w.used(f.t) == 110
+    assert len(kb.writes("tasks")) == 1
+
+
+def test_model_garbage_or_cap_reached_falls_back_to_new(monkeypatch, tmp_path):
+    kb = KB(monkeypatch)
+    tp = _tp(tmp_path, "Erster Auftrag hier", "Zweiter Auftrag hier")
+    f = Fake(monkeypatch)
+    f.sessions = [sess(ev="turn", ev_at=NOW - 5, tp=str(tp))]
+    monkeypatch.setattr(W.subprocess, "run", f.model(sentence="kein json", tokens=5000))
+    w = f.watcher(tokens=5000, interval_flag=5)      # one call uses the whole cap
+    w.tick()
+    assert len(f.cmd_calls) == 1                     # cap reached after the first order
+    assert [c[2]["title"] for c in kb.writes("tasks")] == ["Erster Auftrag hier", "Zweiter Auftrag hier"]
+
+
+def test_at_most_five_orders_per_tick_rest_next_tick(monkeypatch, tmp_path):
+    kb = KB(monkeypatch)
+    tp = _tp(tmp_path, *[f"Auftrag Nummer {i} bitte" for i in range(7)])
+    f = Fake(monkeypatch)
+    w, f.sessions = _kw(f, tp)
+    w.tick()
+    assert len(kb.writes("tasks")) == 5
+    f.t += 50
+    w.tick()
+    assert len(kb.writes("tasks")) == 7
+
+
+def test_non_orders_are_skipped_router_kept(monkeypatch, tmp_path):
+    kb = KB(monkeypatch)
+    tp = tmp_path / "s.jsonl"
+    tool = json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "content": "x y z"}]}}) + "\n"
+    tp.write_text(tool + _user("<system-reminder>hallo welt</system-reminder>") + _user("ok")
+                  + _user("[Router] Oliver sagt: bitte den Build reparieren") + _user("x y", isMeta=True)
+                  + _user("hinweis", isSidechain=True))
+    os.utime(tp, (NOW - 5, NOW - 5))
+    f = Fake(monkeypatch)
+    w, f.sessions = _kw(f, tp)
+    w.tick()
+    ws = [c[2]["wording"] for c in kb.writes("tasks")]
+    assert ws == ["[Router] Oliver sagt: bitte den Build reparieren"]
+
+
+def test_old_orders_before_first_sight_are_ignored_and_long_wording_cut(monkeypatch, tmp_path):
+    kb = KB(monkeypatch)
+    tp = tmp_path / "s.jsonl"
+    long = ("Das ist ein langer Satz. " * 100).strip()
+    tp.write_text(_user("Uralter Auftrag hier", ts="2020-01-01T00:00:00Z") + _user(long))
+    os.utime(tp, (NOW - 5, NOW - 5))
+    f = Fake(monkeypatch)
+    w, f.sessions = _kw(f, tp)
+    w.tick()
+    ws = [c[2]["wording"] for c in kb.writes("tasks")]
+    assert len(ws) == 1 and len(ws[0]) <= K.WORDING_MAX and ws[0].endswith("Satz.")
+
+
+def test_pick_sets_in_arbeit_and_never_done(monkeypatch, tmp_path):
+    kb = KB(monkeypatch)
+    tp = _tp(tmp_path, "Baue die Kartenansicht")
+    f = Fake(monkeypatch)
+    w, f.sessions = _kw(f, tp)
+    w.tick()
+    kb.cards[0]["state"] = "beauftragt"              # someone put it back
+    w.mem[f.sessions[0]["key"]]["card_state"] = None
+    f.t += 50
+    w.tick()
+    assert [c[1] for c in kb.writes("/pick")] == ["tasks/1/pick"]
+    assert not kb.writes("/done")
+
+
+def test_decision_of_session_is_linked_to_card(monkeypatch, tmp_path):
+    kb = KB(monkeypatch)
+    tp = _tp(tmp_path, "Baue die Kartenansicht")
+    f = Fake(monkeypatch)
+    w, f.sessions = _kw(f, tp)
+    _slot(skey=f.sessions[0]["key"], at=NOW - 10, dec="d777", label="Alpha")
+    w.tick()
+    assert [(c[1], c[2]["decision"]) for c in kb.writes("/link")] == [("tasks/1/link", "d777")]
+    f.t += 50
+    w.tick()
+    assert len(kb.writes("/link")) == 1              # linked once
+
+
+def test_old_server_404_on_tasks_skips_silently_and_retries_later(monkeypatch, tmp_path):
+    kb = KB(monkeypatch)
+    kb.fail["tasks"] = 404
+    tp = _tp(tmp_path, "Baue die Kartenansicht")
+    f = Fake(monkeypatch)
+    w, f.sessions = _kw(f, tp)
+    assert w.tick() == W.OK
+    assert [p for p in f.posts if p[0] == "board"]     # the status duty is unaffected
+    n = len(kb.calls)
+    f.t += 50
+    w.tick()
+    assert len(kb.calls) == n                          # not asked again before the recheck
+    kb.fail = {}
+    f.t += W.NOT_FOUND_RECHECK_S
+    f.rel = _relay(expires=f.t + 3600)
+    w.tick()
+    assert len(kb.writes("tasks")) == 1                # cursor kept: nothing lost
+
+
+def test_server_error_keeps_cursor_and_logs_no_text(monkeypatch, tmp_path):
+    kb = KB(monkeypatch)
+    kb.fail["tasks"] = 500
+    tp = _tp(tmp_path, "Geheimer Auftrag Wortlaut")
+    f = Fake(monkeypatch)
+    w, f.sessions = _kw(f, tp)
+    w.tick()
+    kb.fail = {}
+    f.t += 50
+    w.tick()
+    assert len(kb.writes("tasks")) >= 1 and kb.cards[0]["orders"][0]["wording"] == "Geheimer Auftrag Wortlaut"
+    logtxt = (W.vact.state_root() / W.LOG_NAME).read_text()
+    assert "Geheimer" not in logtxt and "kanban" in logtxt
+
+
+def test_cursor_file_is_private(monkeypatch, tmp_path):
+    KB(monkeypatch)
+    tp = _tp(tmp_path, "Baue die Kartenansicht")
+    f = Fake(monkeypatch)
+    w, f.sessions = _kw(f, tp)
+    w.tick()
+    assert oct((W.vact.state_root() / K.CURSOR_NAME).stat().st_mode & 0o777) == "0o600"
+
+
+def test_clean_meta_accepts_card_only_as_positive_int():
+    from voicehook_agent import relay
+    assert relay.clean_meta({"card": 3}) == {"card": 3}
+    assert relay.clean_meta({"card": 0}) is None and relay.clean_meta({"card": True}) is None
