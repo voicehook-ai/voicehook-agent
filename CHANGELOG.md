@@ -3,6 +3,10 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.33.0
+
+- **Watcher: truthful status.** An inactive session (state still) now reads `inaktiv seit 1 Std, letzter Stand: <the session's own last doing>` as fixed text, never a model call; the session's own last doing is remembered separately and never overwritten by the watcher's sentences (unknown: `inaktiv seit 1 Std`). Model calls only for working / waiting sessions and only when the last message changed. Sessions the watcher cannot observe: it reads their board with `GET <relay>/status?from=<label>` (a server without the route, 404, is skipped silently), tracks locally when it last changed, and after more than one interval without change posts `keine Meldung seit X, letzter Stand: ...` to the separate `<label> (Wächter)` board (never the main board, never `state`); cleared when the session reports again.
+
 ## 0.32.3
 
 - **Watcher survives a server deploy:** one 401/403/410 no longer ends it (seen live: the watcher stopped during a deploy while the call went on). It ends only after 3 such answers in a row over at least 90 s. It never marks a token dead any more (it uses another session's credential), and a 401/403/410 on deleting a decision only skips that session.

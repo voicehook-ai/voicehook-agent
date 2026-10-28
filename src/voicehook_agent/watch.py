@@ -57,6 +57,7 @@ import sys
 import time
 from collections import deque
 from pathlib import Path
+from urllib.parse import quote
 
 from . import activity as vact
 from . import multisession as vmulti
@@ -235,7 +236,7 @@ def mark_self(label: str, now: float | None = None, board: dict | None = None) -
     and remembers the board (a relay /status REPLACES the whole board of a sender, so the
     watcher must merge into it, see merge_board). Best effort, never raises."""
     if board is not None:
-        remember_board(label, board, now)
+        remember_board(label, board, now, own=True)
     try:
         t = time.time() if now is None else now
         path = vact.state_root() / SELF_NAME
@@ -278,14 +279,45 @@ def _boards_rw(fn):
         os.close(fd)
 
 
-def remember_board(label: str, body: dict, now: float | None = None) -> None:
+OWN_KEEP_S = 43200.0
+OWN_MAX = 300
+WATCHER_PREFIXES = ("inaktiv seit", "inaktiv,", "keine Meldung seit", "Die Sitzung ")
+
+
+def remember_board(label: str, body: dict, now: float | None = None, own: bool = False) -> None:
     """The board body last posted for `label` (by its session or by the watcher). Local file
-    0600, never sent anywhere. Best effort."""
+    0600, never sent anywhere. Best effort. own=True: the SESSION posted it; its `doing` is
+    kept separately ("own") and survives every later watcher post (0.33.0: the inactive
+    sentence quotes it)."""
     try:
         t = time.time() if now is None else now
-        _boards_rw(lambda d: d.__setitem__(str(label), {"b": body, "at": t}))
+
+        def put(d: dict) -> None:
+            old = d.get(str(label)) if isinstance(d.get(str(label)), dict) else {}
+            e: dict = {"b": body, "at": t}
+            doing = str(body.get("doing") or "").strip()
+            if own and doing:
+                e["own"], e["own_at"] = doing[:OWN_MAX], t
+            elif old.get("own"):
+                e["own"], e["own_at"] = old["own"], old.get("own_at", 0)
+            d[str(label)] = e
+        _boards_rw(put)
     except Exception:  # noqa: BLE001, S110
         pass
+
+
+def own_doing(label: str, now: float | None = None) -> str:
+    """The last real `doing` the session itself posted (never a watcher sentence), else ''."""
+    t = time.time() if now is None else now
+    try:
+        d = json.loads((vact.state_root() / BOARDS_NAME).read_text(encoding="utf-8"))
+        e = d.get(str(label)) if isinstance(d, dict) else None
+        if isinstance(e, dict) and isinstance(e.get("own"), str) and t - float(e.get("own_at") or 0) < OWN_KEEP_S:
+            own = e["own"].strip()
+            return "" if own.startswith(WATCHER_PREFIXES) else own
+    except (OSError, ValueError, TypeError):
+        pass
+    return ""
 
 
 def forget_board(label: str) -> None:
@@ -586,6 +618,27 @@ def ago_text(secs: float) -> str:
     return "einer Stunde" if h == 1 else f"{h} Stunden"
 
 
+def ago_short(secs: float) -> str:
+    m = int(max(0.0, secs) // 60)
+    if m < 1:
+        return "unter 1 Min"
+    if m < 60:
+        return f"{m} Min"
+    h = m // 60
+    return f"{h} Std" if h < 48 else f"{h // 24} Tagen"
+
+
+def inactive_sentence(own: str, last: float, now: float) -> str:
+    """Fixed text (no model) of an inactive session: the real state, the time and the last
+    real doing of the session itself. Unknown doing: only the time."""
+    base = f"inaktiv seit {ago_short(now - last)}" if last else "inaktiv, letzte Aktivität unbekannt"
+    return f"{base}, letzter Stand: {own}"[:OWN_MAX + 60] if own else base
+
+
+def silent_sentence(doing: str, quiet_s: float) -> str:
+    return f"keine Meldung seit {ago_short(quiet_s)}, letzter Stand: {doing}"[:OWN_MAX + 60]
+
+
 def fixed_sentence(state: str, ago_s: float | None) -> str:
     """ago_s None: last activity unknown (a helper without transcript or hook events)."""
     if ago_s is None:
@@ -686,6 +739,15 @@ def post_board(rel: dict, label: str, body: dict) -> dict:
     return vrelayops.remote_status(rel, label, body)
 
 
+def get_status(rel: dict, label: str) -> tuple[int, dict]:
+    """GET <relay>/status?from=<label> -> (http status, {"board", "state"}); 0.33.0 server
+    read path (voicehook-v4 #737). A local relay has none: (404, {}). RelayError on network."""
+    if vmulti._is_local(rel):
+        return 404, {}
+    url = f"{vrelayops.endpoint(rel, 'status')}?from={quote(label, safe='')}"
+    return vrelayops._http(rel, "GET", url, None, 10.0)
+
+
 def post_activity(rel: dict, label: str, sentence: str) -> dict:
     if vmulti._is_local(rel):
         ok = vmulti.append_local(rel, f"{label}: {sentence}")
@@ -718,6 +780,8 @@ class Watcher:
         self.not_found_until = 0.0
         self.server_min: int | None = None
         self.rel: dict | None = None
+        self.status_off_until = 0.0          # old server (404 on GET /status): ask again later
+        self.un: dict[str, dict] = {}        # label -> {sig, since, post_at} of unobservable sessions
 
     def over_confirmed(self, now: float) -> bool:
         """One more 401/403/410 answer; True when the call is over for sure (OVER_CONFIRM in a
@@ -748,18 +812,27 @@ class Watcher:
                  interval_s: float) -> tuple[str, int, str]:
         """(sentence, tokens, how) how = model | fixed. One model call per session per
         interval, only when the session did something since the last call."""
+        if state == STILL:   # 0.33.0: inactive = real state + time + last real doing, no model
+            return inactive_sentence(own_doing(s["label"], now), last, now), 0, "fixed"
         fixed = fixed_sentence(state, now - last if last else None)
         due_call = now - m.get("call_at", 0.0) >= interval_s and last > m.get("call_last", 0.0)
         if not due_call or not self.model_allowed(now) or not s.get("tp"):
-            return fixed, 0, "fixed"
+            same = m.get("sent") and m.get("sent_state") == state and last <= m.get("call_last", 0.0)
+            return (m["sent"] if same else fixed), 0, "fixed"
         text = last_assistant_text(s["tp"])
         m["call_at"], m["call_last"] = now, last
+        key = (state, text)
+        if m.get("sent") and m.get("call_key") == key:   # the sentence would not change
+            return m["sent"], 0, "fixed"
+        m["call_key"] = key
         t0 = time.monotonic()
         sent, toks = ask_model(self.cmd, build_prompt(s["label"], state, now - last, text))
         if toks:
             self.spent.append((now, toks))
         log("model", label=s["label"], state=state, tokens=toks, ok=bool(sent),
             ms=int((time.monotonic() - t0) * 1000))
+        if sent:
+            m["sent"], m["sent_state"] = sent, state
         return (sent, toks, "model") if sent else (fixed, toks, "fixed")
 
     # ----- duties (one function each; a Kanban duty is added here later) -----
@@ -788,6 +861,56 @@ class Watcher:
                 post_board(rel, sub, {})
                 forget_board(sub)
         return res
+
+    def duty_unobserved(self, rel: dict, label: str, now: float, interval_s: float) -> None:
+        """A session the watcher cannot see (no transcript, no hook events): read its board
+        from the server and track locally when it last changed (the server sends no time).
+        Unchanged for longer than the interval: `keine Meldung seit X, letzter Stand: ...` on
+        the separate watcher board (never the main board, never `state`); cleared when the
+        session reports again. A server without the route (404): skipped silently."""
+        if now < self.status_off_until:
+            return
+        try:
+            st, out = get_status(rel, label)
+        except vrelayops.RelayError:
+            return
+        if st == 404:
+            self.status_off_until = now + NOT_FOUND_RECHECK_S
+            return
+        if st != 200:
+            return
+        board = out.get("board")
+        doing = str(board.get("doing") or "").strip() if isinstance(board, dict) else ""
+        sub = sub_label(label)
+        m = self.un.setdefault(label, {})
+        if not doing:
+            return
+        sig = json.dumps(board, sort_keys=True, ensure_ascii=False)
+        if m.get("sig") != sig:
+            m.update(sig=sig, since=now, post_at=0.0)
+            if known_board(sub, self.clock()) is not None:   # it reports again
+                post_board(rel, sub, {})
+                forget_board(sub)
+                log("cleared", label=label, why="reports-again")
+            return
+        quiet = now - float(m.get("since") or now)
+        if quiet <= interval_s or now - float(m.get("post_at") or 0) < interval_s:
+            return
+        ago = ago_short(quiet)
+        body = {"doing": silent_sentence(doing, quiet), "meta": {"doing": {
+            "context": (f"Sitzung {label} meldet sich nicht und ist für den Beobachter nicht sichtbar. "
+                        f"Stand ist die letzte Meldung der Sitzung, unverändert seit {ago}.")[:2000],
+            "faq": [{"q": f"Warum steht bei {label} nichts Neues?",
+                     "a": f"Die Sitzung hat sich seit {ago} nicht gemeldet."},
+                    {"q": f"Ist {label} noch aktiv?",
+                     "a": "Unbekannt, der Beobachter kann die Sitzung nicht sehen."},
+                    {"q": "Wessen Stand ist das?",
+                     "a": "Der letzte Stand, den die Sitzung selbst gemeldet hat."}]}}}
+        res = post_board(rel, sub, body)
+        if res.get("ok"):
+            remember_board(sub, body, now)
+            m["post_at"] = now
+        log("silent", label=label, quiet_min=int(quiet // 60), ok=bool(res.get("ok")))
 
     def duty_cleanup(self, rel: dict, live: set[str]) -> None:
         """Clear the watcher boards of sessions that are gone / no longer observable
@@ -871,7 +994,14 @@ class Watcher:
         live: set[str] = set()
         for s in sessions:
             if not observable(s):
-                continue   # never claim a state that cannot be seen; only decisions cleanup applies
+                # never claim a state that cannot be seen; the server board is tracked instead
+                try:
+                    ulabel = vrelayops.check_from(s["label"])
+                except vrelayops.RelayError:
+                    continue
+                live.add(ulabel)
+                self.duty_unobserved(rel, ulabel, now, interval_s)
+                continue
             state, last = classify_state(s, now)
             views[s["key"]] = (state, last)
             try:
@@ -899,7 +1029,7 @@ class Watcher:
                 return OK
             bad = bad or not res.get("ok")
             if changed:
-                bad = bad or not self.duty_activity(rel, label, sent).get("ok")
+                bad = bad or not self.duty_activity(rel, label, sent[:SENTENCE_MAX]).get("ok")
             m["post_at"] = now
             log("post", label=label, state=state, how=how, tokens=toks, changed=changed,
                 ok=bool(res.get("ok")))

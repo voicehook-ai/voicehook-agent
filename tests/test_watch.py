@@ -41,6 +41,8 @@ class Fake:
         monkeypatch.setattr(W, "post_board", self._board)
         monkeypatch.setattr(W, "post_activity", lambda rel, label, s: self._post("act", label, s))
         monkeypatch.setattr(W, "delete_decision", self._delete)
+        self.status = (404, {})          # GET <relay>/status?from=: old server by default
+        monkeypatch.setattr(W, "get_status", lambda rel, label: self.status)
         self.deleted: list[str] = []
         self.delete_status = 200
 
@@ -328,9 +330,11 @@ def test_model_sentence_and_budget_fallback(monkeypatch, tmp_path):
     assert w.used(f.t) == 1500 and len(f.cmd_calls) == 1
     assert "fertig" in f.cmd_calls[0]
     # activity again, interval passed, budget not yet used up -> model; then used up -> fixed
+    tp.write_text(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "zweiter Stand"}]}}))
     os.utime(tp, (f.t + 70, f.t + 70)); f.t += 80
     w.tick()
     assert len(f.cmd_calls) == 2 and w.used(f.t) == 3000
+    tp.write_text(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "dritter Stand"}]}}))
     os.utime(tp, (f.t + 70, f.t + 70)); f.t += 80
     w.tick()
     assert len(f.cmd_calls) == 2                    # budget used up: no call
@@ -350,7 +354,7 @@ def test_one_model_call_per_session_per_interval(monkeypatch, tmp_path):
     f.t += 60
     w.tick()
     assert len(f.cmd_calls) == 1
-    assert f.posts[-1][0] == "act" and "Die Sitzung" in f.posts[-1][2]["s"]
+    assert f.posts[-1][0] == "act" and f.posts[-1][2]["s"].startswith("inaktiv seit")
 
 
 def test_no_model_means_fixed_sentence(monkeypatch):
@@ -548,7 +552,7 @@ def test_watcher_posts_merged_board_with_own_open_items(monkeypatch):
     w = f.watcher(cmd=None, interval_flag=5)
     w.tick()
     body = f.posts[0][2]["body"]
-    assert body["doing"].startswith("Die Sitzung") and body["open"] == ["Frage 1"]
+    assert body["doing"].startswith("inaktiv seit") and body["open"] == ["Frage 1"]
     assert body["done"] == ["Fertig 1"] and body["meta"]["open"] == [{"context": "warum"}]
     assert body["meta"]["doing"]["context"] and len(body["meta"]["doing"]["faq"]) == 3
     # the next watcher post merges into its own last post: open/done still there
@@ -723,3 +727,70 @@ def test_helper_command_makes_its_session_observable(monkeypatch, tmp_path):
     assert not [s for s in W.discover(_relay(), time.time(), ps=lambda: "",
                                       claude_root=tmp_path / "none", codex_root=tmp_path / "none")
                 if s["label"] == "dev-8"]
+
+
+# ----- 0.33.0 Part A: truthful status ----------------------------------------------------
+def test_inactive_text_has_time_and_last_real_doing(monkeypatch):
+    f = Fake(monkeypatch, [sess(ev="stop", ev_at=NOW - 3700)])
+    W.mark_self("Alpha", now=f.t - 5000, board={"doing": "baut die Kartenansicht", "open": ["x"]})
+    w = f.watcher(cmd=["fake-model"], interval_flag=5)
+    w.tick()
+    assert f.posts[0][2]["s"] == "inaktiv seit 1 Std, letzter Stand: baut die Kartenansicht"
+    # the watcher's own sentence never replaces the remembered doing of the session
+    f.t += 400
+    w.tick()
+    assert W.own_doing("Alpha", f.t) == "baut die Kartenansicht"
+    assert f.posts[-1][2]["s"].startswith("inaktiv seit 1 Std, letzter Stand: baut die")
+
+
+def test_inactive_text_without_known_doing_and_no_model(monkeypatch):
+    f = Fake(monkeypatch, [sess(ev="stop", ev_at=NOW - 3700)])
+    monkeypatch.setattr(W.subprocess, "run", lambda *a, **k: pytest.fail("model called for inactive"))
+    f.watcher(tokens=100000).tick()
+    assert f.posts[0][2]["s"] == "inaktiv seit 1 Std"
+
+
+def test_model_not_called_when_sentence_would_not_change(monkeypatch, tmp_path):
+    tp = tmp_path / "t.jsonl"
+    tp.write_text(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "gleich"}]}}))
+    f = Fake(monkeypatch, [sess(ev="turn", ev_at=NOW - 5, tp=str(tp))])
+    os.utime(tp, (NOW - 5, NOW - 5))
+    monkeypatch.setattr(W.subprocess, "run", f.model())
+    w = f.watcher(tokens=100000, interval_flag=1)
+    w.tick()
+    os.utime(tp, (f.t + 70, f.t + 70)); f.t += 80      # activity, same last message
+    w.tick()
+    assert len(f.cmd_calls) == 1
+    assert f.posts[-1][2]["s"] == "Die Sitzung baut gerade die neue Seite."
+
+
+def test_unobservable_session_silent_then_cleared(monkeypatch):
+    f = Fake(monkeypatch, [sess(key="helper-crown", label="crown")])
+    f.status = (200, {"board": {"doing": "teste den Import"}, "state": "arbeitet"})
+    w = f.watcher(cmd=None, interval_flag=5)
+    assert w.tick() == W.OK and f.posts == []           # baseline, nothing yet
+    f.t += 200
+    w.tick()
+    assert f.posts == []                                # not longer than the interval
+    f.t += 200
+    w.tick()
+    b = [p for p in f.posts if p[0] == "board"]
+    assert len(b) == 1 and b[0][1] == "crown (Wächter)"
+    assert b[0][2]["s"] == "keine Meldung seit 6 Min, letzter Stand: teste den Import"
+    assert "state" not in b[0][2]["body"] and len(b[0][2]["body"]["meta"]["doing"]["faq"]) == 3
+    f.t += 60
+    w.tick()
+    assert len([p for p in f.posts if p[0] == "board"]) == 1   # once per interval
+    f.status = (200, {"board": {"doing": "fertig mit dem Import"}, "state": "arbeitet"})
+    f.t += 60
+    w.tick()
+    last = [p for p in f.posts if p[0] == "board"][-1]
+    assert last[1] == "crown (Wächter)" and last[2]["body"] == {}
+    assert W.sub_boards() == []
+
+
+def test_unobservable_old_server_404_skips_silently(monkeypatch):
+    f = Fake(monkeypatch, [sess(key="helper-crown", label="crown")])
+    w = f.watcher(cmd=None, interval_flag=1)
+    w.tick()
+    assert f.posts == [] and w.status_off_until > f.t
