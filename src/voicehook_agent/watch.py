@@ -85,6 +85,7 @@ ENV_OFF = "VOICEHOOK_WATCH"
 ENV_INTERVAL = "VOICEHOOK_WATCH_INTERVAL"
 ENV_TOKENS = "VOICEHOOK_WATCH_TOKENS_PER_HOUR"
 ENV_MODEL_CMD = "VOICEHOOK_WATCH_MODEL_CMD"
+ENV_ALL = "VOICEHOOK_WATCH_ALL"      # 1 = also sessions only found by their transcript (privacy: off)
 ENV_CHILD = "VOICEHOOK_WATCH_CHILD"   # set for the model command: its hooks must not report
 LOCK_NAME = "watch.lock"
 LOG_NAME = "watch.log"
@@ -304,7 +305,7 @@ def known_board(label: str, now: float | None = None) -> dict | None:
 
 def doing_meta(label: str, state: str, last: float, now: float) -> dict:
     """Mandatory background of the `doing` entry (context + 3 faq), from the state alone."""
-    ago = ago_text(now - last if last else 0.0)
+    ago = ago_text(now - last) if last else "unbekannter Zeit"
     ctx = f"Sitzung {label}: {STATE_TEXT[state]}, zuletzt aktiv vor {ago}. Stand vom Beobachter, nicht von der Sitzung selbst."
     waiting = state == FRAGE
     faq = [
@@ -427,12 +428,20 @@ def _codex_sessions() -> Path:
     return agents.codex_home() / "sessions"
 
 
+def watch_all(env=None) -> bool:
+    env = os.environ if env is None else env
+    return str(env.get(ENV_ALL) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def discover(rel: dict, now: float, *, ps=None, claude_root: Path | None = None,
              codex_root: Path | None = None) -> list[dict]:
-    """Local sessions: [{key, label, agent, tp, ev, ev_text, ev_at}]. Registry entries
-    (relay-state.json; the joining session itself excluded, it feeds the call directly) +
-    unregistered sessions whose transcript changed recently, at most as many as agent
-    processes run. Never raises."""
+    """Local sessions of THIS call: [{key, label, agent, tp, ev, ev_text, ev_at}].
+    (a) registry entries that reported through the relay (relay-state.json; the joining
+    session itself excluded, it feeds the call directly), (b) sessions with a helper
+    credential (helpers/<label>.json). Privacy: other sessions of the machine (private or
+    customer work on a shared box) are NOT covered; only with VOICEHOOK_WATCH_ALL=1 also
+    unregistered sessions whose transcript changed recently (at most as many as agent
+    processes run). Never raises."""
     out: list[dict] = []
     try:
         owner = str(rel.get("owner_session") or "") if not rel.get("helper") else ""
@@ -455,6 +464,17 @@ def discover(rel: dict, now: float, *, ps=None, claude_root: Path | None = None,
                         "tp": tp, "ev": str(me.get("ev") or ""),
                         "ev_text": str(me.get("ev_text") or ""),
                         "ev_at": float(me.get("ev_at") or 0)})
+        for p, e in vmulti._helper_entries():   # (b) helper credential = in this call
+            if vmulti._usable(e, p, now) is None:
+                continue
+            name = str(e.get("helper") or "")
+            if not name or any(vmulti.helper_key(x["label"]) == name or x["key"] == e.get("owner_session")
+                               for x in out):
+                continue
+            out.append({"key": "helper-" + name, "label": name, "agent": "claude", "tp": "",
+                        "ev": "", "ev_text": "", "ev_at": 0.0})
+        if not watch_all():
+            return out[:MAX_SESSIONS]
         procs = _running_agents(ps)
         roots = ((claude_root or vrelayops._config_dir() / "projects", "*/*.jsonl", "claude"),
                  (codex_root or _codex_sessions(), "**/rollout-*.jsonl", "codex"))
@@ -546,7 +566,12 @@ def ago_text(secs: float) -> str:
     return "einer Stunde" if h == 1 else f"{h} Stunden"
 
 
-def fixed_sentence(state: str, ago_s: float) -> str:
+def fixed_sentence(state: str, ago_s: float | None) -> str:
+    """ago_s None: last activity unknown (a helper without transcript or hook events)."""
+    if ago_s is None:
+        return {ARBEITET: "Die Sitzung arbeitet gerade.",
+                FRAGE: "Die Sitzung wartet auf eine Antwort."}.get(
+            state, "Die Sitzung ist im Moment still, ihre letzte Aktivität ist unbekannt.")
     ago = ago_text(ago_s)
     if state == ARBEITET:
         return "Die Sitzung arbeitet gerade."
@@ -687,7 +712,7 @@ class Watcher:
                  interval_s: float) -> tuple[str, int, str]:
         """(sentence, tokens, how) how = model | fixed. One model call per session per
         interval, only when the session did something since the last call."""
-        fixed = fixed_sentence(state, now - last if last else 0.0)
+        fixed = fixed_sentence(state, now - last if last else None)
         due_call = now - m.get("call_at", 0.0) >= interval_s and last > m.get("call_last", 0.0)
         if not due_call or not self.model_allowed(now) or not s.get("tp"):
             return fixed, 0, "fixed"

@@ -26,3 +26,4 @@ def _private_state_dir(tmp_path, monkeypatch):
     # 0.32.0 watch.py: never a detached watcher (join / helper-import) from a test
     monkeypatch.setenv("VOICEHOOK_WATCH", "0")
     monkeypatch.delenv("VOICEHOOK_WATCH_CHILD", raising=False)
+    monkeypatch.delenv("VOICEHOOK_SESSION_LABEL", raising=False)

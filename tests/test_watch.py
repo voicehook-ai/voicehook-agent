@@ -241,14 +241,16 @@ def test_watcher_model_call_hooks_do_not_register(monkeypatch):
     assert vmulti.handle_event(ev, now=NOW, post=lambda line: None) is None
 
 
-def test_discover_unregistered_transcripts_capped_by_processes(tmp_path):
+def test_discover_unregistered_transcripts_capped_by_processes(tmp_path, monkeypatch):
     root = tmp_path / "projects" / "p"
     root.mkdir(parents=True)
     for n in ("aaaaaaaa-1", "bbbbbbbb-2"):
         (root / f"{n}.jsonl").write_text(json.dumps({"type": "ai-title", "aiTitle": f"Titel {n[:1]}"}))
     ps = "  10     1 claude\n"
-    got = W.discover(_relay(), time.time(), ps=lambda: ps, claude_root=tmp_path / "projects",
-                     codex_root=tmp_path / "none")
+    kw = dict(ps=lambda: ps, claude_root=tmp_path / "projects", codex_root=tmp_path / "none")
+    assert W.discover(_relay(), time.time(), **kw) == []        # privacy default: not covered
+    monkeypatch.setenv("VOICEHOOK_WATCH_ALL", "1")
+    got = W.discover(_relay(), time.time(), **kw)
     assert len(got) == 1                      # one claude process = one session
     got = W.discover(_relay(), time.time(), ps=lambda: "", claude_root=tmp_path / "projects",
                      codex_root=tmp_path / "none")
@@ -592,3 +594,41 @@ def test_watcher_board_is_cleared_once_session_reports_itself(monkeypatch):
     assert kinds[-2] == ("Alpha", kinds[-2][1]) and kinds[-2][1]["open"] == ["o"]
     assert kinds[-1] == ("Alpha (Wächter)", {})
     assert W.known_board("Alpha (Wächter)", f.t) is None
+
+
+def test_unregistered_session_not_posted_by_default_but_with_optin(monkeypatch, tmp_path):
+    root = tmp_path / "projects" / "p"
+    root.mkdir(parents=True)
+    (root / "cccccccc-3.jsonl").write_text(json.dumps({"type": "ai-title", "aiTitle": "Privat Gehalt"}))
+    kw = dict(ps=lambda: "  10     1 claude\n", claude_root=tmp_path / "projects",
+              codex_root=tmp_path / "none")
+    f = Fake(monkeypatch)
+    f.sessions = None
+    w = W.Watcher(clock=time.time, discover_fn=lambda rel, now: W.discover(rel, now, **kw), cmd=None)
+    f.t = time.time()
+    f.rel = _relay(expires=f.t + 3600)
+    w.clock = lambda: f.t
+    w.tick()
+    assert f.posts == []
+    monkeypatch.setenv("VOICEHOOK_WATCH_ALL", "1")
+    w.mem.clear()
+    w.tick()
+    assert [p[1] for p in f.posts] == ["Privat Gehalt (Wächter)"]
+
+
+def test_helper_credential_session_is_covered(monkeypatch, tmp_path):
+    vmulti.write_helper("crown", URL, TOK, "room", 3600, owner_session="")
+    got = W.discover(_relay(), time.time(), ps=lambda: "", claude_root=tmp_path / "n", codex_root=tmp_path / "n")
+    assert [g["label"] for g in got] == ["crown"] and got[0]["tp"] == ""
+    # a registered session of the same helper is not listed twice
+    vmulti.write_relay(URL, TOK, "room", 3600, owner_session="someoneelse")
+    vmulti.handle_event(json.dumps({"hook_event_name": "Stop", "session_id": "sess-1234567890",
+                                    "cwd": "/x/crown"}), post=lambda line: None)
+    f = Fake(monkeypatch, [g for g in got])
+    f.t = time.time()
+    f.rel = _relay(expires=f.t + 3600)
+    w = f.watcher(cmd=None)
+    w.clock = lambda: f.t
+    w.tick()
+    assert f.posts[0][1] == "crown (Wächter)"
+    assert "unbekannt" in f.posts[0][2]["s"]            # no transcript: honest about last activity
