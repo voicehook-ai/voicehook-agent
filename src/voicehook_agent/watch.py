@@ -579,7 +579,7 @@ def discover(rel: dict, now: float, *, ps=None, claude_root: Path | None = None,
             out.append({"key": "helper-" + name, "label": name, "agent": "claude", "tp": "",
                         "ev": "", "ev_text": "", "ev_at": 0.0})
         if not watch_all():
-            return out[:MAX_SESSIONS]
+            return _visible(out)[:MAX_SESSIONS]
         procs = _running_agents(ps)
         roots = ((claude_root or vrelayops._config_dir() / "projects", "*/*.jsonl", "claude"),
                  (codex_root or _codex_sessions(), "**/rollout-*.jsonl", "codex"))
@@ -602,7 +602,14 @@ def discover(rel: dict, now: float, *, ps=None, claude_root: Path | None = None,
                 room -= 1
     except Exception as e:  # noqa: BLE001
         log("discover_error", err=type(e).__name__)
-    return out[:MAX_SESSIONS]
+    return _visible(out)[:MAX_SESSIONS]
+
+
+def _visible(sessions: list[dict]) -> list[dict]:
+    """0.33.6: sessions whose label or project folder matches VOICEHOOK_WATCH_NEVER are not
+    shown at all (router decision 28.10.: hide the se-testwall test runs, private sessions),
+    not only never proposed."""
+    return [s for s in sessions if not J.is_never(str(s.get("label") or ""), str(s.get("tp") or ""))]
 
 
 def classify_state(s: dict, now: float) -> tuple[str, float]:

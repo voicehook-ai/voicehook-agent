@@ -1315,3 +1315,10 @@ def test_summary_card_at_most_once_per_machine_in_15_min(monkeypatch):
     f2.unbound = [_cand(key=f"u{i}", label=f"S{i}") for i in range(3)]
     f2.watcher(cmd=None).tick()
     assert len(f.proposals) == 1 and not any("parallel" in p["question"] for p in f2.proposals)
+
+
+def test_never_sessions_are_hidden_not_only_unproposed(monkeypatch):
+    monkeypatch.setenv(J.ENV_NEVER, "se-testwall")
+    out = W._visible([{"label": "se-testwall 3e66", "tp": ""}, {"label": "SE-UI", "tp": ""},
+                      {"label": "x", "tp": "/h/.claude/projects/-home-oliver-archiv-se-se-testwall/a.jsonl"}])
+    assert [s["label"] for s in out] == ["SE-UI"]

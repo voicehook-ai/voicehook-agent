@@ -3,6 +3,10 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.33.6
+
+- **VOICEHOOK_WATCH_NEVER hides sessions entirely:** matching sessions (label or project folder) are neither proposed nor shown on the board (router decision: the se-testwall test runs are noise; private sessions).
+
 ## 0.33.5
 
 - **Watcher keeps one credential per call:** proposals and their answers now use the same credential (live: the newest-credential rule switched between helper tokens of the same call, the answers to the summary card were fetched under another sender and lost). A re-imported credential of the same call keeps the call's state; a newer call takes over only when the server confirms the old call is over.
