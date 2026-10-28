@@ -96,6 +96,11 @@ END = "end"
 OK = "ok"
 GONE = (404, 409)                 # delete of a decision: already answered / gone = done
 OVER = (401, 403, 410)            # the call is over
+# 0.32.3: a single 401/403/410 (seen live during a server deploy) is not the end of the call;
+# only OVER_CONFIRM answers in a row, spread over at least OVER_CONFIRM_S, end the watcher.
+# The watcher never marks a token dead: it uses another session's credential.
+OVER_CONFIRM = 3
+OVER_CONFIRM_S = 90.0
 
 DEFAULT_MODEL_CMD = ["claude", "-p", "--model", "haiku", "--output-format", "json",
                      "--tools", "", "--no-session-persistence", "--disable-slash-commands",
@@ -667,8 +672,6 @@ def server_interval(rel: dict) -> tuple[str, int | None]:
         return "old", None
     status, out = vrelayops._http(rel, "GET", vrelayops.endpoint(rel, "watch"), None, 10.0)
     if status in OVER:
-        if status != 401:
-            vmulti.mark_dead(rel["token"])
         return "over", None
     if status == 404:
         return "old", None
@@ -711,9 +714,17 @@ class Watcher:
         self.spent: deque = deque()          # (time, tokens)
         self.mem: dict[str, dict] = {}       # session key -> {state, post_at, call_at, call_last}
         self.fails = 0
+        self.over: list[float] = []          # times of 401/403/410 answers in a row
         self.not_found_until = 0.0
         self.server_min: int | None = None
         self.rel: dict | None = None
+
+    def over_confirmed(self, now: float) -> bool:
+        """One more 401/403/410 answer; True when the call is over for sure (OVER_CONFIRM in a
+        row over at least OVER_CONFIRM_S)."""
+        self.over.append(now)
+        self.over = self.over[-OVER_CONFIRM:]
+        return len(self.over) >= OVER_CONFIRM and now - self.over[0] >= OVER_CONFIRM_S
 
     def shutdown(self) -> None:
         """Exit: clear every watcher board this machine remembers (call end, SIGTERM)."""
@@ -814,9 +825,10 @@ class Watcher:
             for dec_id in ids:
                 res = delete_decision(use, label, dec_id)
                 st = res.get("status")
-                if st in OVER:
-                    log("end", why="decide-over")
-                    return END
+                if st in OVER:   # that session's credential, not the call: try again later
+                    log("error", where="decide-over", label=label)
+                    done = False
+                    break
                 if not (res.get("ok") or st in GONE):
                     done = False
             if done:
@@ -839,8 +851,12 @@ class Watcher:
                 log("error", where="watch-get", fails=self.fails)
                 return OK
             if verdict == "over":
-                log("end", why="server-over")
-                return END
+                if self.over_confirmed(now):
+                    log("end", why="server-over")
+                    return END
+                log("error", where="watch-over", count=len(self.over))
+                return OK
+            self.over = []
             if verdict == "old":
                 self.server_min = None
                 self.not_found_until = now + NOT_FOUND_RECHECK_S
@@ -876,10 +892,11 @@ class Watcher:
             sent, toks, how = self.sentence(s, state, last, now, m, interval_s)
             res = self.duty_status(rel, label, sent, state, last, now)
             if res.get("status") in OVER:
-                if not vmulti._is_local(rel):
-                    vmulti.mark_dead(rel["token"])
-                log("end", why="post-over")
-                return END
+                if self.over_confirmed(now):
+                    log("end", why="post-over")
+                    return END
+                log("error", where="post-over", count=len(self.over))
+                return OK
             bad = bad or not res.get("ok")
             if changed:
                 bad = bad or not self.duty_activity(rel, label, sent).get("ok")
