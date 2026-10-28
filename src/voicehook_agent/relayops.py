@@ -16,7 +16,7 @@ Remote relay (relay.json kind remote {url, token}, url = <base>/api/activity/rel
 * POST <url>/decide  {from, question?, options?, recommend?, id?, delete?, context?, recent?}
   -> {ok, id, number} (0.21.0: context/recent = background for Delta)
 * POST <url>/status  {from, doing?, open?, done?, project?} -> {ok}; all empty removes the card
-* POST <url>/show    {from, kind, title?, text?, image?} -> {ok, id, kind, from, shown?} (0.23.1:
+* POST <url>/show    {from, kind, title?, text?, image?, context?} -> {ok, id, kind, from, shown?} (0.23.1:
   `show --card` of a helper; an image only ok once a call page loaded it, else 409 + why)
 * GET  <url>/next?from=<label>&timeout=<0..25> -> {events: [{type: "decision", ...}]}; 0.22.0
   also {type: "user_turn", text, to, to_kind: "helper", speaker?, ts}: the human spoke to
@@ -633,13 +633,18 @@ def remote_ack(rel: dict, frm: str, ids: list[str], timeout: float = HTTP_TIMEOU
 
 
 def card_body(req: dict) -> dict:
-    """0.23.1 `show --card` of a helper -> relay body {kind, title?, text?, image?}. Panels belong
+    """0.23.1 `show --card` of a helper -> relay body {kind, title?, text?, image?, context?}
+    (0.31.0: context = invisible full text of the card, required for an image). Panels belong
     to the main agent: --panel/--large -> RelayError 422."""
     if req.get("panel") is not None or req.get("large"):
         raise RelayError("a helper session shows cards only: --panel/--large belong to the main agent", 422)
     if not req.get("kind"):
         raise RelayError("a helper session needs --card text|code|link|image", 422)
-    return {k: req[k] for k in ("kind", "title", "text", "image") if req.get(k) is not None}
+    if req["kind"] == "image" and not str(req.get("context") or "").strip():
+        raise RelayError("an image card needs a context: the full text content of the image "
+                         "(numbers, table rows, labels) for the voicebot", 422)
+    return {k: req[k] for k in ("kind", "title", "text", "image", "context")
+            if req.get(k) is not None}
 
 
 def remote_show(rel: dict, frm: str, body: dict, timeout: float = SHOW_TIMEOUT_S) -> dict:
@@ -660,7 +665,14 @@ def _valid_card(body: object) -> dict | None:
         return None
     if body["kind"] == "link" and not re.fullmatch(r"https?://\S+", text.strip()):
         return None
-    return {"kind": body["kind"], "text": text, "title": title}
+    out = {"kind": body["kind"], "text": text, "title": title}
+    ctx = body.get("context")
+    if ctx is not None:  # 0.31.0: invisible full text for the voicebot (same cap as the text)
+        if not isinstance(ctx, str) or len(ctx) > 4000:
+            return None
+        if ctx.strip():
+            out["context"] = ctx.strip()
+    return out
 
 
 def base_url(rel: dict) -> str:

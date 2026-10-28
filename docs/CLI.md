@@ -1118,7 +1118,9 @@ preview top left. Same session resolution as `say`.
 voicehook-agent show --card code --title "Fix" --text "git push origin main"
 voicehook-agent show --card text --file notes.md --panel cards
 voicehook-agent show --card link --text https://voicehook.ai
-voicehook-agent show --card image --title "Ablauf" --file swimlane.svg --large
+voicehook-agent show --card image --title "Ablauf" --file swimlane.svg --large \
+  --context "Ablauf in 3 Spuren: Sales (Anfrage, Angebot), Tech (Setup), Kunde (Freigabe)"
+voicehook-agent show --card image --file chart.png --context-file chart.txt
 voicehook-agent show --panel board          # only open a panel
 ```
 
@@ -1127,6 +1129,7 @@ voicehook-agent show --panel board          # only open a panel
 | `--card KIND` | `text` (default look), `code` (monospace, copy button), `link` (exactly one http(s) URL), `image` |
 | `--title T` | card heading, max 80 chars |
 | `--text T` / `--file PATH` | the content (`-` = stdin); text/code/link: UTF-8 text max 4000 chars; image: svg (max 300 KB), png, jpeg or webp (max 1 MB), type from the magic bytes |
+| `--context T` / `--context-file PATH` | 0.31.0: the full text content of the card for the voicebot (`-` = stdin), invisible on the page. **Required for `--card image`**: the voicebot cannot see images, so give ALL information in it (every number, table row, label, what shapes and arrows mean). Max 4000 chars (the card text limit); over the limit or missing for an image: exit 2, nothing sent, never cut. Optional for text/code/link. Never logged (only its length) |
 | `--panel P` | open on the humans' page: `cards` (card view), `board`, `log`, `decisions`; `none` closes all |
 | `--large` | open the card view big in the middle with this card at full size (implies `--panel cards`); for diagrams such as swimlanes with many steps, arrows and labels |
 
@@ -1135,13 +1138,13 @@ SVG may draw anything, but never run or load anything: no `<script>`, `<foreignO
 input: exit 2, nothing sent, never cut. Not combinable with the shape flags below.
 
 Transport: WebRTC join -> the CLI publishes topic `operator.card`
-`{id, seq, kind, title, text, at, url?, mime?}` itself (the page takes cards from every agent
+`{id, seq, kind, title, text, context?, at, url?, mime?}` itself (the page takes cards from every agent
 participant; the voicebot keeps the last 20 for a reload) and the panel as `delta.ui`
 `{panel, open, via: "agent", large?, id?}` only to the humans. An image goes to the server
 first: `POST /api/card/image {image}` with the join's own LiveKit token as Bearer (after it
 expired: the helper pump token; no new credential, max 10 per minute), the answer
 `{id, url, mime}` (signed, room-bound URL) goes into the card. Bridge join ->
-`POST /api/bridge/show` with the same body. Answer:
+`POST /api/bridge/show` with the same body (incl. `context`; so does the helper relay `POST .../show`). Answer:
 `{"ok":true,"type":"card","via":"datachannel"|"bridge","id","seq","kind","panel"?,"large"?}`;
 an older server without `/api/card/image` answers image cards with a clear error (text, code
 and link still work).
@@ -1371,8 +1374,9 @@ What works in Codex:
 ### Local MCP server (any MCP client)
 
 `voicehook-agent-hook mcp [--agent NAME]` (also `voicehook-agent mcp`) speaks MCP over
-stdio with four tools: `status` {doing, open[], done[]}, `decide` {question, options[2-3]?,
-recommend?, wait_s?}, `next` {timeout_s?} and `activity` {text}. A session with its own join
+stdio with five tools: `status` {doing, open[], done[]}, `decide` {question, options[2-3]?,
+recommend?, wait_s?}, `next` {timeout_s?}, `activity` {text} and (0.31.0) `show` {card, title?,
+text?, file?, context?} (an image card requires `context`, the full text content of the image). A session with its own join
 talks to that join's control socket; every other session is a helper over
 `~/.voicehook/relay.json`. Helper name: `$VOICEHOOK_SESSION_LABEL`, else the name the
 agent's hook used last in that directory, else `<dir> <agent>`. Nothing is spoken, the

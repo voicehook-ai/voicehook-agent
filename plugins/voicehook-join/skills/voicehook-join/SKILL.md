@@ -169,6 +169,7 @@ MCP/bridge = one agent in the call; activity lines are only what that agent writ
   - Small card (seen as preview or on a phone): few clear shapes, about 7 boxes or terms, one idea per image. Big type: `font-size` 24 or more at an 800 wide viewBox; labels of 1 to 3 words. Big diagram (swimlanes, process with many steps, arrows and labels): draw everything it needs, wide `viewBox` (e.g. `0 0 1800 800`), `font-size` 24+ at that width, and `show` it with `large: true`.
   - High contrast and your own background `<rect>` (the page can be light or dark). Arrows with a `<marker>` (see below), lines 4 to 6 wide.
   - `font-family="system-ui, sans-serif"`. No external fonts, images or links, no scripts, no `<foreignObject>`, no `on*` attributes (rejected with 422); references only to `#id` inside the SVG.
+- **Always send `context` with an image card:** the voicebot cannot see images. `context` = ALL information in the image as plain text (every number, table row, label, what the shapes and arrows mean), max 4000 chars, invisible on the page. Without it the image is refused. CLI: `show --card image --file x.svg --context "..."` (or `--context-file`); MCP `show`: the `context` argument.
 - In the call: `show` the image, then say in one sentence what to look at ("left is today, right is after the change").
 
 Box, arrow, box:

@@ -276,7 +276,7 @@ def test_mcp_handshake_and_tools():
     assert out[0]["result"]["protocolVersion"] == "2025-06-18"
     assert out[0]["result"]["serverInfo"]["name"] == "voicehook-local"
     assert {t["name"] for t in out[1]["result"]["tools"]} == {"status", "decide", "next",
-                                                               "activity"}
+                                                               "activity", "show"}
     assert out[2]["result"] == {} and out[3]["error"]["code"] == -32601
 
 

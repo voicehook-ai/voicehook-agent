@@ -26,6 +26,7 @@ SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
 CID = "0123456789abcdef"
 URL = f"/api/card/blau-tiger/{CID}?e=1&s=x"
+CTX = "Plan: drei Spuren, 7 Schritte, Umsatz 1.250 EUR"  # full text of the image (0.31.0, required)
 
 
 def _args(argv):
@@ -66,11 +67,13 @@ def test_text_code_link_and_panel_requests(tmp_path):
 def test_image_file_svg_as_text_raster_as_base64(tmp_path):
     s = tmp_path / "plan.svg"
     s.write_text(SVG, encoding="utf-8")
-    r = _req(["show", "--card", "image", "--file", str(s), "--title", "Plan", "--large"])
-    assert r == {"cmd": "card", "kind": "image", "image": SVG, "title": "Plan", "panel": "cards", "large": True}
+    r = _req(["show", "--card", "image", "--file", str(s), "--title", "Plan", "--large",
+              "--context", CTX])
+    assert r == {"cmd": "card", "kind": "image", "image": SVG, "title": "Plan", "context": CTX,
+                 "panel": "cards", "large": True}
     p = tmp_path / "x.dat"   # name does not matter, magic bytes do
     p.write_bytes(PNG)
-    assert _req(["show", "--card", "image", "--file", str(p)])["image"] == base64.b64encode(PNG).decode()
+    assert _req(["show", "--card", "image", "--file", str(p), "--context", CTX])["image"] == base64.b64encode(PNG).decode()
 
 
 @pytest.mark.parametrize("argv,msg", [
@@ -108,7 +111,7 @@ def test_bad_image_files(tmp_path, monkeypatch, capsys, svg, msg):
     f = tmp_path / "x.svg"
     f.write_text(svg, encoding="utf-8")
     with pytest.raises(SystemExit) as e:
-        cli.main(["show", "--card", "image", "--file", str(f)])
+        cli.main(["show", "--card", "image", "--file", str(f), "--context", CTX])
     assert e.value.code == 2 and msg in capsys.readouterr().out
 
 
@@ -207,7 +210,7 @@ def test_webrtc_image_uploaded_with_own_token_then_published(monkeypatch):
         return httpx.Response(200, json={"ok": True, "id": CID, "url": URL, "mime": "image/svg+xml"})
     _mock_http(monkeypatch, handler)
     room = _room()
-    res = asyncio.run(cli._control_handler(_ctl(room), {"cmd": "card", "kind": "image", "image": SVG,
+    res = asyncio.run(cli._control_handler(_ctl(room), {"cmd": "card", "kind": "image", "image": SVG, "context": CTX,
                                                         "title": "Plan", "large": True}))
     assert res["ok"] and res["id"] == CID and res["shown"] == 1
     assert seen == [("/api/card/image", "Bearer LK.JWT.TOKEN", {"image": SVG})]
@@ -225,7 +228,7 @@ def test_image_upload_errors(monkeypatch):
     _mock_http(monkeypatch, lambda req: next(answers))
     room = _room()
     ctl = _ctl(room)
-    req = {"cmd": "card", "kind": "image", "image": SVG}
+    req = {"cmd": "card", "kind": "image", "image": SVG, "context": CTX}
     old = asyncio.run(cli._control_handler(ctl, req))
     assert old["ok"] is False and "newer server" in old["error"]
     bad = asyncio.run(cli._control_handler(ctl, req))
@@ -247,7 +250,7 @@ def test_expired_token_falls_back_to_pump_token(monkeypatch):
     room = _room()
     ctl = _ctl(room)
     ctl.helper_pump = SimpleNamespace(token="PUMP")
-    res = asyncio.run(cli._control_handler(ctl, {"cmd": "card", "kind": "image",
+    res = asyncio.run(cli._control_handler(ctl, {"cmd": "card", "kind": "image", "context": CTX,
                                                  "image": base64.b64encode(PNG).decode()}))
     assert res["ok"] and auths == ["Bearer LK.JWT.TOKEN", "Bearer PUMP"]
 
@@ -266,11 +269,11 @@ def test_bridge_posts_api_bridge_show():
             calls.append(body)
             return {"ok": True, "id": CID, "seq": 3, "panel": "cards", "large": True}
     room = _BridgeLike(local_participant=_Local(), remote_participants={})
-    res = asyncio.run(cli._control_handler(_ctl(room), {"cmd": "card", "kind": "image", "image": SVG,
+    res = asyncio.run(cli._control_handler(_ctl(room), {"cmd": "card", "kind": "image", "image": SVG, "context": CTX,
                                                         "large": True}))
     assert res == {"ok": True, "type": "card", "via": "bridge", "id": CID, "seq": 3, "panel": "cards",
                    "large": True, "kind": "image"}
-    assert calls == [{"kind": "image", "image": SVG, "panel": "cards", "large": True}]
+    assert calls == [{"kind": "image", "image": SVG, "context": CTX, "panel": "cards", "large": True}]
     assert room.local_participant.published == []
 
     class _Limited(SimpleNamespace):
@@ -331,7 +334,8 @@ def test_image_not_loaded_in_page_is_never_ok(monkeypatch):
     _img_ok(monkeypatch)
     room = _room()
     room.local_participant.ack = False   # the page could not load it (server restarted)
-    res = asyncio.run(cli._control_handler(_ctl(room), {"cmd": "card", "kind": "image", "image": SVG}))
+    res = asyncio.run(cli._control_handler(_ctl(room), {"cmd": "card", "kind": "image", "image": SVG,
+                                                        "context": CTX}))
     assert res["ok"] is False and res["type"] == "not_shown" and "did not load" in res["error"]
     assert res["id"] == CID   # the card went out, the answer says it was not seen
 
@@ -346,7 +350,8 @@ def test_image_without_page_answer_is_never_ok(monkeypatch):
     async def go():
         return await ctl.card_acks.wait("x" * 16, {"host"}, timeout=0.2)
     assert asyncio.run(go()) == (set(), set())
-    res = asyncio.run(cli._control_handler(ctl, {"cmd": "card", "kind": "image", "image": SVG}))
+    res = asyncio.run(cli._control_handler(ctl, {"cmd": "card", "kind": "image", "image": SVG,
+                                                        "context": CTX}))
     assert res["ok"] is False and res["type"] == "not_shown"
 
 
@@ -354,7 +359,8 @@ def test_image_without_human_is_never_ok(monkeypatch):
     _img_ok(monkeypatch)
     room = SimpleNamespace(local_participant=_Local(), remote_participants={
         "voice-ai": _peer("voice-ai", kind=4)})
-    res = asyncio.run(cli._control_handler(_ctl(room), {"cmd": "card", "kind": "image", "image": SVG}))
+    res = asyncio.run(cli._control_handler(_ctl(room), {"cmd": "card", "kind": "image", "image": SVG,
+                                                        "context": CTX}))
     assert res["ok"] is False and res["type"] == "no_human"
 
 
@@ -382,7 +388,7 @@ def test_helper_card_from_pump_is_checked_and_confirmed():
     room = _room()
     ctl = _ctl(room)
     card = {"id": CID, "kind": "image", "title": "Plan", "text": "", "from": "Mac: Scout", "url": URL,
-            "mime": "image/png", "at": 1.0}
+            "mime": "image/png", "at": 1.0, "context": CTX}
     res = asyncio.run(cli._publish_helper_card(ctl, room, card))
     assert res == {"ok": True, "shown": 1}
     (t, pkt, _), = room.local_participant.published
@@ -457,7 +463,7 @@ def test_700kb_image_goes_through_the_control_socket(monkeypatch, tmp_path, caps
     data = _png(700 * 1024)
     f = tmp_path / "shot.png"
     f.write_bytes(data)
-    argv = ["show", "--card", "image", "--title", "Shot", "--file", str(f)]
+    argv = ["show", "--card", "image", "--title", "Shot", "--file", str(f), "--context", CTX]
     rc, seen = _show_over_socket(monkeypatch, tmp_path, argv)
     out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert rc == 0 and out["ok"] is True, out
@@ -471,7 +477,8 @@ def test_positive_control_700kb_image_breaks_a_64kib_join(monkeypatch, tmp_path,
     f = tmp_path / "shot.png"
     f.write_bytes(_png(700 * 1024))
     rc, seen = _show_over_socket(monkeypatch, tmp_path,
-                                 ["show", "--card", "image", "--file", str(f)], limit=64 * 1024)
+                                 ["show", "--card", "image", "--file", str(f), "--context", CTX],
+                                 limit=64 * 1024)
     out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert seen == [] and rc != 0 and out["ok"] is False, out
 
@@ -479,7 +486,7 @@ def test_positive_control_700kb_image_breaks_a_64kib_join(monkeypatch, tmp_path,
 def test_too_large_image_is_a_clear_error_not_a_crash(monkeypatch, tmp_path, capsys):
     f = tmp_path / "huge.png"
     f.write_bytes(_png(vc.RASTER_MAX + 1024))
-    rc, seen = _show_over_socket(monkeypatch, tmp_path, ["show", "--card", "image", "--file", str(f)])
+    rc, seen = _show_over_socket(monkeypatch, tmp_path, ["show", "--card", "image", "--file", str(f), "--context", CTX])
     out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert rc == 2 and out["type"] == "invalid" and "image max" in out["error"] and seen == [], out
 
