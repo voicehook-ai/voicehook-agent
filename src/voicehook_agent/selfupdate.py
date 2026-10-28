@@ -31,7 +31,7 @@ ENV_MARKER = "VOICEHOOK_SELF_UPDATED"  # set on the restarted join: value = vers
 EXIT_OUTDATED = 7                       # join: CLI below the server's cli_min, update failed
 UPGRADE_TIMEOUT_S = 180.0
 
-UPGRADE_UV = f"uv tool upgrade {PACKAGE}"
+UPGRADE_UV = f"uv tool upgrade --reinstall-package {PACKAGE} {PACKAGE}"
 UPGRADE_UV_FORCE = f"uv tool install --force {REPO}"
 UPGRADE_PIP = f"pip install --upgrade --user {REPO}"
 
@@ -123,7 +123,9 @@ def upgrade_command(method: str | None = None, *, which: Callable[[str], str | N
     method = method or install_method(prefix)
     if method == "uv":
         uv = which("uv")
-        return [uv, "tool", "upgrade", PACKAGE] if uv else None
+        # --reinstall-package refreshes uv's cached index for us: without it a release from
+        # the last minutes is not seen and `uv tool upgrade` exits 0 on the old version
+        return [uv, "tool", "upgrade", "--reinstall-package", PACKAGE, PACKAGE] if uv else None
     cmd = [executable or sys.executable, "-m", "pip", "install", "--upgrade", "--quiet"]
     if not _in_venv(prefix, base_prefix):
         cmd.append("--user")

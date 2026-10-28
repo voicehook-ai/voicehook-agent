@@ -119,7 +119,8 @@ def test_install_method(tmp_path):
 
 
 def test_upgrade_command_variants():
-    assert su.upgrade_command("uv", which=lambda n: "/x/uv") == ["/x/uv", "tool", "upgrade", "voicehook-agent"]
+    assert su.upgrade_command("uv", which=lambda n: "/x/uv") == ["/x/uv", "tool", "upgrade", "--reinstall-package",
+                                                                  "voicehook-agent", "voicehook-agent"]
     assert su.upgrade_command("uv", which=lambda n: None) is None
     venv = su.upgrade_command("pip", executable="/v/bin/python", prefix="/v", base_prefix="/usr")
     assert venv == ["/v/bin/python", "-m", "pip", "install", "--upgrade", "--quiet", su.REPO]
@@ -137,7 +138,7 @@ def test_run_upgrade_mocked_subprocess():
     assert su.run_upgrade(["uv", "tool", "upgrade", "voicehook-agent"], runner=ok, warn=warns.append)
     assert ok.calls == [["uv", "tool", "upgrade", "voicehook-agent"]] and not warns
     assert not su.run_upgrade(["x"], runner=_Runner(1), warn=warns.append)
-    assert "exit 1" in warns[-1] and "uv tool upgrade voicehook-agent" in warns[-1]
+    assert "exit 1" in warns[-1] and "uv tool upgrade --reinstall-package voicehook-agent voicehook-agent" in warns[-1]
     assert not su.run_upgrade(["x"], runner=_Runner(exc=OSError("nope")), warn=warns.append)
     assert not su.run_upgrade(["x"], runner=_Runner(exc=subprocess.TimeoutExpired("x", 1)),
                               warn=warns.append)
