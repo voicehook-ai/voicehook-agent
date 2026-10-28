@@ -6,6 +6,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def _private_state_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("VOICEHOOK_STATE_DIR", str(tmp_path / "vh-state"))
+    monkeypatch.setenv("VOICEHOOK_MACHINE_DIR", str(tmp_path / "vh-machine"))
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
     # 0.21.0: `hook install` writes the absolute hook path; tests see the bare name unless
     # they set their own (tests/test_hook_abs_path.py)

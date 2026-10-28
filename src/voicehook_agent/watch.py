@@ -157,6 +157,16 @@ def tokens_per_hour(flag: object = None, env=None) -> int:
 # --------------------------------------------------------------------------- #
 # one per machine + detached start
 # --------------------------------------------------------------------------- #
+def machine_root() -> Path:
+    """0.33.4: ONE watcher per machine, whatever VOICEHOOK_STATE_DIR a session uses (live:
+    a session with its own state dir started a second watcher and a second summary card)."""
+    env = (os.environ.get(MACHINE_ENV) or "").strip()
+    return Path(env) if env else Path.home() / ".voicehook"
+
+
+MACHINE_ENV = "VOICEHOOK_MACHINE_DIR"   # tests only: where the machine-wide lock lives
+
+
 def acquire_lock():
     """Open and flock ~/.voicehook/watch.lock (kept open for the process lifetime). The fd,
     or None when another watcher holds it."""
@@ -164,8 +174,8 @@ def acquire_lock():
         import fcntl
     except ImportError:  # pragma: no cover  (Windows)
         return None
-    vact._private_dir(vact.state_root())
-    fd = os.open(vact.state_root() / LOCK_NAME, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    vact._private_dir(machine_root())
+    fd = os.open(machine_root() / LOCK_NAME, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -205,9 +215,10 @@ def spawn_detached(extra: list[str] | None = None, *, popen=subprocess.Popen) ->
     try:
         if disabled() or credential() is None or running():
             return False
+        env = {k: v for k, v in os.environ.items() if k != vact.STATE_ENV}   # machine state
         popen(child_argv(extra), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
               stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True,
-              cwd=vact.child_cwd())
+              cwd=vact.child_cwd(), env=env)
         return True
     except Exception:  # noqa: BLE001
         return False
@@ -1133,7 +1144,7 @@ class Watcher:
             # 0.33.3: at the start of a call ONE card for all sessions working in parallel
             # ("3 Sessions arbeiten parallel ... alle abonnieren?"), single cards only later
             fresh = [c for c in cands if c["key"] not in prop and not J.is_never(c["label"], c["tp"])]
-            if J.ALL_KEY not in prop and len(fresh) >= 2:
+            if J.ALL_KEY not in prop and len(fresh) >= 2 and not J.summary_recent(now):
                 members = []
                 for c in fresh[:J.ALL_MAX]:
                     try:
@@ -1148,6 +1159,7 @@ class Watcher:
                     for m in members:   # asked in the summary: no single card meanwhile
                         prop[m["key"]] = {"id": None, "at": now, "label": m["label"], "tp": m["tp"],
                                           "last_active": now, "answer": None, "in_all": True}
+                    J.mark_summary(now)
                     log("join", label="alle", count=len(members), why="proposed")
                     J.save(st)
                     return

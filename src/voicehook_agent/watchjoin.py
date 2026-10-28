@@ -202,6 +202,36 @@ def label_for(stem: str, tp: str) -> str:
 # --------------------------------------------------------------------------- #
 # card + answers
 # --------------------------------------------------------------------------- #
+SUMMARY_NAME = "watch-summary.json"
+SUMMARY_GAP_S = 900.0   # 0.33.4: at most one summary card per machine in 15 min (a re-import
+                        # of a credential looked like a new call and asked again)
+
+
+def _summary_path() -> Path:
+    env = (os.environ.get("VOICEHOOK_MACHINE_DIR") or "").strip()
+    return (Path(env) if env else Path.home() / ".voicehook") / SUMMARY_NAME
+
+
+def summary_recent(now: float) -> bool:
+    try:
+        at = float(json.loads(_summary_path().read_text(encoding="utf-8")).get("at") or 0)
+    except (OSError, ValueError, AttributeError):
+        return False
+    return now - at < SUMMARY_GAP_S
+
+
+def mark_summary(now: float) -> None:
+    try:
+        vact._private_dir(_summary_path().parent)
+        fd = os.open(_summary_path(), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            os.write(fd, json.dumps({"at": now}).encode("utf-8"))
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
 ALL_KEY = "__alle__"   # 0.33.3: the summary card at the start of a call
 ALL_MAX = 12
 
