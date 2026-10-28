@@ -290,6 +290,20 @@ def forget_board(label: str) -> None:
         pass
 
 
+def sub_boards() -> list[str]:
+    """Senders (`<label> (Wächter)`) of the watcher boards this machine remembers."""
+    try:
+        d = json.loads((vact.state_root() / BOARDS_NAME).read_text(encoding="utf-8"))
+        return [k for k in d if isinstance(k, str) and k.endswith(f" ({SUB_NAME})")] if isinstance(d, dict) else []
+    except (OSError, ValueError):
+        return []
+
+
+def observable(s: dict) -> bool:
+    """A session with a signal the watcher can read: hook events or a mapped transcript."""
+    return bool(float(s.get("ev_at") or 0) or _mtime(s.get("tp") or ""))
+
+
 def known_board(label: str, now: float | None = None) -> dict | None:
     """The last known board body of this sender (younger than BOARD_KEEP_S), else None."""
     t = time.time() if now is None else now
@@ -698,6 +712,16 @@ class Watcher:
         self.fails = 0
         self.not_found_until = 0.0
         self.server_min: int | None = None
+        self.rel: dict | None = None
+
+    def shutdown(self) -> None:
+        """Exit: clear every watcher board this machine remembers (call end, SIGTERM)."""
+        rel = credential(self.clock()) or self.rel
+        if rel is not None:
+            self.duty_cleanup(rel, set())
+        else:
+            for sub in sub_boards():
+                forget_board(sub)
 
     # ----- budget -----
     def used(self, now: float) -> int:
@@ -738,7 +762,7 @@ class Watcher:
         base = known_board(label, self.clock())
         if base is None:
             sub = sub_label(label)
-            body = merge_board(None, sentence, meta, state)
+            body = merge_board(None, sentence, meta)   # never `state` here: it cannot be removed
             res = post_board(rel, sub, body)
             if res.get("ok"):
                 remember_board(sub, body, now)
@@ -752,6 +776,19 @@ class Watcher:
                 post_board(rel, sub, {})
                 forget_board(sub)
         return res
+
+    def duty_cleanup(self, rel: dict, live: set[str]) -> None:
+        """Clear the watcher boards of sessions that are gone / no longer observable
+        (empty board, then forget). `live` = labels still watched; None-safe on errors."""
+        for sub in sub_boards():
+            if sub[:-len(f" ({SUB_NAME})")] in live:
+                continue
+            try:
+                post_board(rel, sub, {})
+            except Exception:  # noqa: BLE001, S110
+                pass
+            forget_board(sub)
+            log("cleared", sub="board")
 
     def duty_activity(self, rel: dict, label: str, sentence: str) -> dict:
         return post_activity(rel, label, sentence)
@@ -814,13 +851,17 @@ class Watcher:
         bad = False
         views: dict[str, tuple[str, float]] = {}
         sessions = self.discover(rel, now)
+        live: set[str] = set()
         for s in sessions:
+            if not observable(s):
+                continue   # never claim a state that cannot be seen; only decisions cleanup applies
             state, last = classify_state(s, now)
             views[s["key"]] = (state, last)
             try:
                 label = vrelayops.check_from(s["label"])
             except vrelayops.RelayError:
                 continue
+            live.add(label)
             m = self.mem.setdefault(s["key"], {})
             prev = m.get("state")
             changed = prev is not None and prev != state
@@ -844,6 +885,8 @@ class Watcher:
             m["post_at"] = now
             log("post", label=label, state=state, how=how, tokens=toks, changed=changed,
                 ok=bool(res.get("ok")))
+        self.rel = rel
+        self.duty_cleanup(rel, live)
         if self.duty_decisions(rel, views, now) == END:
             return END
         self.fails = self.fails + 1 if bad else 0
@@ -858,14 +901,20 @@ class Watcher:
 
     def run(self, sleep=time.sleep) -> int:
         log("start", pid=os.getpid(), cap=self.cap, model=bool(self.cmd))
-        while True:
+        try:
+            while True:
+                try:
+                    if self.tick() == END:
+                        return 0
+                except Exception as e:  # noqa: BLE001  never die on a bug, back off
+                    self.fails += 1
+                    log("error", where="tick", type=type(e).__name__, fails=self.fails)
+                sleep(self.delay())
+        finally:
             try:
-                if self.tick() == END:
-                    return 0
-            except Exception as e:  # noqa: BLE001  never die on a bug, back off
-                self.fails += 1
-                log("error", where="tick", type=type(e).__name__, fails=self.fails)
-            sleep(self.delay())
+                self.shutdown()
+            except Exception:  # noqa: BLE001, S110
+                pass
 
 
 def main(interval: object = None, tokens: object = None, foreground: bool = False) -> int:
@@ -882,6 +931,11 @@ def main(interval: object = None, tokens: object = None, foreground: bool = Fals
     fd = acquire_lock()
     if fd is None:
         return 0
+    try:
+        import signal
+        signal.signal(signal.SIGTERM, lambda *_a: sys.exit(0))   # finally: clears the boards
+    except (ImportError, ValueError, OSError):
+        pass
     try:
         return Watcher(interval_flag=interval, tokens=tokens).run()
     finally:

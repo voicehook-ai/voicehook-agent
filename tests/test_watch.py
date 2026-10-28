@@ -548,7 +548,7 @@ def test_unknown_board_goes_to_separate_watcher_board_never_main(monkeypatch):
     assert f.posts[0][1] == "Neu (Wächter)" and f.posts[0][1] != "Neu"
     assert all(p[1] != "Neu" for p in f.posts if p[0] == "board")
     body = f.posts[0][2]["body"]
-    assert set(body) == {"doing", "meta", "state"} and set(body["meta"]) == {"doing"}
+    assert set(body) == {"doing", "meta"} and set(body["meta"]) == {"doing"}   # never `state` here
 
 
 def test_cleared_board_is_forgotten(monkeypatch):
@@ -630,5 +630,60 @@ def test_helper_credential_session_is_covered(monkeypatch, tmp_path):
     w = f.watcher(cmd=None)
     w.clock = lambda: f.t
     w.tick()
-    assert f.posts[0][1] == "crown (Wächter)"
-    assert "unbekannt" in f.posts[0][2]["s"]            # no transcript: honest about last activity
+    assert f.posts == []          # no signal (no transcript, no hook events): no claim, no post
+
+
+def test_unobservable_session_gets_no_status_but_decision_cleanup(monkeypatch):
+    f = Fake(monkeypatch, [sess(key="helper-crown", label="crown")])   # no tp, no ev
+    _slot(skey="helper-crown", at=NOW - 100, label="crown")
+    w = f.watcher(cmd=None)
+    f.t = NOW + notify.OPEN_KEEP_S + 10
+    f.rel = _relay(expires=f.t + 100)
+    assert w.tick() == W.OK
+    assert f.posts == []                 # nothing posted, not even an activity line
+    assert f.deleted == ["d12345678"]    # old decision cleanup still applies
+
+
+def test_watcher_board_never_carries_state_but_main_does(monkeypatch):
+    f = Fake(monkeypatch, [sess(label="Neu", ev="wait", ev_at=NOW - 20),
+                           sess(key="k2", label="Alt", ev="wait", ev_at=NOW - 20)])
+    W.remember_board("Alt", {"doing": "x", "open": ["o"]}, now=f.t - 1000)
+    f.watcher(cmd=None).tick()
+    by = {p[1]: p[2]["body"] for p in f.posts if p[0] == "board"}
+    assert "state" not in by["Neu (Wächter)"] and by["Alt"]["state"] == "frage"
+
+
+def test_watcher_boards_cleared_when_session_disappears(monkeypatch):
+    f = Fake(monkeypatch, [sess(ev="stop", ev_at=NOW - 500)])
+    w = f.watcher(cmd=None)
+    w.tick()
+    assert W.sub_boards() == ["Alpha (Wächter)"]
+    f.sessions = []
+    f.t += 60
+    w.tick()
+    assert [(p[1], p[2]["body"]) for p in f.posts if p[0] == "board"][-1] == ("Alpha (Wächter)", {})
+    assert W.sub_boards() == []
+
+
+def test_watcher_boards_cleared_on_exit(monkeypatch):
+    f = Fake(monkeypatch, [sess(ev="stop", ev_at=NOW - 500)])
+    w = f.watcher(cmd=None)
+    w.tick()
+    assert W.sub_boards() == ["Alpha (Wächter)"]
+    cleared = []
+    monkeypatch.setattr(W, "post_board", lambda rel, label, body: cleared.append((label, body)) or {"ok": True})
+    f.rel = None                          # the call is over: credential gone, last relay is used
+    w.shutdown()
+    assert cleared == [("Alpha (Wächter)", {})] and W.sub_boards() == []
+
+
+def test_run_clears_boards_in_finally(monkeypatch):
+    f = Fake(monkeypatch, [sess(ev="stop", ev_at=NOW - 500)])
+    w = f.watcher(cmd=None)
+    posted = []
+    monkeypatch.setattr(W, "post_board", lambda rel, label, body: posted.append((label, body)) or {"ok": True})
+    def sleep(_s):
+        raise SystemExit(0)               # SIGTERM handler path
+    with pytest.raises(SystemExit):
+        w.run(sleep=sleep)
+    assert ("Alpha (Wächter)", {}) in posted and W.sub_boards() == []
