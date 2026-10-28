@@ -988,6 +988,11 @@ def clean_meta(obj: object) -> dict | None:
         if not isinstance(ttl, int) or isinstance(ttl, bool) or ttl < 1:
             return None
         out["ttl_s"] = ttl
+    card = obj.get("card")  # 0.33.0: Kanban card nr of this item (the server mirror links by it)
+    if card is not None:
+        if not isinstance(card, int) or isinstance(card, bool) or card < 1:
+            return None
+        out["card"] = card
     return out
 
 

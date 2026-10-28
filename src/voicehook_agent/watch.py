@@ -57,11 +57,14 @@ import sys
 import time
 from collections import deque
 from pathlib import Path
+from urllib.parse import quote
 
 from . import activity as vact
 from . import multisession as vmulti
 from . import notify
 from . import relayops as vrelayops
+from . import watchjoin as J
+from . import watchkanban as K
 
 ALLOWED_INTERVALS = (1, 5, 10, 15)
 DEFAULT_INTERVAL = 15
@@ -235,7 +238,7 @@ def mark_self(label: str, now: float | None = None, board: dict | None = None) -
     and remembers the board (a relay /status REPLACES the whole board of a sender, so the
     watcher must merge into it, see merge_board). Best effort, never raises."""
     if board is not None:
-        remember_board(label, board, now)
+        remember_board(label, board, now, own=True)
     try:
         t = time.time() if now is None else now
         path = vact.state_root() / SELF_NAME
@@ -278,14 +281,45 @@ def _boards_rw(fn):
         os.close(fd)
 
 
-def remember_board(label: str, body: dict, now: float | None = None) -> None:
+OWN_KEEP_S = 43200.0
+OWN_MAX = 300
+WATCHER_PREFIXES = ("inaktiv seit", "inaktiv,", "keine Meldung seit", "Die Sitzung ")
+
+
+def remember_board(label: str, body: dict, now: float | None = None, own: bool = False) -> None:
     """The board body last posted for `label` (by its session or by the watcher). Local file
-    0600, never sent anywhere. Best effort."""
+    0600, never sent anywhere. Best effort. own=True: the SESSION posted it; its `doing` is
+    kept separately ("own") and survives every later watcher post (0.33.0: the inactive
+    sentence quotes it)."""
     try:
         t = time.time() if now is None else now
-        _boards_rw(lambda d: d.__setitem__(str(label), {"b": body, "at": t}))
+
+        def put(d: dict) -> None:
+            old = d.get(str(label)) if isinstance(d.get(str(label)), dict) else {}
+            e: dict = {"b": body, "at": t}
+            doing = str(body.get("doing") or "").strip()
+            if own and doing:
+                e["own"], e["own_at"] = doing[:OWN_MAX], t
+            elif old.get("own"):
+                e["own"], e["own_at"] = old["own"], old.get("own_at", 0)
+            d[str(label)] = e
+        _boards_rw(put)
     except Exception:  # noqa: BLE001, S110
         pass
+
+
+def own_doing(label: str, now: float | None = None) -> str:
+    """The last real `doing` the session itself posted (never a watcher sentence), else ''."""
+    t = time.time() if now is None else now
+    try:
+        d = json.loads((vact.state_root() / BOARDS_NAME).read_text(encoding="utf-8"))
+        e = d.get(str(label)) if isinstance(d, dict) else None
+        if isinstance(e, dict) and isinstance(e.get("own"), str) and t - float(e.get("own_at") or 0) < OWN_KEEP_S:
+            own = e["own"].strip()
+            return "" if own.startswith(WATCHER_PREFIXES) else own
+    except (OSError, ValueError, TypeError):
+        pass
+    return ""
 
 
 def forget_board(label: str) -> None:
@@ -322,7 +356,7 @@ def known_board(label: str, now: float | None = None) -> dict | None:
     return None
 
 
-def doing_meta(label: str, state: str, last: float, now: float) -> dict:
+def doing_meta(label: str, state: str, last: float, now: float, card: int | None = None) -> dict:
     """Mandatory background of the `doing` entry (context + 3 faq), from the state alone."""
     ago = ago_text(now - last) if last else "unbekannter Zeit"
     ctx = f"Sitzung {label}: {STATE_TEXT[state]}, zuletzt aktiv vor {ago}. Stand vom Beobachter, nicht von der Sitzung selbst."
@@ -336,7 +370,10 @@ def doing_meta(label: str, state: str, last: float, now: float) -> dict:
          "a": "Ja, die Sitzung wartet auf eine Eingabe oder Freigabe." if waiting
          else "Nein, im Moment wartet sie auf nichts."},
     ]
-    return {"context": ctx[:2000], "faq": [{"q": f["q"][:200], "a": f["a"][:200]} for f in faq]}
+    out = {"context": ctx[:2000], "faq": [{"q": f["q"][:200], "a": f["a"][:200]} for f in faq]}
+    if card:
+        out["card"] = card   # 0.33.0: the server mirror links the item to this Kanban card
+    return out
 
 
 STATE_FIELD = {ARBEITET: "arbeitet", STILL: "leerlauf", FRAGE: "frage"}   # server board states
@@ -524,6 +561,9 @@ def classify_state(s: dict, now: float) -> tuple[str, float]:
     """(state, last activity time) of one discovered session."""
     mt = _mtime(s.get("tp") or "")
     ev_at = float(s.get("ev_at") or 0)
+    sub = J.sub_mtime(s.get("tp") or "")
+    if sub > ev_at + SETTLE_S and 0 <= now - sub <= ACTIVE_S:   # 0.33.0: a subagent works for it
+        return ARBEITET, max(mt, sub, ev_at)
     last = max(mt, ev_at)
     ev = s.get("ev")
     quiet = mt <= ev_at + SETTLE_S   # nothing written after the event
@@ -586,6 +626,27 @@ def ago_text(secs: float) -> str:
     return "einer Stunde" if h == 1 else f"{h} Stunden"
 
 
+def ago_short(secs: float) -> str:
+    m = int(max(0.0, secs) // 60)
+    if m < 1:
+        return "unter 1 Min"
+    if m < 60:
+        return f"{m} Min"
+    h = m // 60
+    return f"{h} Std" if h < 48 else f"{h // 24} Tagen"
+
+
+def inactive_sentence(own: str, last: float, now: float) -> str:
+    """Fixed text (no model) of an inactive session: the real state, the time and the last
+    real doing of the session itself. Unknown doing: only the time."""
+    base = f"inaktiv seit {ago_short(now - last)}" if last else "inaktiv, letzte Aktivität unbekannt"
+    return f"{base}, letzter Stand: {own}"[:OWN_MAX + 60] if own else base
+
+
+def silent_sentence(doing: str, quiet_s: float) -> str:
+    return f"keine Meldung seit {ago_short(quiet_s)}, letzter Stand: {doing}"[:OWN_MAX + 60]
+
+
 def fixed_sentence(state: str, ago_s: float | None) -> str:
     """ago_s None: last activity unknown (a helper without transcript or hook events)."""
     if ago_s is None:
@@ -630,8 +691,23 @@ def clean_sentence(text: object) -> str:
     return s if len(s.split()) >= 3 else ""
 
 
+def with_system(cmd: list[str], system: str) -> list[str]:
+    """The model command with its --system-prompt replaced (the default command's one asks
+    for a sentence); a custom command without that flag stays as it is."""
+    if "--system-prompt" not in cmd:
+        return list(cmd)
+    i = cmd.index("--system-prompt")
+    return [*cmd[:i + 1], system, *cmd[i + 2:]]
+
+
 def ask_model(cmd: list[str], prompt: str, run=None) -> tuple[str, int]:
-    """(sentence, tokens) from the model command (prompt on stdin; JSON like `claude -p
+    """(sentence, tokens) from the model command; ('', tokens) on any failure."""
+    text, toks = ask_raw(cmd, prompt, run)
+    return clean_sentence(text), toks
+
+
+def ask_raw(cmd: list[str], prompt: str, run=None) -> tuple[str, int]:
+    """(text, tokens) from the model command (prompt on stdin; JSON like `claude -p
     --output-format json`: {result, usage}; plain text also works). ('', tokens) on any
     failure. Never raises."""
     env = {**os.environ, ENV_CHILD: "1", "VOICEHOOK_NO_RELAY": "1"}
@@ -649,10 +725,10 @@ def ask_model(cmd: list[str], prompt: str, run=None) -> tuple[str, int]:
         toks = _tokens(d.get("usage"))
         if d.get("is_error") or r.returncode != 0:
             return "", toks
-        return clean_sentence(d.get("result")), toks
+        return str(d.get("result") or ""), toks
     if r.returncode != 0:
         return "", 0
-    return clean_sentence(out), (len(prompt) + len(out)) // 4
+    return out, (len(prompt) + len(out)) // 4
 
 
 def build_prompt(label: str, state: str, ago_s: float, text: str) -> str:
@@ -686,6 +762,29 @@ def post_board(rel: dict, label: str, body: dict) -> dict:
     return vrelayops.remote_status(rel, label, body)
 
 
+def get_status(rel: dict, label: str) -> tuple[int, dict]:
+    """GET <relay>/status?from=<label> -> (http status, {"board", "state"}); 0.33.0 server
+    read path (voicehook-v4 #737). A local relay has none: (404, {}). RelayError on network."""
+    if vmulti._is_local(rel):
+        return 404, {}
+    url = f"{vrelayops.endpoint(rel, 'status')}?from={quote(label, safe='')}"
+    return vrelayops._http(rel, "GET", url, None, 10.0)
+
+
+def post_proposal(rel: dict, body: dict) -> dict:
+    """The decision card 'Session X arbeitet gerade, soll sie ins Board?' (sender Wächter)."""
+    return vrelayops.remote_decide(rel, J.NAME, body)
+
+
+def poll_answers(rel: dict) -> list[dict]:
+    """Answers to the proposals (non-blocking GET <relay>/next?from=Wächter)."""
+    return vrelayops.remote_next(rel, J.NAME, 0)
+
+
+def find_unbound(rel: dict, now: float, active_s: float, **kw) -> list[dict]:
+    return J.find_unbound(rel, now, active_s, claude_root=vrelayops._config_dir() / "projects", **kw)
+
+
 def post_activity(rel: dict, label: str, sentence: str) -> dict:
     if vmulti._is_local(rel):
         ok = vmulti.append_local(rel, f"{label}: {sentence}")
@@ -705,11 +804,13 @@ def delete_decision(rel: dict, label: str, dec_id: str) -> dict:
 # --------------------------------------------------------------------------- #
 class Watcher:
     def __init__(self, *, interval_flag: object = None, tokens: object = None,
-                 clock=time.time, discover_fn=discover, cmd: list[str] | None | str = "env") -> None:
+                 clock=time.time, discover_fn=discover, cmd: list[str] | None | str = "env",
+                 unbound_fn=None) -> None:
         self.interval_flag = interval_flag
         self.cap = tokens_per_hour(tokens)
         self.clock = clock
         self.discover = discover_fn
+        self.unbound = unbound_fn or find_unbound
         self.cmd = model_cmd() if cmd == "env" else cmd
         self.spent: deque = deque()          # (time, tokens)
         self.mem: dict[str, dict] = {}       # session key -> {state, post_at, call_at, call_last}
@@ -718,6 +819,9 @@ class Watcher:
         self.not_found_until = 0.0
         self.server_min: int | None = None
         self.rel: dict | None = None
+        self.kanban_off_until = 0.0          # old server (404 on /tasks): ask again later
+        self.status_off_until = 0.0          # old server (404 on GET /status): ask again later
+        self.un: dict[str, dict] = {}        # label -> {sig, since, post_at} of unobservable sessions
 
     def over_confirmed(self, now: float) -> bool:
         """One more 401/403/410 answer; True when the call is over for sure (OVER_CONFIRM in a
@@ -729,6 +833,8 @@ class Watcher:
     def shutdown(self) -> None:
         """Exit: clear every watcher board this machine remembers (call end, SIGTERM)."""
         rel = credential(self.clock()) or self.rel
+        if credential(self.clock()) is None:
+            J.clear()    # the call is over: opt-ins and proposals end with it
         if rel is not None:
             self.duty_cleanup(rel, set())
         else:
@@ -748,29 +854,38 @@ class Watcher:
                  interval_s: float) -> tuple[str, int, str]:
         """(sentence, tokens, how) how = model | fixed. One model call per session per
         interval, only when the session did something since the last call."""
+        if state == STILL:   # 0.33.0: inactive = real state + time + last real doing, no model
+            return inactive_sentence(own_doing(s["label"], now), last, now), 0, "fixed"
         fixed = fixed_sentence(state, now - last if last else None)
         due_call = now - m.get("call_at", 0.0) >= interval_s and last > m.get("call_last", 0.0)
         if not due_call or not self.model_allowed(now) or not s.get("tp"):
-            return fixed, 0, "fixed"
+            same = m.get("sent") and m.get("sent_state") == state and last <= m.get("call_last", 0.0)
+            return (m["sent"] if same else fixed), 0, "fixed"
         text = last_assistant_text(s["tp"])
         m["call_at"], m["call_last"] = now, last
+        key = (state, text)
+        if m.get("sent") and m.get("call_key") == key:   # the sentence would not change
+            return m["sent"], 0, "fixed"
+        m["call_key"] = key
         t0 = time.monotonic()
         sent, toks = ask_model(self.cmd, build_prompt(s["label"], state, now - last, text))
         if toks:
             self.spent.append((now, toks))
         log("model", label=s["label"], state=state, tokens=toks, ok=bool(sent),
             ms=int((time.monotonic() - t0) * 1000))
+        if sent:
+            m["sent"], m["sent_state"] = sent, state
         return (sent, toks, "model") if sent else (fixed, toks, "fixed")
 
     # ----- duties (one function each; a Kanban duty is added here later) -----
     def duty_status(self, rel: dict, label: str, sentence: str, state: str, last: float,
-                    now: float) -> dict:
+                    now: float, card: int | None = None) -> dict:
         """Post the sentence. A relay /status REPLACES the whole board of a sender, so:
         * the session's board is known locally (its own `status` posts of a CLI >= 0.32.0,
           or our earlier merge): merge into it, replace only `doing` + meta and `state`;
         * not known (older CLIs post their boards themselves): never touch the main board,
           post to the separate watcher board (sender `<label> Wächter`) instead."""
-        meta = doing_meta(label, state, last, now)
+        meta = doing_meta(label, state, last, now, card)
         base = known_board(label, self.clock())
         if base is None:
             sub = sub_label(label)
@@ -788,6 +903,263 @@ class Watcher:
                 post_board(rel, sub, {})
                 forget_board(sub)
         return res
+
+    def classify_order(self, order: str, cards: list[dict], now: float) -> tuple[str, int | None, str]:
+        """(action, nr, title) for one order: the cheapest model within the token cap, else
+        `new` with the first sentence as title."""
+        fallback = ("new", None, K.fallback_title(order))
+        if not self.model_allowed(now):
+            return fallback
+        text, toks = ask_raw(with_system(self.cmd, K.CLASSIFY_SYSTEM), K.build_classify_prompt(order, cards))
+        if toks:
+            self.spent.append((now, toks))
+        got = K.parse_classification(text, {c["nr"] for c in K.open_cards(cards)})
+        log("classify", tokens=toks, ok=bool(got))
+        if not got:
+            return fallback
+        return got[0], got[1], got[2] or fallback[2]
+
+    def _kanban_status(self, st: int, now: float, label: str) -> bool:
+        """True = stop for this tick (route missing, credential refused or server error)."""
+        if st == 404:
+            self.kanban_off_until = now + NOT_FOUND_RECHECK_S
+            log("kanban", label=label, why="no-route")
+            return True
+        if st in OVER or st >= 500:
+            log("error", where="kanban", label=label, status=st)
+            return True
+        return False
+
+    def duty_kanban(self, rel: dict, s: dict, label: str, state: str, m: dict, now: float) -> bool:
+        """Maintain the owner's Kanban for one observable session (see watchkanban.py).
+        True when the card the session works on changed (the board post is then due).
+        Never raises; logs labels, card numbers, counts only."""
+        if (now < self.kanban_off_until or vmulti._is_local(rel) or s.get("agent") == "codex"
+                or not s.get("tp")):
+            return False
+        key = s["key"]
+        cur = K.load_cursor(key)
+        first = cur is None or cur.get("tp") != s["tp"]
+        if first:
+            try:
+                start = max(0, os.stat(s["tp"]).st_size - K.READ_MAX)
+            except OSError:
+                return False
+            cur = {"tp": s["tp"], "off": start, "since": now - K.BACKFILL_S, "card": None,
+                   "linked": [], "tries": {}}
+        else:
+            cur = dict(cur)
+        card0 = cur.get("card")
+        try:
+            orders, new_off, pending = K.read_orders(s["tp"], int(cur.get("off") or 0),
+                                                     float(cur.get("since") or 0), first)
+            if first or new_off != cur.get("off"):
+                cur["off"] = new_off if not orders else cur["off"]
+                K.save_cursor(key, cur, now)
+            cards: list[dict] | None = None
+            done = 0
+            if orders:
+                st, cards = K.get_cards(rel, label)
+                if self._kanban_status(st, now, label):
+                    return False
+                for o in orders:
+                    wording, cut = K.fit_wording(o["text"])
+                    if cut:
+                        log("kanban", label=label, why="wording-cut")
+                    action, nr, title = self.classify_order(wording, cards, now)
+                    nr_out, st = None, 0
+                    if action == "sub" and nr:
+                        st, out = K.call(rel, "POST", f"tasks/{nr}/points",
+                                         {"from": label, "text": title[:200], "wording": wording})
+                        if st == 404:
+                            action = "new"       # the card is gone: a new one
+                        elif st < 300:
+                            nr_out = nr
+                            for c in cards:
+                                if c.get("nr") == nr:
+                                    c["points"] = [*(c["points"] if isinstance(c.get("points"), list) else []), title]
+                    if action == "new":
+                        body = {"from": label, "title": title, "wording": wording, "assignee": label,
+                                "state": "in_arbeit" if state == ARBEITET else "beauftragt"}
+                        st, out = K.call(rel, "POST", "tasks", body)
+                        if st < 300:
+                            nr_out = K.card_nr(out)
+                            if nr_out:
+                                cards.append({"nr": nr_out, "title": title, "state": body["state"]})
+                                m["card_state"] = body["state"]
+                    if st >= 300 and st not in (400, 409, 422):
+                        self._kanban_status(st, now, label)
+                        break
+                    if st >= 300:
+                        log("kanban", label=label, why="refused", status=st)
+                    done += 1
+                    cur["off"] = o["end"]
+                    if nr_out:
+                        cur["card"] = nr_out
+                        if action == "sub":
+                            m["card_state"] = None
+                    K.save_cursor(key, cur, now)
+                if done == len(orders):   # all consumed: skip over trailing non-order lines
+                    cur["off"] = max(cur["off"], new_off) if not pending else cur["off"]
+                    K.save_cursor(key, cur, now)
+                log("kanban", label=label, orders=len(orders), done=done, pending=pending,
+                    card=cur.get("card") or 0)
+            card = cur.get("card")
+            if card and state == ARBEITET and m.get("card_state") != "in_arbeit":
+                self._kanban_pick(rel, label, card, cards, cur, m, now)
+            if card:
+                self._kanban_links(rel, key, label, card, cur, now)
+        except vrelayops.RelayError:
+            log("error", where="kanban", label=label, status=503)
+        except Exception as e:  # noqa: BLE001
+            log("error", where="kanban", label=label, type=type(e).__name__)
+        m["card"] = cur.get("card")
+        return cur.get("card") != card0
+
+    def _kanban_pick(self, rel: dict, label: str, card: int, cards: list[dict] | None,
+                     cur: dict, m: dict, now: float) -> None:
+        """The card the session works on goes to in_arbeit (never done: that needs proof)."""
+        if cards is None:
+            st, cards = K.get_cards(rel, label)
+            if st >= 300:
+                return
+        c = next((x for x in cards if x.get("nr") == card), None)
+        if c is None or not K.is_open(c):
+            cur["card"] = None
+            m["card_state"] = None
+            return
+        if str(c.get("state") or "") == "in_arbeit":
+            m["card_state"] = "in_arbeit"
+            return
+        st, _out = K.call(rel, "POST", f"tasks/{card}/pick", {"from": label})
+        log("kanban", label=label, card=card, pick=st)
+        m["card_state"] = "in_arbeit" if st < 300 else "other"
+
+    def _kanban_links(self, rel: dict, skey: str, label: str, card: int, cur: dict, now: float) -> None:
+        """Link the open decisions this session created (notify-state) to its card."""
+        linked, tries = list(cur.get("linked") or []), dict(cur.get("tries") or {})
+        for slot_key, slot in notify.relay_slots():
+            if slot_key != skey and str(slot.get("from") or "") != label:
+                continue
+            for dec in dict.fromkeys([slot.get("id"), *(slot.get("ids") or [])]):
+                if not isinstance(dec, str) or not dec or dec in linked:
+                    continue
+                st, _o = K.call(rel, "POST", f"tasks/{card}/link", {"from": label, "decision": dec})
+                if st < 300 or st == 409:
+                    linked.append(dec)
+                elif st == 404:
+                    tries[dec] = int(tries.get(dec) or 0) + 1
+                    if tries[dec] >= K.LINK_TRIES:
+                        linked.append(dec)
+                log("kanban", label=label, card=card, link=st)
+        cur["linked"], cur["tries"] = linked[-50:], {k: v for k, v in tries.items() if k not in linked}
+        K.save_cursor(skey, cur, now)
+
+    def duty_join(self, rel: dict, sessions: list[dict], now: float) -> None:
+        """Active sessions that are not part of the call: propose each ONCE as a decision
+        card (sender Wächter, label + host only, max J.MAX_OPEN open), apply the answers
+        (Ja = covered like a call session from the next tick, Nein = never again in this
+        call). Subagents count for their parent. Never raises."""
+        if vmulti._is_local(rel) or watch_all():
+            return
+        try:
+            st = J.load(rel)
+            prop = st["proposed"]
+            try:
+                evs = poll_answers(rel)
+            except vrelayops.RelayError:
+                evs = []
+            by_id = {e.get("id"): k for k, e in prop.items() if e.get("id") and not e.get("answer")}
+            for ev in evs:
+                a = J.answer_of(ev)
+                if not a or a[0] not in by_id:
+                    continue
+                key = by_id[a[0]]
+                prop[key]["answer"] = a[1]
+                if a[1] == "ja":
+                    st["subscribed"][key] = {"label": prop[key]["label"], "tp": prop[key]["tp"], "at": now}
+                log("join", label=prop[key]["label"], answer=a[1])
+            cands = self.unbound(rel, now, ACTIVE_S, bound_keys={x["key"] for x in sessions},
+                                 bound_tps={x["tp"] for x in sessions if x.get("tp")})
+            is_open = lambda e: not e.get("answer") and now - float(e.get("at") or 0) < J.TTL_S
+            n_open = sum(1 for e in prop.values() if is_open(e))
+            host = vmulti.machine_label()
+            for c in cands:
+                e = prop.get(c["key"])
+                if e is not None:
+                    gap = now - float(e.get("last_active") or 0)
+                    e["last_active"] = now
+                    if e.get("answer") or gap <= J.REPROPOSE_S:
+                        continue    # answered, or asked before and not inactive since
+                    if is_open(e):
+                        n_open -= 1
+                if J.is_never(c["label"], c["tp"]) or n_open >= J.MAX_OPEN:
+                    continue        # over the cap: stays queued, asked when a card is answered
+                try:
+                    label = vrelayops.check_from(c["label"])
+                except vrelayops.RelayError:
+                    continue
+                res = post_proposal(rel, J.proposal_body(label, host, c["active_at"], now))
+                if not res.get("ok") or not res.get("id"):
+                    log("join", label=label, why="post-failed", status=res.get("status"))
+                    continue
+                prop[c["key"]] = {"id": res["id"], "at": now, "label": label, "tp": c["tp"],
+                                  "last_active": now, "answer": None}
+                n_open += 1
+                log("join", label=label, why="proposed")
+            J.save(st)
+        except Exception as e:  # noqa: BLE001
+            log("error", where="join", type=type(e).__name__)
+
+    def duty_unobserved(self, rel: dict, label: str, now: float, interval_s: float) -> None:
+        """A session the watcher cannot see (no transcript, no hook events): read its board
+        from the server and track locally when it last changed (the server sends no time).
+        Unchanged for longer than the interval: `keine Meldung seit X, letzter Stand: ...` on
+        the separate watcher board (never the main board, never `state`); cleared when the
+        session reports again. A server without the route (404): skipped silently."""
+        if now < self.status_off_until:
+            return
+        try:
+            st, out = get_status(rel, label)
+        except vrelayops.RelayError:
+            return
+        if st == 404:
+            self.status_off_until = now + NOT_FOUND_RECHECK_S
+            return
+        if st != 200:
+            return
+        board = out.get("board")
+        doing = str(board.get("doing") or "").strip() if isinstance(board, dict) else ""
+        sub = sub_label(label)
+        m = self.un.setdefault(label, {})
+        if not doing:
+            return
+        sig = json.dumps(board, sort_keys=True, ensure_ascii=False)
+        if m.get("sig") != sig:
+            m.update(sig=sig, since=now, post_at=0.0)
+            if known_board(sub, self.clock()) is not None:   # it reports again
+                post_board(rel, sub, {})
+                forget_board(sub)
+                log("cleared", label=label, why="reports-again")
+            return
+        quiet = now - float(m.get("since") or now)
+        if quiet <= interval_s or now - float(m.get("post_at") or 0) < interval_s:
+            return
+        ago = ago_short(quiet)
+        body = {"doing": silent_sentence(doing, quiet), "meta": {"doing": {
+            "context": (f"Sitzung {label} meldet sich nicht und ist für den Beobachter nicht sichtbar. "
+                        f"Stand ist die letzte Meldung der Sitzung, unverändert seit {ago}.")[:2000],
+            "faq": [{"q": f"Warum steht bei {label} nichts Neues?",
+                     "a": f"Die Sitzung hat sich seit {ago} nicht gemeldet."},
+                    {"q": f"Ist {label} noch aktiv?",
+                     "a": "Unbekannt, der Beobachter kann die Sitzung nicht sehen."},
+                    {"q": "Wessen Stand ist das?",
+                     "a": "Der letzte Stand, den die Sitzung selbst gemeldet hat."}]}}}
+        res = post_board(rel, sub, body)
+        if res.get("ok"):
+            remember_board(sub, body, now)
+            m["post_at"] = now
+        log("silent", label=label, quiet_min=int(quiet // 60), ok=bool(res.get("ok")))
 
     def duty_cleanup(self, rel: dict, live: set[str]) -> None:
         """Clear the watcher boards of sessions that are gone / no longer observable
@@ -867,11 +1239,21 @@ class Watcher:
         interval_s = minutes * 60.0
         bad = False
         views: dict[str, tuple[str, float]] = {}
-        sessions = self.discover(rel, now)
+        sessions = list(self.discover(rel, now))
+        taken = {x["key"] for x in sessions}
+        taken_tp = {x["tp"] for x in sessions if x.get("tp")}
+        sessions += [x for x in J.subscribed_sessions(rel, taken) if x["tp"] not in taken_tp]
         live: set[str] = set()
         for s in sessions:
             if not observable(s):
-                continue   # never claim a state that cannot be seen; only decisions cleanup applies
+                # never claim a state that cannot be seen; the server board is tracked instead
+                try:
+                    ulabel = vrelayops.check_from(s["label"])
+                except vrelayops.RelayError:
+                    continue
+                live.add(ulabel)
+                self.duty_unobserved(rel, ulabel, now, interval_s)
+                continue
             state, last = classify_state(s, now)
             views[s["key"]] = (state, last)
             try:
@@ -883,14 +1265,17 @@ class Watcher:
             prev = m.get("state")
             changed = prev is not None and prev != state
             m["state"] = state
-            if not (prev is None or changed or now - m.get("post_at", 0.0) >= interval_s):
+            card_changed = self.duty_kanban(rel, s, label, state, m, now)
+            if card_changed:
+                m["post_at"] = 0.0
+            if not (prev is None or changed or card_changed or now - m.get("post_at", 0.0) >= interval_s):
                 continue
             if now - self_posted_at(label) < interval_s:
                 log("skip", label=label, why="self-reporting")
                 m["post_at"] = now
                 continue
             sent, toks, how = self.sentence(s, state, last, now, m, interval_s)
-            res = self.duty_status(rel, label, sent, state, last, now)
+            res = self.duty_status(rel, label, sent, state, last, now, m.get('card'))
             if res.get("status") in OVER:
                 if self.over_confirmed(now):
                     log("end", why="post-over")
@@ -899,11 +1284,12 @@ class Watcher:
                 return OK
             bad = bad or not res.get("ok")
             if changed:
-                bad = bad or not self.duty_activity(rel, label, sent).get("ok")
+                bad = bad or not self.duty_activity(rel, label, sent[:SENTENCE_MAX]).get("ok")
             m["post_at"] = now
             log("post", label=label, state=state, how=how, tokens=toks, changed=changed,
                 ok=bool(res.get("ok")))
         self.rel = rel
+        self.duty_join(rel, sessions, now)
         self.duty_cleanup(rel, live)
         if self.duty_decisions(rel, views, now) == END:
             return END
