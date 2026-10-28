@@ -216,6 +216,9 @@ def spawn_detached(extra: list[str] | None = None, *, popen=subprocess.Popen) ->
         if disabled() or credential() is None or running():
             return False
         env = {k: v for k, v in os.environ.items() if k != vact.STATE_ENV}   # machine state
+        from . import device as vdev
+        if vdev.caretaker_active():
+            return False    # 0.34.0: the connected caretaker daemon covers the call
         popen(child_argv(extra), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
               stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True,
               cwd=vact.child_cwd(), env=env)
@@ -860,7 +863,12 @@ def delete_decision(rel: dict, label: str, dec_id: str) -> dict:
 class Watcher:
     def __init__(self, *, interval_flag: object = None, tokens: object = None,
                  clock=time.time, discover_fn=discover, cmd: list[str] | None | str = "env",
-                 unbound_fn=None) -> None:
+                 unbound_fn=None, cred_fn=None, bind_fn=None) -> None:
+        # 0.34.0: cred_fn injects the credential (the caretaker daemon binds a watcher to the
+        # caretaker credential of ONE call); bind_fn(rel, items) writes helper credentials for
+        # subscribed sessions. Both None = the classic watcher (credential() of this machine).
+        self.cred_fn = cred_fn
+        self.bind_fn = bind_fn
         self.interval_flag = interval_flag
         self.cap = tokens_per_hour(tokens)
         self.clock = clock
@@ -882,6 +890,11 @@ class Watcher:
         self.status_off_until = 0.0          # old server (404 on GET /status): ask again later
         self.un: dict[str, dict] = {}        # label -> {sig, since, post_at} of unobservable sessions
 
+    def cred(self, now: float | None = None) -> dict | None:
+        """The credential of the call this watcher serves (injected, else credential())."""
+        t = self.clock() if now is None else now
+        return self.cred_fn(t) if self.cred_fn is not None else credential(t)
+
     def over_confirmed(self, now: float) -> bool:
         """One more 401/403/410 answer; True when the call is over for sure (OVER_CONFIRM in a
         row over at least OVER_CONFIRM_S)."""
@@ -895,7 +908,9 @@ class Watcher:
         switched between helper tokens of the same call, the answers to the summary card were
         fetched under another sender and lost). Another credential is taken only when the
         pinned one is gone (re-import: same call, state kept) or its call is over
-        (`new_call`: state starts fresh)."""
+        (`new_call`: state starts fresh). 0.34.0: an injected credential (caretaker) is the call."""
+        if self.cred_fn is not None:
+            return self.cred_fn(now)
         cands = [c for c in usable_credentials(now)
                  if vmulti._token_hash(str(c.get("token") or "")) not in self.dead]
         if not cands:
@@ -924,7 +939,7 @@ class Watcher:
                 self.duty_cleanup(self.rel, set())   # the old call's watcher boards
         except Exception:  # noqa: BLE001, S110
             pass
-        forget_boards_before(float((credential(now) or {}).get("written_at") or now))
+        forget_boards_before(float((self.cred(now) or {}).get("written_at") or now))
         self.mem = {}
         self.over = []
         self.server_min = None
@@ -933,8 +948,9 @@ class Watcher:
 
     def shutdown(self) -> None:
         """Exit: clear every watcher board this machine remembers (call end, SIGTERM)."""
-        rel = credential(self.clock()) or self.rel
-        if credential(self.clock()) is None:
+        cur = self.cred(self.clock())
+        rel = cur or self.rel
+        if cur is None:
             J.clear()    # the call is over: opt-ins and proposals end with it
         if rel is not None:
             self.duty_cleanup(rel, set())
@@ -1171,6 +1187,7 @@ class Watcher:
             except vrelayops.RelayError:
                 evs = []
             by_id = {e.get("id"): k for k, e in prop.items() if e.get("id") and not e.get("answer")}
+            newly: list[dict] = []   # 0.34.0: sessions that just got a Ja
             for ev in evs:
                 a = J.answer_of(ev)
                 if not a or a[0] not in by_id:
@@ -1183,11 +1200,16 @@ class Watcher:
                                           "last_active": now, "answer": a[1]}
                         if a[1] == "ja":
                             st["subscribed"][m["key"]] = {"label": m["label"], "tp": m["tp"], "at": now}
+                            newly.append({"key": m["key"], "label": m["label"], "tp": m["tp"]})
                     log("join", label="alle", count=len(prop[key].get("members") or []), answer=a[1])
                     continue
                 if a[1] == "ja":
                     st["subscribed"][key] = {"label": prop[key]["label"], "tp": prop[key]["tp"], "at": now}
+                    newly.append({"key": key, "label": prop[key]["label"], "tp": prop[key]["tp"]})
                 log("join", label=prop[key]["label"], answer=a[1])
+            if newly:
+                J.save(st)
+                self.bind(rel, newly)
             cands = self.unbound(rel, now, ACTIVE_S, bound_keys={x["key"] for x in sessions},
                                  bound_tps={x["tp"] for x in sessions if x.get("tp")})
             host = vmulti.machine_label()
@@ -1244,6 +1266,17 @@ class Watcher:
             J.save(st)
         except Exception as e:  # noqa: BLE001
             log("error", where="join", type=type(e).__name__)
+
+    def bind(self, rel: dict, items: list[dict]) -> None:
+        """0.34.0 (caretaker): give subscribed sessions their own helper credential for this
+        call, so their CLI commands (VOICEHOOK_SESSION_LABEL=<label>) land in it. No-op for the
+        classic watcher. Never raises."""
+        if self.bind_fn is None or not items:
+            return
+        try:
+            self.bind_fn(rel, items)
+        except Exception as e:  # noqa: BLE001
+            log("error", where="bind", type=type(e).__name__)
 
     def duty_unobserved(self, rel: dict, label: str, now: float, interval_s: float) -> None:
         """A session the watcher cannot see (no transcript, no hook events): read its board
@@ -1381,7 +1414,17 @@ class Watcher:
         sessions = list(self.discover(rel, now))
         taken = {x["key"] for x in sessions}
         taken_tp = {x["tp"] for x in sessions if x.get("tp")}
-        sessions += [x for x in J.subscribed_sessions(rel, taken) if x["tp"] not in taken_tp]
+        subs = [x for x in J.subscribed_sessions(rel, taken) if x["tp"] not in taken_tp]
+        if self.bind_fn is not None and subs:
+            # 0.34.0: a written helper entry shows up in discover() as a bare "helper-<name>"
+            # without transcript: the subscribed entry (with transcript) is the same session
+            names = {vmulti.helper_key(x["label"]) for x in subs}
+            sessions = [x for x in sessions
+                        if not (str(x["key"]).startswith("helper-") and not x.get("tp")
+                                and vmulti.helper_key(x["label"]) in names)]
+            taken = {x["key"] for x in sessions}
+            self.bind(rel, [{"key": x["key"], "label": x["label"], "tp": x["tp"]} for x in subs])
+        sessions += subs
         live: set[str] = set()
         for s in sessions:
             if not observable(s):

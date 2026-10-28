@@ -3,6 +3,10 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.34.0
+
+- **Caretaker (Hausmeister): connect once, active in every call.** `voicehook-agent connect` runs a device flow (URL + code, approved once in the browser by the logged-in owner) and stores a device token in `~/.voicehook/device.json` (0600; never printed or logged); `connect --status` / `--disconnect`. `voicehook-agent caretaker` is a per-machine daemon that finds your calls itself (`GET /api/device/calls?wait=25`), asks for a caretaker credential per call and runs the existing watcher bound to it (injected credential; one watcher, newest call). On Ja of the subscribe cards it fetches helper credentials (`POST /api/device/calls/{room}/helpers`) and writes `helpers/<label>.json`, removed when the call ends. `caretaker install` / `uninstall` / `status`: systemd --user unit (`Restart=always`, no secrets) or launchd agent; `connect` offers it. Without `connect` the classic join / helper-import watcher is unchanged. Log `~/.voicehook/caretaker.log`.
+
 ## 0.33.6
 
 - **VOICEHOOK_WATCH_NEVER hides sessions entirely:** matching sessions (label or project folder) are neither proposed nor shown on the board (router decision: the se-testwall test runs are noise; private sessions).

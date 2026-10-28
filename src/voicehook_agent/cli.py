@@ -4081,6 +4081,36 @@ def _relay_owner_pid() -> int | None:
     return None
 
 
+def _run_connect(args) -> int:
+    """`connect [--status|--disconnect|--install]` (0.34.0, device.py / caretaker.py)."""
+    from . import caretaker as vcare
+    from . import device as vdev
+    def say(s: str) -> None:
+        print(s, flush=True)
+
+    if args.status:
+        vcare.status(out=say)
+        return 0
+    if args.disconnect:
+        say("disconnected" if vdev.clear_device() else "was not connected")
+        return 0
+    rc = vdev.connect(args.name, out=say)
+    if rc != 0 or args.no_install:
+        return rc
+    do = args.install
+    if not do and sys.stdin.isatty():
+        try:
+            do = input("Autostart installieren / install autostart (systemd --user / launchd)? [Y/n] ") \
+                .strip().lower() in ("", "y", "yes", "j", "ja")
+        except EOFError:
+            do = False
+    if do:
+        vcare.install(out=say)
+    else:
+        say("Autostart: `voicehook-agent caretaker install` (or run `voicehook-agent caretaker` yourself)")
+    return 0
+
+
 def _run_helper_import(args=None) -> int:
     """`helper-import [--as NAME]`: credential JSON on stdin (over ssh, never a chat) ->
     ~/.voicehook/helpers/<name>.json (0.22.2: one per helper session, vhelp.import_credential)."""
@@ -5085,6 +5115,21 @@ def main(argv: list[str] | None = None) -> None:
                       "$VOICEHOOK_WATCH_TOKENS_PER_HOUR); used up or 0: fixed sentences without a model")
     p_wa.add_argument("--foreground", action="store_true", default=False,
                       help="run in this process instead of starting a detached one")
+    p_co = sub.add_parser(
+        "connect", help="0.34.0: connect this machine ONCE (approved in the browser by the "
+        "logged-in account owner) so the caretaker is active in every call of yours without a "
+        "per-call start; --status / --disconnect")
+    p_co.add_argument("--name", default=None, help="name of this machine on the account (default: host name)")
+    p_co.add_argument("--status", action="store_true", default=False, help="show the connection (never the token)")
+    p_co.add_argument("--disconnect", action="store_true", default=False, help="forget the device token on this machine")
+    p_co.add_argument("--install", action="store_true", default=False,
+                      help="also install the autostart (systemd --user / launchd) without asking")
+    p_co.add_argument("--no-install", action="store_true", default=False, help="do not offer the autostart")
+    p_ca = sub.add_parser(
+        "caretaker", help="0.34.0: the caretaker (Hausmeister) daemon: finds your calls itself and "
+        "serves each with the watcher. `caretaker [run]`, `install` (systemd --user / launchd "
+        "autostart), `uninstall`, `status`. Needs `connect` once. Log: ~/.voicehook/caretaker.log")
+    p_ca.add_argument("action", nargs="?", default="run", choices=["run", "install", "uninstall", "status"])
     p_hi = sub.add_parser(
         "helper-import", help="read a helper credential (JSON) from stdin and write it for ONE "
         "helper session: ~/.voicehook/helpers/<name>.json (0600, 0.22.2; was the shared "
@@ -5163,6 +5208,21 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(rc)
     if args.cmd == "helper-import":
         sys.exit(_run_helper_import(args))
+    if args.cmd == "connect":
+        sys.exit(_run_connect(args))
+    if args.cmd == "caretaker":
+        from . import caretaker as vcare
+        if args.action == "install":
+            sys.exit(vcare.install())
+        if args.action == "uninstall":
+            sys.exit(vcare.uninstall())
+        if args.action == "status":
+            vcare.status(out=lambda s: print(s, flush=True))
+            sys.exit(0)
+        try:
+            sys.exit(vcare.run_daemon())
+        except KeyboardInterrupt:
+            sys.exit(130)
     if args.cmd == "watch":
         try:
             sys.exit(vwatch.main(args.interval, args.tokens_per_hour, args.foreground))

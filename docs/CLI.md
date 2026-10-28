@@ -772,6 +772,40 @@ permission or an AskUserQuestion), plus "zuletzt aktiv". Sessions come from the 
 * **Log:** `~/.voicehook/watch.log` (size-rotated, 0600): label, state, counts, tokens,
   durations only, never transcript text or generated sentences.
 
+### Caretaker (Hausmeister): connect once, active in every call (0.34.0)
+
+```bash
+voicehook-agent connect              # once: open the printed URL, confirm the code while logged in
+voicehook-agent caretaker install    # autostart (systemd --user / launchd); connect offers it too
+voicehook-agent connect --status     # connected? daemon running? autostart installed? (never the token)
+voicehook-agent connect --disconnect # forget the device token on this machine
+voicehook-agent caretaker uninstall  # remove the autostart
+```
+
+* **No keys, no tokens by hand.** `connect` runs a device flow against `$VOICEHOOK_API`
+  (default `https://voicehook.ai`): `POST /api/device/start`, you approve the code in the browser as the
+  logged-in owner, `POST /api/device/poll` hands the machine a device token. It lives in
+  `~/.voicehook/device.json` (0600, dir 0700), like a login session: never printed, logged or put in a
+  unit file. A revoked token (401) is forgotten and the daemon idles until you `connect` again.
+* **The daemon** (`voicehook-agent caretaker [run]`, one per machine, flock `caretaker.lock`) long-polls
+  `GET /api/device/calls?wait=25`, and for your newest call with you present asks
+  `POST /api/device/calls/{room}/caretaker` for a relay credential with owner rights. It runs the
+  [watcher](#the-watcher-one-process-per-machine-keeps-the-board-current-watch-0320) bound to that
+  credential: board sentences, activity, Kanban and the card "N Sessions arbeiten gerade parallel ...
+  alle abonnieren?". One watcher at a time, for the newest call (the watcher's state is per call).
+  When the call is no longer listed the watcher stops and the boards it wrote are cleared.
+* **Ja subscribes:** for every subscribed session the daemon calls
+  `POST /api/device/calls/{room}/helpers` and writes `helpers/<label>.json`
+  (0600), so the session's own commands with `VOICEHOOK_SESSION_LABEL=<label>` land in this call (the label is
+  the session's registry label if known, else its transcript label). Entries end with the call.
+* **Invisible:** it never posts a status of its own, only for session labels.
+* **Autostart:** `caretaker install` writes `~/.config/systemd/user/voicehook-caretaker.service`
+  (`Restart=always`, only PATH and non-secret settings, hint `loginctl enable-linger` if needed) or
+  `~/Library/LaunchAgents/ai.voicehook.caretaker.plist`.
+* **Without `connect`** nothing changes: `join` / `helper-import` still start the classic watcher. When a
+  connected caretaker runs, they leave it alone.
+* Log: `~/.voicehook/caretaker.log` (size-rotated, metadata only).
+
 ### Owner agent key (Kanban, 0.33.1)
 
 The server only treats an agent as the account owner's own agent (`owner_agent`) when it joins
