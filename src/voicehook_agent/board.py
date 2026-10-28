@@ -1396,6 +1396,9 @@ def clear_board(rel: dict, frm: str) -> bool:
             res = relayops.local_request(rel, frm, "status", {})
         else:
             res = relayops.remote_status(rel, frm, {})
+        if res.get("ok"):
+            from . import watch
+            watch.forget_board(frm)  # 0.32.0: nothing left to merge into
         return bool(res.get("ok"))
     except Exception:  # noqa: BLE001
         return False

@@ -244,6 +244,7 @@ from . import transport as vtransport
 from . import ui as vui
 from . import visual as vvisual
 from . import waitcheck as vwait
+from . import watch as vwatch
 
 _SLUG_RX = re.compile(r"^[a-z]+-[a-z]+-[a-z]+-[A-Z0-9]{4,8}$")
 _VERSION = __version__
@@ -777,6 +778,7 @@ async def _publish_relay(room, tok: dict | None, slug: str, json_mode: bool,
         _print_event(json_mode, "system",
                      f"activity relay ready for the other Claude Code sessions here{kind}: {path}",
                      topic="_meta")
+        vwatch.spawn_detached()  # 0.32.0: one detached watcher per machine (VOICEHOOK_WATCH=0 = off)
     except Exception as e:  # noqa: BLE001
         print(f"[warn] activity relay not written ({type(e).__name__})", file=sys.stderr, flush=True)
     if ctl is not None and ctl.helper_pump is not None and stop is not None:
@@ -4042,6 +4044,8 @@ def _run_bridge_session(args) -> int:
                     owner_pid=_relay_owner_pid() or 0))
             except (OSError, ValueError):
                 pass
+            else:
+                vwatch.spawn_detached()
     print(json.dumps(out), flush=True)
     return 0
 
@@ -4073,6 +4077,7 @@ def _run_helper_import(args=None) -> int:
         print(f"[info] helper {got['name']!r} is bound to no session: start the helper session "
               f"with VOICEHOOK_SESSION_LABEL={got['name']} (or keep it the only unbound one)",
               file=sys.stderr, flush=True)
+    vwatch.spawn_detached()  # 0.32.0: one detached watcher per machine (VOICEHOOK_WATCH=0 = off)
     print(json.dumps({"ok": True, "type": "helper-import", **got}), flush=True)
     return 0
 
@@ -4313,6 +4318,8 @@ def _run_relay_client(args, req: dict, rel: dict) -> int:
                       f"max {relay.ITEM_FAQ_MAX} per item)", file=sys.stderr, flush=True)
             res = (vrelayops.local_request(rel, frm, "status", body) if local
                    else vrelayops.remote_status(rel, frm, body))
+            if res.get("ok"):
+                vwatch.mark_self(frm, board=body)  # 0.32.0: this session reports itself, the watcher skips it and merges into this board
             out = {**res, "type": "board", **({"board": body} if res.get("ok") else {}),
                    "via": "relay"}
     except vrelayops.RelayError as e:
@@ -4373,8 +4380,11 @@ def _run_waiting(args) -> int:
             return (vrelayops.local_request(rel, frm, "decide", body) if local
                     else vrelayops.remote_decide(rel, frm, body))
         body = vrelayops.status_body(req["board"])
-        return (vrelayops.local_request(rel, frm, "status", body) if local
-                else vrelayops.remote_status(rel, frm, body))
+        res = (vrelayops.local_request(rel, frm, "status", body) if local
+               else vrelayops.remote_status(rel, frm, body))
+        if res.get("ok"):
+            vwatch.mark_self(frm, board=body)
+        return res
 
     try:
         if q:
@@ -5042,6 +5052,20 @@ def main(argv: list[str] | None = None) -> None:
         p_ph.add_argument("--message", default=None, metavar="TEXT",
                           help=f"optional short text, max {PHONE_MESSAGE_MAX[kind]} chars")
         _add_session(p_ph)
+    p_wa = sub.add_parser(
+        "watch", help="0.32.0: ONE detached watcher per machine while a call is active: keeps "
+        "the board entry of every local agent session (Claude Code, Codex) current with one "
+        "whole sentence, adds an activity line on a state change and removes decisions of "
+        "sessions that went on. `join` and `helper-import` start it themselves "
+        "(VOICEHOOK_WATCH=0 = off). Ends with the call. Log: ~/.voicehook/watch.log (metadata only)")
+    p_wa.add_argument("--interval", type=int, choices=[1, 5, 10, 15], default=None, metavar="MIN",
+                      help="minutes between updates per session: 1, 5, 10 or 15 (default 15; "
+                      "$VOICEHOOK_WATCH_INTERVAL; the call page setting wins)")
+    p_wa.add_argument("--tokens-per-hour", type=int, default=None, metavar="N",
+                      help=f"model token budget per hour (default {vwatch.DEFAULT_TOKENS_PER_HOUR}; "
+                      "$VOICEHOOK_WATCH_TOKENS_PER_HOUR); used up or 0: fixed sentences without a model")
+    p_wa.add_argument("--foreground", action="store_true", default=False,
+                      help="run in this process instead of starting a detached one")
     p_hi = sub.add_parser(
         "helper-import", help="read a helper credential (JSON) from stdin and write it for ONE "
         "helper session: ~/.voicehook/helpers/<name>.json (0600, 0.22.2; was the shared "
@@ -5120,6 +5144,11 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(rc)
     if args.cmd == "helper-import":
         sys.exit(_run_helper_import(args))
+    if args.cmd == "watch":
+        try:
+            sys.exit(vwatch.main(args.interval, args.tokens_per_hour, args.foreground))
+        except KeyboardInterrupt:
+            sys.exit(130)
     if args.cmd in ("say", "next", "says", "leave", "rejoin", "status", "activity", "decide",
                     "helper-credential", "vocab", "ui", "notify-me", "call-me", "board", "send-data",
                     *DELTA_KINDS):

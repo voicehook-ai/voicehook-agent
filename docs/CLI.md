@@ -730,6 +730,48 @@ works in principle, but needs the voicehook-agent CLI on this machine, in one li
 `uv tool install voicehook-agent && voicehook-agent hook install` (or `pipx install
 voicehook-agent`).
 
+### The watcher: one process per machine keeps the board current (`watch`, 0.32.0)
+
+Sessions forget to report. While a call is active ONE detached process per machine looks
+after every local session (Claude Code, Codex):
+
+| Duty | What it does |
+|---|---|
+| status | the session's board entry (`doing`) = ONE whole German sentence, every interval and at once when the state changes. A session that posted its own `status` within the interval is skipped (it reports itself). A relay `/status` replaces the whole board of a sender, so the watcher merges: it takes the last board it knows for that session (remembered from the session's own `status` posts and its own earlier posts, `~/.voicehook/watch-boards.json`, 0600) and replaces only `doing` and its meta; `open`, `done`, `project` and their meta stay. No known board (older CLIs post their boards themselves): the main board is never touched; the watcher posts a separate board under the sender `<label> (Wächter)` and clears it once the session reports itself. `state` (arbeitet, leerlauf, frage) is set from the watcher's own detection on every post to the MAIN board only, never on the `(Wächter)` board (a server keeps the last state per sender, such a board could not be removed). The watcher boards are cleared (empty board) when a session disappears and on exit (call end, SIGTERM). A session with no signal at all (helper credential only: no hook events, no transcript) gets no status and no activity line, only the decision cleanup. The `doing` entry always carries a `context` and 3 `faq` pairs built from the state. |
+| activity | an activity line on a state change (arbeitet, still, offene Frage) |
+| decisions | a decision of a local session (created by this machine's hooks) is deleted once the session went on or the question is obsolete (404/409 on delete = done). A session that still waits keeps its decision. Decisions of other machines/sessions are never touched. |
+
+**Privacy:** the watcher covers only sessions that belong to this call: registry entries that reported through the relay (hooks) and sessions with a helper credential (`helpers/<label>.json`; without transcript or hook events their state is unknown and the sentence says so). Other sessions of the machine (private or customer work on a shared box) are never posted. Opt in with `VOICEHOOK_WATCH_ALL=1` to also cover sessions found only by a recent transcript.
+
+State per session: `arbeitet` (hook event or transcript change in the last 2 min, no Stop
+since), `still` (Stop, or nothing for a while), `frage` (last event waits for input,
+permission or an AskUserQuestion), plus "zuletzt aktiv". Sessions come from the registry
+(`relay-state.json`), `ps` and the transcripts (`~/.claude/projects/*/*.jsonl`, Codex
+`sessions/**/rollout-*.jsonl`).
+
+* **Start:** `join` and `helper-import` spawn it detached (own session via setsid, stdio to
+  /dev/null: not a child of the agent session, it survives it). `VOICEHOOK_WATCH=0` turns
+  that off. By hand: `voicehook-agent watch [--interval 1|5|10|15] [--tokens-per-hour N]
+  [--foreground]`. Exactly one per machine (`~/.voicehook/watch.lock`, flock); a second start
+  exits 0 quietly.
+* **Stop:** it ends itself when the call is over: no usable `relay.json`/helper credential
+  (gone, expired, marked dead, owner gone) or 401/403/410 from the server. Checked every
+  tick (45 s, exponential backoff up to 10 min on errors). Never longer than the
+  credential's `expires_at`.
+* **Interval:** 1, 5, 10 or 15 minutes. Priority: the call page setting
+  (`GET <relay url>/watch` -> `{"interval_min": 1|5|10|15|null}`, read every tick; 404 =
+  older server, ignored) > `--interval` > `VOICEHOOK_WATCH_INTERVAL` > 15.
+* **Wording:** the cheapest model writes the sentence from the state and the last
+  assistant message of the transcript (tail, 2000 chars): the local `claude -p --model
+  haiku` if installed; override the command with `VOICEHOOK_WATCH_MODEL_CMD` (prompt on
+  stdin, answer plain or `claude`-style JSON with `usage`; `off` = never). No model, a
+  failed call or the hourly budget used up: a fixed sentence from the state. At most one
+  model call per session per interval, and only when the session did something since.
+* **Token cap:** `--tokens-per-hour` / `VOICEHOOK_WATCH_TOKENS_PER_HOUR`, default **40000**
+  (about 25 calls; a call costs ~1.5k tokens with `--strict-mcp-config`). `0` = never a model.
+* **Log:** `~/.voicehook/watch.log` (size-rotated, 0600): label, state, counts, tokens,
+  durations only, never transcript text or generated sentences.
+
 ### Helper access for every main agent (0.17.0)
 
 The server issues the helper credential (`POST /api/helper/credential`) however the main

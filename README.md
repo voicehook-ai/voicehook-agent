@@ -128,6 +128,14 @@ automation into `~/.codex` (hooks.json, `notify`, a local MCP server with `statu
 `decide`, `next`, `activity`; backup first), then trust the hooks once with `/hooks` in
 Codex ([other coding agents](docs/CLI.md#other-coding-agents-0200)).
 
+Watcher (0.32.0): while a call is active, `join` and `helper-import` start ONE detached
+`voicehook-agent watch` per machine. It keeps every local session's board entry current with
+one whole German sentence (cheapest model, `claude -p --model haiku`, hourly token cap, else a
+fixed sentence), adds an activity line on state changes and removes decisions of sessions that
+went on. Interval 1/5/10/15 min (call page > `--interval` > 15); it ends with the call;
+`VOICEHOOK_WATCH=0` turns it off
+([watcher](docs/CLI.md#the-watcher-one-process-per-machine-keeps-the-board-current-watch-0320)).
+
 ## Pricing
 
 About 10 minutes free every day. Prepaid from 10 EUR, no subscription.

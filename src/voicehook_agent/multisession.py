@@ -850,6 +850,11 @@ def _admit(skey: str, kind: str, text: str, event: dict, t: float) -> str | None
         label = session_label(event, str(me.get("label") or ""))
         line = vact.scrub(f"{label}: {text}")[:TEXT_MAX].strip()
         me["label"] = label
+        # 0.32.0 (watch.py): what the session did last, also when the line is throttled below
+        me.update(ev=kind, ev_text=text[:60], ev_at=t)
+        tp = event.get("transcript_path")
+        if isinstance(tp, str) and tp:
+            me["tp"] = tp[:512]
         sessions.pop(skey, None)
         keep = sorted(((k, v) for k, v in sessions.items() if isinstance(v, dict)),
                       key=lambda kv: float(kv[1].get("at") or 0))[-(SESSIONS_KEEP - 1):]
@@ -958,6 +963,8 @@ def handle_event(raw: str, now: float | None = None, post=None) -> str | None:
     """Hook entry: the line handed to `post` (default: detached POST) or None. Silent
     without relay.json, for the joining session itself, and on anything unexpected."""
     try:
+        if os.environ.get("VOICEHOOK_WATCH_CHILD"):
+            return None  # the watcher's own model call is no session
         event = json.loads(raw) if raw and raw.strip() else {}
         if not isinstance(event, dict):
             return None

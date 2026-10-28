@@ -23,3 +23,7 @@ def _private_state_dir(tmp_path, monkeypatch):
     # 0.21.8: the onboarding is also the first next/listen event of a join; tests about the
     # event flow start without it (tests/test_onboarding.py turns it on)
     monkeypatch.setenv("VOICEHOOK_ONBOARDING_HINT", "0")
+    # 0.32.0 watch.py: never a detached watcher (join / helper-import) from a test
+    monkeypatch.setenv("VOICEHOOK_WATCH", "0")
+    monkeypatch.delenv("VOICEHOOK_WATCH_CHILD", raising=False)
+    monkeypatch.delenv("VOICEHOOK_SESSION_LABEL", raising=False)
