@@ -3,6 +3,10 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.34.1
+
+- **A Ja on "Session X dazuholen?" fetches the session, or says why not.** Live 28.10. a Ja fetched nobody, silently: the caretaker polled `GET /api/device/calls` without pause while a call ran (the server answered the long poll at once), ~400 requests a minute emptied the device rate limit and every helper request got 429. Now at least 5 s between two polls and the long poll ends when the next watcher tick is due (server side the long poll now waits while the list is unchanged, voicehook-v4). Every Ja is tracked until the session has its helper credential AND its board was accepted by the server (a forced fresh post); otherwise a note "Konnte X nicht in den Call holen, weil ..." (sender `X (Hausmeister)`, concrete reason: rate limit, nobody in the call, call over, device disconnected, board rejected 422, nothing arrived after 150 s) appears on the board once per reason and disappears when the session arrives. Log line `fetch` in watch.log.
+
 ## 0.34.0
 
 - **Caretaker (Hausmeister): connect once, active in every call.** `voicehook-agent connect` runs a device flow (URL + code, approved once in the browser by the logged-in owner) and stores a device token in `~/.voicehook/device.json` (0600; never printed or logged); `connect --status` / `--disconnect`. `voicehook-agent caretaker` is a per-machine daemon that finds your calls itself (`GET /api/device/calls?wait=25`), asks for a caretaker credential per call and runs the existing watcher bound to it (injected credential; one watcher, newest call). On Ja of the subscribe cards it fetches helper credentials (`POST /api/device/calls/{room}/helpers`) and writes `helpers/<label>.json`, removed when the call ends. `caretaker install` / `uninstall` / `status`: systemd --user unit (`Restart=always`, no secrets) or launchd agent; `connect` offers it. Without `connect` the classic join / helper-import watcher is unchanged. Log `~/.voicehook/caretaker.log`.

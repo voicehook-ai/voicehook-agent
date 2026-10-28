@@ -436,6 +436,37 @@ def sub_label(label: str) -> str:
     return f"{label[:40 - len(SUB_NAME) - 3].rstrip()} ({SUB_NAME})"
 
 
+FETCH_NAME = "Hausmeister"
+FETCH_VERIFY_S = 150.0   # a Ja without the session on the board after this long is reported
+
+
+def fetch_label(label: str) -> str:
+    """Sender of the note "Konnte X nicht in den Call holen, weil ..." (max 40 chars)."""
+    return f"{label[:40 - len(FETCH_NAME) - 3].rstrip()} ({FETCH_NAME})"
+
+
+def vdev_reason(status: int) -> str:
+    from . import device as vdev
+
+    return vdev.reason_text(status)
+
+
+def fetch_note(label: str, why: str, now: float, since: float) -> dict:
+    """Board body of the failure note (own sender, so it never overwrites a session board)."""
+    text = f"Konnte {label} nicht in den Call holen, weil {why}."
+    ago = ago_text(max(0.0, now - since))
+    return {"doing": text[:SENTENCE_MAX * 2], "meta": {"doing": {
+        "context": (f"Du hast Ja gesagt, {label} in den Call zu holen (vor {ago}). Der Hausmeister "
+                    f"hat es versucht und es hat nicht geklappt: {why}. Er versucht es weiter; "
+                    "sobald die Session im Call ist, verschwindet dieser Hinweis.")[:2000],
+        "faq": [{"q": f"Warum ist {label} nicht im Call?"[:200], "a": f"Weil {why}."[:200]},
+                {"q": "Muss ich etwas tun?",
+                 "a": ("Ja, den Rechner neu verbinden: voicehook-agent connect." if "connect" in why
+                       else "Nein, der Hausmeister versucht es von selbst weiter.")},
+                {"q": "Wann verschwindet der Hinweis?",
+                 "a": "Sobald die Session im Call auftaucht."}]}}}
+
+
 def merge_board(base: dict | None, sentence: str, meta: dict | None = None,
                 state: str | None = None) -> dict:
     """The board body to post: the known board with ONLY `doing` (and its meta) replaced and
@@ -889,6 +920,9 @@ class Watcher:
         self.kanban_off_until = 0.0          # old server (404 on /tasks): ask again later
         self.status_off_until = 0.0          # old server (404 on GET /status): ask again later
         self.un: dict[str, dict] = {}        # label -> {sig, since, post_at} of unobservable sessions
+        # Bug 28.10.: a Ja fetched nobody, silently. label -> {since, bind, post, why, told}:
+        # until the session has its credential AND its board is on the server, then gone
+        self.fetch: dict[str, dict] = {}
 
     def cred(self, now: float | None = None) -> dict | None:
         """The credential of the call this watcher serves (injected, else credential())."""
@@ -1201,11 +1235,13 @@ class Watcher:
                         if a[1] == "ja":
                             st["subscribed"][m["key"]] = {"label": m["label"], "tp": m["tp"], "at": now}
                             newly.append({"key": m["key"], "label": m["label"], "tp": m["tp"]})
+                            self.fetch_start(m["key"], m["label"], now)
                     log("join", label="alle", count=len(prop[key].get("members") or []), answer=a[1])
                     continue
                 if a[1] == "ja":
                     st["subscribed"][key] = {"label": prop[key]["label"], "tp": prop[key]["tp"], "at": now}
                     newly.append({"key": key, "label": prop[key]["label"], "tp": prop[key]["tp"]})
+                    self.fetch_start(key, prop[key]["label"], now)
                 log("join", label=prop[key]["label"], answer=a[1])
             if newly:
                 J.save(st)
@@ -1270,13 +1306,67 @@ class Watcher:
     def bind(self, rel: dict, items: list[dict]) -> None:
         """0.34.0 (caretaker): give subscribed sessions their own helper credential for this
         call, so their CLI commands (VOICEHOOK_SESSION_LABEL=<label>) land in it. No-op for the
-        classic watcher. Never raises."""
+        classic watcher. Never raises. The result per label feeds self.fetch."""
         if self.bind_fn is None or not items:
             return
         try:
-            self.bind_fn(rel, items)
+            res = self.bind_fn(rel, items)
         except Exception as e:  # noqa: BLE001
             log("error", where="bind", type=type(e).__name__)
+            res = {str(i.get("label") or ""): "der Hausmeister einen internen Fehler hatte" for i in items}
+        if not isinstance(res, dict):
+            return
+        for it in items:
+            f = self.fetch.get(str(it.get("label") or ""))
+            if f is None or str(it.get("label") or "") not in res:
+                continue
+            why = str(res[str(it.get("label") or "")] or "")
+            f["bind"] = not why
+            f["bind_why"] = why
+
+    def fetch_start(self, key: str, label: str, now: float) -> None:
+        """A Ja for this session: track it until it really is in the call (its next board post
+        is forced, so the proof is a fresh server answer, not an older one)."""
+        self.mem.setdefault(key, {})["post_at"] = 0.0
+        try:
+            label = vrelayops.check_from(label)
+        except vrelayops.RelayError:
+            return
+        self.fetch.setdefault(label, {"since": now, "bind": self.bind_fn is None, "bind_why": "",
+                                      "post": False, "post_why": "", "told": ""})
+
+    def fetch_posted(self, label: str, res: dict) -> None:
+        f = self.fetch.get(label)
+        if f is None:
+            return
+        if res.get("ok"):
+            f["post"], f["post_why"] = True, ""
+        else:
+            f["post_why"] = vdev_reason(int(res.get("status") or 0))
+
+    def duty_fetch(self, rel: dict, now: float) -> None:
+        """Every Ja ends visibly: the session shows up in the call, or a note "Konnte X nicht
+        in den Call holen, weil ..." appears on the board (own sender, once per reason, gone as
+        soon as the session arrives). Never raises."""
+        for label, f in list(self.fetch.items()):
+            try:
+                if f["bind"] and f["post"]:
+                    if f["told"]:
+                        post_board(rel, fetch_label(label), {})
+                    log("fetch", label=label, ok=1, after_s=int(now - f["since"]))
+                    del self.fetch[label]
+                    continue
+                why = f["bind_why"] or f["post_why"]
+                if not why and now - f["since"] >= FETCH_VERIFY_S:
+                    why = "bisher kein Stand der Session im Call angekommen ist"
+                if not why or why == f["told"]:
+                    continue
+                res = post_board(rel, fetch_label(label), fetch_note(label, why, now, f["since"]))
+                if res.get("ok"):
+                    f["told"] = why
+                log("fetch", label=label, ok=0, told=bool(res.get("ok")))
+            except Exception as e:  # noqa: BLE001
+                log("error", where="fetch", type=type(e).__name__)
 
     def duty_unobserved(self, rel: dict, label: str, now: float, interval_s: float) -> None:
         """A session the watcher cannot see (no transcript, no hook events): read its board
@@ -1459,9 +1549,11 @@ class Watcher:
             if now - self_posted_at(label) < interval_s:
                 log("skip", label=label, why="self-reporting")
                 m["post_at"] = now
+                self.fetch_posted(label, {"ok": True})   # it reports into the call itself
                 continue
             sent, toks, how = self.sentence(s, state, last, now, m, interval_s)
             res = self.duty_status(rel, label, sent, state, last, now, m.get('card'))
+            self.fetch_posted(label, res)
             if res.get("status") in OVER:
                 if self.over_confirmed(now):
                     log("end", why="post-over")
@@ -1476,6 +1568,7 @@ class Watcher:
                 ok=bool(res.get("ok")))
         self.rel = rel
         self.duty_join(rel, sessions, now)
+        self.duty_fetch(rel, now)
         self.duty_cleanup(rel, live)
         if self.duty_decisions(rel, views, now) == END:
             return END

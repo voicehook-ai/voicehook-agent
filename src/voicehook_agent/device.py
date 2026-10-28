@@ -54,6 +54,30 @@ class DeviceError(RuntimeError):
         self.status = status
 
 
+def reason_text(status: int) -> str:
+    """Why a device / relay request failed, as the end of the German sentence "Konnte X nicht
+    in den Call holen, weil ..." (shown to the owner). Status only, never a URL or token."""
+    if status == 0:
+        return "der Server nicht erreichbar war"
+    if status == 401:
+        return "dieser Rechner nicht mehr verbunden ist (voicehook-agent connect neu ausführen)"
+    if status == 403:
+        return "der Server den Zugang abgelehnt hat (Call eines anderen Kontos)"
+    if status == 404:
+        return "der Server den Call nicht kennt"
+    if status == 409:
+        return "noch kein Mensch im Call ist"
+    if status == 410:
+        return "der Call vorbei oder der Zugang abgelaufen ist"
+    if status == 422:
+        return "der Server den Stand der Session abgelehnt hat (Formatfehler 422)"
+    if status == 429:
+        return "der Server zu viele Anfragen dieses Rechners abgelehnt hat (Ratenlimit), neuer Versuch in einer Minute"
+    if status >= 500:
+        return f"der Server einen Fehler hatte ({status})"
+    return f"der Server mit {status} geantwortet hat"
+
+
 # --------------------------------------------------------------------------- #
 # base url + http
 # --------------------------------------------------------------------------- #

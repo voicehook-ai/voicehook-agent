@@ -798,9 +798,16 @@ voicehook-agent caretaker uninstall  # remove the autostart
   `POST /api/device/calls/{room}/helpers` and writes `helpers/<label>.json`
   (0600), so the session's own commands with `VOICEHOOK_SESSION_LABEL=<label>` land in this call (the label is
   the session's registry label if known, else its transcript label). Entries end with the call.
+* **Ja never fails silently (0.34.1):** a Ja counts as done only when the session has its helper
+  credential and a fresh board post of it was accepted by the server. Otherwise the board shows
+  "Konnte X nicht in den Call holen, weil ..." (sender `X (Hausmeister)`) with the concrete reason
+  (rate limit, nobody in the call, call over, machine disconnected, board rejected, nothing arrived
+  after 150 s), once per reason; it disappears as soon as the session is in the call.
+* **Polling pace (0.34.1):** at least 5 s between two `/calls` polls and the long poll ends when the
+  next watcher tick is due, so the device rate limit stays free for helper credentials.
 * **Same slot:** caretaker and helper credentials carry the machine name as relay label, so the caretaker and the session itself land in the same board slot `<machine>: <label>`; the watcher therefore always merges into the known board (the separate `(Wächter)` board stays the fallback).
 * **Server hiccups:** 409 (nobody in the call yet) and 429 (limits) on a credential: retry later, the call is kept; 410 after a server restart: a new caretaker credential is requested as long as `/calls` still lists the call.
-* **Invisible:** it never posts a status of its own, only for session labels.
+* **Invisible:** it never posts a status of its own, only for session labels (and the failure note of a Ja).
 * **Autostart:** `caretaker install` writes `~/.config/systemd/user/voicehook-caretaker.service`
   (`Restart=always`, only PATH and non-secret settings, hint `loginctl enable-linger` if needed) or
   `~/Library/LaunchAgents/ai.voicehook.caretaker.plist`.

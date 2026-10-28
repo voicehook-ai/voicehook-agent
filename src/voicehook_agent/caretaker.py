@@ -30,6 +30,7 @@ stdlib only.
 from __future__ import annotations
 
 import json
+import math
 import os
 import plistlib
 import shutil
@@ -54,6 +55,7 @@ BIND_BACKOFF_S = 60.0
 RETRY_MAX_S = 600.0
 RENEW_BEFORE_S = 600.0      # renew the caretaker / helper credential this long before it ends
 HELPER_BATCH = 12
+CALLS_MIN_GAP_S = 5.0       # never poll /calls faster, even when the server answers at once
 
 UNIT_NAME = "voicehook-caretaker.service"
 PLIST_LABEL = "ai.voicehook.caretaker"
@@ -103,6 +105,7 @@ class Caretaker:
         self.retry_at: dict[str, float] = {}
         self.retry_gap: dict[str, float] = {}
         self.bind_off_until = 0.0
+        self.bind_why = ""          # reason of the last failed helper request (shown to the owner)
 
     # ----- credential of the current call -----
     def _rel_from(self, room: str, got: dict, now: float) -> dict:
@@ -204,22 +207,44 @@ class Caretaker:
         e = vmulti._read_raw(path)
         return bool(e and e.get("room") == room and float(e.get("expires_at") or 0) - now > RENEW_BEFORE_S)
 
-    def bind(self, rel: dict, items: list[dict]) -> None:
+    def bind(self, rel: dict, items: list[dict]) -> dict[str, str]:
         """Helper credential per subscribed session -> helpers/<label>.json. Idempotent: only
-        sessions without a fresh entry for this call cost a request."""
+        sessions without a fresh entry for this call cost a request. Returns {item label:
+        reason} for every item: "" = the session has its credential for this call, else why
+        not (German, shown to the owner on the board: a Ja never fails silently)."""
         dev = vdev.load_device()
         now = self.clock()
-        if dev is None or self.room == "" or now < self.bind_off_until:
-            return
+        out: dict[str, str] = {}
         want: dict[str, dict] = {}
         for it in items:
-            label = self._registry_label(str(it.get("tp") or "")) or str(it.get("label") or "")
+            name = str(it.get("label") or "")
+            label = self._registry_label(str(it.get("tp") or "")) or name
             try:
                 label = vrelayops.check_from(label)
             except vrelayops.RelayError:
+                out[name] = "der Name der Session ungültig ist"
                 continue
-            if label and not self._fresh_helper(label, self.room, now):
+            if not label:
+                out[name] = "die Session keinen Namen hat"
+            elif self._fresh_helper(label, self.room, now):
+                out[name] = ""
+            else:
                 want[label] = it
+                out[name] = ""
+        def fail(labels: list[str], why: str) -> None:
+            for lab in labels:
+                out[str(want[lab].get("label") or lab)] = why
+        if not want:
+            return out
+        if dev is None:
+            fail(list(want), vdev.reason_text(401))
+            return out
+        if self.room == "":
+            fail(list(want), "der Hausmeister gerade keinen Call betreut")
+            return out
+        if now < self.bind_off_until:
+            fail(list(want), self.bind_why or vdev.reason_text(429))
+            return out
         labels = list(want)
         for i in range(0, len(labels), HELPER_BATCH):
             chunk = labels[i:i + HELPER_BATCH]
@@ -229,11 +254,15 @@ class Caretaker:
                 if e.status == 401:
                     self.revoked()
                 log("bind", ok=0, count=len(chunk), status=e.status)
+                self.bind_why = vdev.reason_text(e.status)
                 if e.status in (409, 429, 410):    # nobody yet / limits / credential forgotten
                     self.bind_off_until = now + BIND_BACKOFF_S
+                    fail(labels[i:], self.bind_why)
                     break
+                fail(chunk, self.bind_why)
                 continue
             n = 0
+            done: set[str] = set()
             for h in got:
                 label = str(h["label"])
                 if label not in want:
@@ -244,9 +273,13 @@ class Caretaker:
                                         owner_session=str(want[label].get("key") or ""),
                                         label=label, now=now)
                     n += 1
+                    done.add(label)
                 except (ValueError, OSError):
                     continue
+            fail([lab for lab in chunk if lab not in done],
+                 "der Zugang für die Session nicht gespeichert werden konnte")
             log("bind", ok=1, count=n)
+        return out
 
     def remove_helpers(self, room: str) -> None:
         """Helper entries written for this call end with it."""
@@ -270,8 +303,12 @@ class Caretaker:
                 self.end_call("disconnected")
             return IDLE_S
         calls: list[dict] | None = None
+        wait = self.wait_s
+        if self.watcher is not None and wait > 0:   # the long poll must not delay the next tick
+            wait = int(max(1, min(wait, math.ceil(self.next_tick - now))))
+        polled_at = now
         try:
-            calls = vdev.list_calls(dev, self.wait_s, self.http)
+            calls = vdev.list_calls(dev, wait, self.http)
             self.fails = 0
         except vdev.DeviceError as e:
             if e.status == 401:
@@ -300,7 +337,15 @@ class Caretaker:
                 self.tick(now)
         if calls is None:
             return min(ERROR_BACKOFF_MAX_S, 5.0 * (2 ** min(self.fails, 6)))
-        return 0.0 if self.wait_s > 0 else 1.0
+        if self.wait_s <= 0:
+            return 1.0
+        # Live 28.10.: a server that answers the long poll at once while a call runs (older
+        # servers did) made this loop poll ~400 times a minute: device rate limit empty, every
+        # helper request 429, a Ja fetched nobody. Keep a minimum gap between two polls.
+        gap = CALLS_MIN_GAP_S - (self.clock() - polled_at)
+        if self.watcher is not None:
+            gap = min(gap, self.next_tick - self.clock())
+        return max(0.0, gap)
 
     def tick(self, now: float) -> None:
         try:
