@@ -3,6 +3,10 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.33.1
+
+- **Owner agent key (`VOICEHOOK_AGENT_KEY`).** The server only treats an agent as the account owner's own agent (`owner_agent`, needed for the Kanban relay routes and for the helper credentials the agent mints) when the join presents an account agent key (`vhak_...`, created on voicehook.ai/account). The CLI now reads it from the environment variable `VOICEHOOK_AGENT_KEY` and sends it as `Authorization: Bearer vhak_...` on both joins: `GET /api/token` (WebRTC, default) and `POST /api/bridge/join`. A value without the `vhak_` prefix is ignored with a one-line warning. The key is never written to disk, never printed or logged (error text is redacted), never in a child argv, never in `join` output. A WebRTC join prints `owner-agent: granted` / `not granted` from the signed token; `doctor` reports `agent key: set / not set / rejected`. Without the variable nothing changes.
+
 ## 0.33.0
 
 - **Watcher: truthful status.** An inactive session (state still) now reads `inaktiv seit 1 Std, letzter Stand: <the session's own last doing>` as fixed text, never a model call; the session's own last doing is remembered separately and never overwritten by the watcher's sentences (unknown: `inaktiv seit 1 Std`). Model calls only for working / waiting sessions and only when the last message changed. Sessions the watcher cannot observe: it reads their board with `GET <relay>/status?from=<label>` (a server without the route, 404, is skipped silently), tracks locally when it last changed, and after more than one interval without change posts `keine Meldung seit X, letzter Stand: ...` to the separate `<label> (Wächter)` board (never the main board, never `state`); cleared when the session reports again.
