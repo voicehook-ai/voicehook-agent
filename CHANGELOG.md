@@ -3,6 +3,10 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.33.5
+
+- **Watcher keeps one credential per call:** proposals and their answers now use the same credential (live: the newest-credential rule switched between helper tokens of the same call, the answers to the summary card were fetched under another sender and lost). A re-imported credential of the same call keeps the call's state; a newer call takes over only when the server confirms the old call is over.
+
 ## 0.33.4
 
 - **One watcher per machine, really:** the lock now lives in ~/.voicehook whatever VOICEHOOK_STATE_DIR a session uses, and the spawned watcher drops that variable (live: a session with its own state dir started a second watcher, the call got three summary cards).

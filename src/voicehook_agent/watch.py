@@ -227,6 +227,20 @@ def spawn_detached(extra: list[str] | None = None, *, popen=subprocess.Popen) ->
 # --------------------------------------------------------------------------- #
 # credential: is a call active?
 # --------------------------------------------------------------------------- #
+def usable_credentials(now: float | None = None) -> list[dict]:
+    """All usable credentials on this machine (relay.json of a join, helper entries)."""
+    t = time.time() if now is None else now
+    out = []
+    rel = vmulti.load_main_relay(t)
+    if rel is not None:
+        out.append(rel)
+    for p, e in vmulti._helper_entries():
+        u = vmulti._usable(e, p, t)
+        if u is not None:
+            out.append(u)
+    return out
+
+
 def credential(now: float | None = None) -> dict | None:
     """The credential of the NEWEST call on this machine: among the usable relay.json of a
     join and the usable helper entries (helper-import), the most recently written one.
@@ -851,6 +865,9 @@ class Watcher:
         self.fails = 0
         self.over: list[float] = []          # times of 401/403/410 answers in a row
         self.greeted = False                 # 0.33.3: one summary card per call
+        self.pinned = ""                     # 0.33.5: hash of the credential in use
+        self.call_id = ""                    # stable id of the current call (state key)
+        self.dead: set[str] = set()          # credentials whose call is over
         self.not_found_until = 0.0
         self.server_min: int | None = None
         self.rel: dict | None = None
@@ -864,6 +881,32 @@ class Watcher:
         self.over.append(now)
         self.over = self.over[-OVER_CONFIRM:]
         return len(self.over) >= OVER_CONFIRM and now - self.over[0] >= OVER_CONFIRM_S
+
+    def pick(self, now: float, new_call: bool = False) -> dict | None:
+        """0.33.5: the credential of the current call, kept FIXED: proposals are posted and
+        their answers fetched with the same credential (live: the newest-credential rule
+        switched between helper tokens of the same call, the answers to the summary card were
+        fetched under another sender and lost). Another credential is taken only when the
+        pinned one is gone (re-import: same call, state kept) or its call is over
+        (`new_call`: state starts fresh)."""
+        cands = [c for c in usable_credentials(now)
+                 if vmulti._token_hash(str(c.get("token") or "")) not in self.dead]
+        if not cands:
+            return None
+        pin = next((c for c in cands if self.pinned and
+                    vmulti._token_hash(str(c.get("token") or "")) == self.pinned), None)
+        if pin is None or new_call:
+            newest = max(cands, key=lambda d: (float(d.get("written_at") or 0), str(d.get("helper") or "")))
+            if new_call or not self.call_id:
+                if self.call_id:
+                    self.switch_call(now)
+                self.call_id = "c" + vmulti._token_hash(str(newest.get("token") or ""))
+                log("call", why="new" if new_call else "start")
+            elif self.pinned:
+                log("call", why="repin")
+            self.pinned = vmulti._token_hash(str(newest.get("token") or ""))
+            pin = newest
+        return {**pin, "call_id": self.call_id}
 
     def switch_call(self, now: float) -> None:
         """A newer call's credential appeared (new helper-import / join): clear the watcher
@@ -1295,12 +1338,10 @@ class Watcher:
     def tick(self) -> str:
         """One pass. END (call over), else OK. Errors raise nothing: they count in self.fails."""
         now = self.clock()
-        rel = credential(now)
+        rel = self.pick(now)
         if rel is None or now >= float(rel.get("expires_at") or 0):
             log("end", why="no-call")
             return END
-        if self.rel is not None and call_key(self.rel) != call_key(rel):
-            self.switch_call(now)
         if now >= self.not_found_until:
             try:
                 verdict, minutes = server_interval(rel)
@@ -1310,8 +1351,13 @@ class Watcher:
                 return OK
             if verdict == "over":
                 if self.over_confirmed(now):
-                    log("end", why="server-over")
-                    return END
+                    # 0.33.5: this call is over; a newer call's credential takes over, else end
+                    self.dead.add(vmulti._token_hash(str(rel.get("token") or "")))
+                    self.over = []
+                    if self.pick(now, new_call=True) is None:
+                        log("end", why="server-over")
+                        return END
+                    return OK
                 log("error", where="watch-over", count=len(self.over))
                 return OK
             self.over = []

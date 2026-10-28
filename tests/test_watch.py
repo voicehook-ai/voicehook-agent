@@ -37,6 +37,7 @@ class Fake:
         self.calls = 0
         self.rel = _relay()
         monkeypatch.setattr(W, "credential", lambda now=None: self.rel)
+        monkeypatch.setattr(W, "usable_credentials", lambda now=None: [self.rel] if self.rel else [])
         monkeypatch.setattr(W, "server_interval", self._server)
         monkeypatch.setattr(W, "post_board", self._board)
         monkeypatch.setattr(W, "post_activity", lambda rel, label, s: self._post("act", label, s))
@@ -1163,7 +1164,7 @@ def test_call_start_one_summary_card_ja_subscribes_all(monkeypatch):
     f.answers = [{"type": "decision", "id": "d00000001", "verdict": "yes"}]
     f.t += 50
     w.tick()
-    sub = J.load(W.credential())["subscribed"]
+    sub = J.load({"call_id": w.call_id})["subscribed"]
     assert {f"u{i}" for i in range(5)} <= set(sub)
 
 
@@ -1269,14 +1270,25 @@ def test_credential_is_the_newest_call_not_the_first_by_name():
 
 
 def test_watcher_switches_to_a_newer_call(monkeypatch):
+    """0.33.5: a re-imported credential of the SAME call keeps the call id (state kept);
+    only when the server confirms the call is over does a newer call take over."""
     f = Fake(monkeypatch, [])
     w = f.watcher(cmd=None)
     w.tick()
-    old = W.call_key(w.rel)
-    f.rel = {**f.rel, "token": "tok" + "new2"}          # a newer call's credential appears
+    first = w.call_id
+    f.rel = {**f.rel, "token": "tok" + "re2"}            # re-import, same call
     f.t += 50
     w.tick()
-    assert W.call_key(w.rel) != old and w.greeted is False
+    assert w.call_id == first and w.greeted is False
+    old_rel = f.rel
+    new_rel = {**f.rel, "token": "tok" + "new3", "written_at": NOW + 999}   # a newer call
+    monkeypatch.setattr(W, "usable_credentials", lambda now=None: [old_rel, new_rel])
+    w.pinned = W.vmulti._token_hash(old_rel["token"])  # still on the old call's credential
+    f.watch = (410, {})                                  # the old call ends
+    for _ in range(3):
+        f.t += 50
+        w.tick()
+    assert w.call_id != first and w.pinned == W.vmulti._token_hash(new_rel["token"])
 
 
 def test_one_watcher_per_machine_whatever_state_dir(monkeypatch, tmp_path):

@@ -54,6 +54,9 @@ def _path() -> Path:
 
 
 def call_hash(rel: dict) -> str:
+    """The call the state belongs to: the watcher's stable call id (0.33.5) or the token."""
+    if rel.get("call_id"):
+        return str(rel["call_id"])
     return vmulti._token_hash(str(rel.get("token") or ""))
 
 
