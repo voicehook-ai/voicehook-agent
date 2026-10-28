@@ -38,7 +38,7 @@ class Fake:
         self.rel = _relay()
         monkeypatch.setattr(W, "credential", lambda now=None: self.rel)
         monkeypatch.setattr(W, "server_interval", self._server)
-        monkeypatch.setattr(W, "post_board", lambda rel, label, s: self._post("board", label, s))
+        monkeypatch.setattr(W, "post_board", self._board)
         monkeypatch.setattr(W, "post_activity", lambda rel, label, s: self._post("act", label, s))
         monkeypatch.setattr(W, "delete_decision", self._delete)
         self.deleted: list[str] = []
@@ -54,9 +54,12 @@ class Fake:
             raise vrelayops.RelayError("x", st)
         return "ok", W.parse_interval(body.get("interval_min"))
 
-    def _post(self, kind, label, s):
-        self.posts.append((kind, label, {"s": s}))
+    def _post(self, kind, label, s, body=None):
+        self.posts.append((kind, label, {"s": s, "body": body}))
         return {"ok": True, "status": 200}
+
+    def _board(self, rel, label, body):
+        return self._post("board", label, body["doing"], body)
 
     def _delete(self, rel, label, dec_id):
         self.deleted.append(dec_id)
@@ -498,3 +501,58 @@ def test_log_has_metadata_only_and_rotates(monkeypatch, tmp_path):
     W.log("x", a=1)
     W.log("y", a=1)
     assert (tmp_path / "vh-state" / (W.LOG_NAME + ".1")).exists()
+
+
+# ----- board merge (a relay /status replaces the whole board of a sender) -------------
+def test_merge_keeps_open_done_and_their_meta():
+    base = {"doing": "alt", "open": ["a", "b"], "done": ["c"], "project": "P",
+            "meta": {"doing": {"context": "alt"}, "open": [{"context": "x"}, {}], "done": [{"faq": []}]}}
+    out = W.merge_board(base, "Neuer Satz hier drin.", {"context": "neu", "faq": []})
+    assert out["doing"] == "Neuer Satz hier drin."
+    assert out["open"] == ["a", "b"] and out["done"] == ["c"] and out["project"] == "P"
+    assert out["meta"]["open"] == base["meta"]["open"] and out["meta"]["done"] == base["meta"]["done"]
+    assert out["meta"]["doing"] == {"context": "neu", "faq": []}
+    assert base["doing"] == "alt" and base["meta"]["doing"] == {"context": "alt"}   # input untouched
+    assert W.merge_board(None, "Satz mit drei Worten.") == {"doing": "Satz mit drei Worten."}
+    assert W.merge_board({}, "Satz mit drei Worten.", {"context": "c"})["meta"] == {"doing": {"context": "c"}}
+
+
+def test_doing_meta_has_context_and_three_faq():
+    from voicehook_agent import relay
+    m = W.doing_meta("Alpha", W.FRAGE, NOW - 300, NOW)
+    assert "Alpha" in m["context"] and "5 Minuten" in m["context"]
+    assert len(m["faq"]) == 3 and relay.clean_meta(m) == m
+
+
+def test_watcher_posts_merged_board_with_own_open_items(monkeypatch):
+    f = Fake(monkeypatch, [sess(ev="stop", ev_at=NOW - 500)])
+    W.mark_self("Alpha", now=f.t - 1000, board={"doing": "selbst", "open": ["Frage 1"], "done": ["Fertig 1"],
+                                               "meta": {"open": [{"context": "warum"}]}})
+    w = f.watcher(cmd=None, interval_flag=5)
+    w.tick()
+    body = f.posts[0][2]["body"]
+    assert body["doing"].startswith("Die Sitzung") and body["open"] == ["Frage 1"]
+    assert body["done"] == ["Fertig 1"] and body["meta"]["open"] == [{"context": "warum"}]
+    assert body["meta"]["doing"]["context"] and len(body["meta"]["doing"]["faq"]) == 3
+    # the next watcher post merges into its own last post: open/done still there
+    f.t += 400
+    w.tick()
+    assert f.posts[-1][2]["body"]["open"] == ["Frage 1"]
+
+
+def test_no_known_board_posts_doing_with_meta_only(monkeypatch):
+    f = Fake(monkeypatch, [sess(label="Neu", ev="stop", ev_at=NOW - 500)])
+    f.watcher(cmd=None).tick()
+    body = f.posts[0][2]["body"]
+    assert set(body) == {"doing", "meta"} and set(body["meta"]) == {"doing"}
+
+
+def test_cleared_board_is_forgotten(monkeypatch):
+    from voicehook_agent import board
+    monkeypatch.setattr(vrelayops, "remote_status", lambda rel, frm, body, **k: {"ok": True})
+    W.remember_board("Alpha", {"doing": "x", "open": ["o"]})
+    assert W.known_board("Alpha") is not None
+    assert board.clear_board(_relay(), "Alpha") is True
+    assert W.known_board("Alpha") is None
+    W.remember_board("Old", {"doing": "x"}, now=time.time() - 99999)
+    assert W.known_board("Old") is None

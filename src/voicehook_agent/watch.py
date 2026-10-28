@@ -224,9 +224,12 @@ def credential(now: float | None = None) -> dict | None:
 # --------------------------------------------------------------------------- #
 # own board status marker (cli `status`): that session reports itself
 # --------------------------------------------------------------------------- #
-def mark_self(label: str, now: float | None = None) -> None:
-    """A session posted its own board status: the watcher leaves it alone for one interval.
-    Best effort, never raises."""
+def mark_self(label: str, now: float | None = None, board: dict | None = None) -> None:
+    """A session posted its own board status: the watcher leaves it alone for one interval,
+    and remembers the board (a relay /status REPLACES the whole board of a sender, so the
+    watcher must merge into it, see merge_board). Best effort, never raises."""
+    if board is not None:
+        remember_board(label, board, now)
     try:
         t = time.time() if now is None else now
         path = vact.state_root() / SELF_NAME
@@ -241,6 +244,93 @@ def mark_self(label: str, now: float | None = None) -> None:
         vact._write_private(path, json.dumps(d))
     except Exception:  # noqa: BLE001, S110
         pass
+
+
+BOARDS_NAME = "watch-boards.json"
+BOARDS_KEEP = 50
+BOARD_KEEP_S = 7200.0
+
+
+def _boards_rw(fn):
+    vact._private_dir(vact.state_root())
+    fd = os.open(vact.state_root() / BOARDS_NAME, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        vact._lock(fd)
+        try:
+            d = json.loads(os.read(fd, 1 << 20).decode("utf-8") or "{}")
+        except ValueError:
+            d = {}
+        d = d if isinstance(d, dict) else {}
+        res = fn(d)
+        keep = sorted(((k, v) for k, v in d.items() if isinstance(v, dict)),
+                      key=lambda kv: float(kv[1].get("at") or 0))[-BOARDS_KEEP:]
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        os.write(fd, json.dumps(dict(keep)).encode("utf-8"))
+        return res
+    finally:
+        os.close(fd)
+
+
+def remember_board(label: str, body: dict, now: float | None = None) -> None:
+    """The board body last posted for `label` (by its session or by the watcher). Local file
+    0600, never sent anywhere. Best effort."""
+    try:
+        t = time.time() if now is None else now
+        _boards_rw(lambda d: d.__setitem__(str(label), {"b": body, "at": t}))
+    except Exception:  # noqa: BLE001, S110
+        pass
+
+
+def forget_board(label: str) -> None:
+    try:
+        _boards_rw(lambda d: d.pop(str(label), None))
+    except Exception:  # noqa: BLE001, S110
+        pass
+
+
+def known_board(label: str, now: float | None = None) -> dict | None:
+    """The last known board body of this sender (younger than BOARD_KEEP_S), else None."""
+    t = time.time() if now is None else now
+    try:
+        d = json.loads((vact.state_root() / BOARDS_NAME).read_text(encoding="utf-8"))
+        e = d.get(str(label)) if isinstance(d, dict) else None
+        if isinstance(e, dict) and isinstance(e.get("b"), dict) and t - float(e.get("at") or 0) < BOARD_KEEP_S:
+            return e["b"]
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
+
+
+def doing_meta(label: str, state: str, last: float, now: float) -> dict:
+    """Mandatory background of the `doing` entry (context + 3 faq), from the state alone."""
+    ago = ago_text(now - last if last else 0.0)
+    ctx = f"Sitzung {label}: {STATE_TEXT[state]}, zuletzt aktiv vor {ago}. Stand vom Beobachter, nicht von der Sitzung selbst."
+    waiting = state == FRAGE
+    faq = [
+        {"q": f"Was macht {label} gerade?",
+         "a": "Die Sitzung arbeitet gerade." if state == ARBEITET else
+              "Die Sitzung wartet auf eine Antwort." if waiting else "Im Moment nichts, sie ist fertig oder still."},
+        {"q": f"Wann war {label} zuletzt aktiv?", "a": f"Vor {ago}."},
+        {"q": f"Braucht {label} etwas von mir?",
+         "a": "Ja, die Sitzung wartet auf eine Eingabe oder Freigabe." if waiting
+         else "Nein, im Moment wartet sie auf nichts."},
+    ]
+    return {"context": ctx[:2000], "faq": [{"q": f["q"][:200], "a": f["a"][:200]} for f in faq]}
+
+
+def merge_board(base: dict | None, sentence: str, meta: dict | None = None) -> dict:
+    """The board body to post: the known board with ONLY `doing` (and its meta) replaced;
+    open, done, project, state and their meta stay. No known board: doing alone."""
+    out = {k: v for k, v in (base or {}).items() if k != "meta"}
+    out["doing"] = sentence
+    m = dict((base or {}).get("meta") or {})
+    m.pop("doing", None)
+    if meta:
+        m["doing"] = meta
+    if m:
+        out["meta"] = m
+    return out
 
 
 def self_posted_at(label: str) -> float:
@@ -534,8 +624,7 @@ def server_interval(rel: dict) -> tuple[str, int | None]:
     return "ok", parse_interval(out.get("interval_min"))
 
 
-def post_board(rel: dict, label: str, sentence: str) -> dict:
-    body = {"doing": sentence}
+def post_board(rel: dict, label: str, body: dict) -> dict:
     if vmulti._is_local(rel):
         return vrelayops.local_request(rel, label, "status", body, wait=5.0)
     return vrelayops.remote_status(rel, label, body)
@@ -600,8 +689,16 @@ class Watcher:
         return (sent, toks, "model") if sent else (fixed, toks, "fixed")
 
     # ----- duties (one function each; a Kanban duty is added here later) -----
-    def duty_status(self, rel: dict, label: str, sentence: str) -> dict:
-        return post_board(rel, label, sentence)
+    def duty_status(self, rel: dict, label: str, sentence: str, state: str, last: float,
+                    now: float) -> dict:
+        """Merge the sentence into the session's known board (a relay /status replaces the
+        whole board of a sender) and post it; the result is remembered for the next merge."""
+        body = merge_board(known_board(label, self.clock()), sentence,
+                           doing_meta(label, state, last, now))
+        res = post_board(rel, label, body)
+        if res.get("ok"):
+            remember_board(label, body, now)
+        return res
 
     def duty_activity(self, rel: dict, label: str, sentence: str) -> dict:
         return post_activity(rel, label, sentence)
@@ -682,7 +779,7 @@ class Watcher:
                 m["post_at"] = now
                 continue
             sent, toks, how = self.sentence(s, state, last, now, m, interval_s)
-            res = self.duty_status(rel, label, sent)
+            res = self.duty_status(rel, label, sent, state, last, now)
             if res.get("status") in OVER:
                 if not vmulti._is_local(rel):
                     vmulti.mark_dead(rel["token"])

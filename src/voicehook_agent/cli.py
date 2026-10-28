@@ -4319,7 +4319,7 @@ def _run_relay_client(args, req: dict, rel: dict) -> int:
             res = (vrelayops.local_request(rel, frm, "status", body) if local
                    else vrelayops.remote_status(rel, frm, body))
             if res.get("ok"):
-                vwatch.mark_self(frm)  # 0.32.0: this session reports itself, the watcher skips it
+                vwatch.mark_self(frm, board=body)  # 0.32.0: this session reports itself, the watcher skips it and merges into this board
             out = {**res, "type": "board", **({"board": body} if res.get("ok") else {}),
                    "via": "relay"}
     except vrelayops.RelayError as e:
@@ -4383,7 +4383,7 @@ def _run_waiting(args) -> int:
         res = (vrelayops.local_request(rel, frm, "status", body) if local
                else vrelayops.remote_status(rel, frm, body))
         if res.get("ok"):
-            vwatch.mark_self(frm)
+            vwatch.mark_self(frm, board=body)
         return res
 
     try:

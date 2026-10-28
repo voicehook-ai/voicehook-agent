@@ -737,7 +737,7 @@ after every local session (Claude Code, Codex):
 
 | Duty | What it does |
 |---|---|
-| status | the session's board entry (`doing`) = ONE whole German sentence, every interval and at once when the state changes. A session that posted its own `status` within the interval is skipped (it reports itself). |
+| status | the session's board entry (`doing`) = ONE whole German sentence, every interval and at once when the state changes. A session that posted its own `status` within the interval is skipped (it reports itself). A relay `/status` replaces the whole board of a sender, so the watcher merges: it takes the last board it knows for that session (remembered from the session's own `status` posts and its own earlier posts, `~/.voicehook/watch-boards.json`, 0600) and replaces only `doing` and its meta; `open`, `done`, `project` and their meta stay. No known board: `doing` alone. The `doing` entry always carries a `context` and 3 `faq` pairs built from the state. |
 | activity | an activity line on a state change (arbeitet, still, offene Frage) |
 | decisions | a decision of a local session (created by this machine's hooks) is deleted once the session went on or the question is obsolete (404/409 on delete = done). A session that still waits keeps its decision. Decisions of other machines/sessions are never touched. |
 
