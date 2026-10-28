@@ -3,6 +3,10 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.32.2
+
+- **Watcher sees helper sessions without hooks:** every helper command over the relay (`status`, `activity`, `decide`, `show`) run inside a Claude Code session notes its label and transcript (`CLAUDE_CODE_SESSION_ID`) in the registry. The watcher then observes that session (working or quiet from the transcript) even when no hooks are installed, e.g. on a box where sessions only got a helper credential (`helper-import`).
+
 ## 0.32.1
 
 - **`self-update` sees a fresh release:** the uv path now runs `uv tool upgrade --reinstall-package voicehook-agent voicehook-agent`. Plain `uv tool upgrade` used uv's cached index, missed a release from the last minutes, exited 0 and the CLI said "updated" while staying on the old version.

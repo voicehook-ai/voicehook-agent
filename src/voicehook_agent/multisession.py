@@ -50,6 +50,7 @@ stdlib only (the hook starts fast).
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -872,6 +873,38 @@ def _admit(skey: str, kind: str, text: str, event: dict, t: float) -> str | None
         posts.append(t)
         return line
     return _with_state(step)
+
+
+def note_helper_session(label: str, env=None, t: float | None = None) -> None:
+    """0.32.2 (watch.py): a helper command (status, activity, decide, show over the relay)
+    runs inside an agent session. Remember label -> transcript of that session in the
+    registry, so the watcher can observe sessions that have no hooks installed (helper-import
+    only). Claude Code only (CLAUDE_CODE_SESSION_ID). Best effort, never raises."""
+    env = os.environ if env is None else env
+    sid = str(env.get("CLAUDE_CODE_SESSION_ID") or "").strip()
+    if not sid or not label or "/" in sid or sid.startswith("."):
+        return
+    try:
+        from . import relayops as vrelayops  # relayops imports this module
+
+        hits = sorted((vrelayops._config_dir() / "projects").glob(f"*/{sid}.jsonl"))
+    except Exception:  # noqa: BLE001
+        return
+    if not hits:
+        return
+    now = time.time() if t is None else t
+    skey = session_hash(sid)
+
+    def step(st: dict) -> None:
+        sessions = st.get("sessions") if isinstance(st.get("sessions"), dict) else {}
+        me = sessions.get(skey) if isinstance(sessions.get(skey), dict) else {}
+        me.update(label=label[:SESSION_LABEL_MAX], tp=str(hits[0])[:512], seen_at=now)
+        sessions.pop(skey, None)
+        keep = sorted(((k, v) for k, v in sessions.items() if isinstance(v, dict)),
+                      key=lambda kv: float(kv[1].get("at") or kv[1].get("seen_at") or 0))
+        st["sessions"] = {**dict(keep[-(SESSIONS_KEEP - 1):]), skey: me}
+    with contextlib.suppress(Exception):
+        _with_state(step)
 
 
 POST_RETRY_503_S = (1.0, 2.0)  # 0.22.2: the detached child retries a 503 (never dead)
