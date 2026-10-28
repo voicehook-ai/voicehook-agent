@@ -3,6 +3,11 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.33.3
+
+- **Watcher follows the newest call:** it took the first helper credential by name, so after a new call it kept working for the old one (live: the morning call). Now the most recently written credential wins, and a running watcher switches by itself when a newer call's credential appears (old watcher boards cleared, boards remembered before the new call forgotten).
+- **One summary card at call start:** "N Sessions arbeiten gerade parallel auf <host> und sind nicht im Call, alle abonnieren?" (names and host only). Ja subscribes all of them; later new sessions get single cards (max 3 open).
+
 ## 0.33.2
 
 - **Watcher names unbound sessions:** the "should it join the board?" card read "Session Session arbeitet ..." for a session without a title. The label now comes from the transcript's working directory (`<folder> <4 hex>`, like the hooks build it), the card no longer doubles "Session", and sessions subscribed under the bare name get their real name.
