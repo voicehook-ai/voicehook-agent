@@ -22,6 +22,8 @@ FAKE = "vhak_" + "x" * 8   # built at runtime, obviously fake
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
     monkeypatch.delenv(agentkey.ENV, raising=False)
+    monkeypatch.delenv(agentkey.HOST_ENV, raising=False)
+    monkeypatch.setattr(agentkey, "_warned_hosts", set())
     monkeypatch.setattr(agentkey, "_warned", False)
 
 
@@ -46,10 +48,10 @@ def _client(sent: dict, resp: _Resp):
     return _Client
 
 
-def _mint(monkeypatch, key, resp=None):
+def _mint(monkeypatch, key, resp=None, base="https://voicehook.ai"):
     sent: dict = {}
     monkeypatch.setattr(cli.httpx, "AsyncClient", _client(sent, resp or _Resp()))
-    asyncio.run(cli._mint_token("https://voicehook.ai", "demo-room", "claude-box-1",
+    asyncio.run(cli._mint_token(base, "demo-room", "claude-box-1",
                                 name="C", model="m", agent_key=key))
     return sent
 
@@ -72,7 +74,8 @@ def test_webrtc_mint_error_text_redacted(monkeypatch):
     assert FAKE not in str(ei.value) and FAKE not in ei.value.detail
 
 
-def test_bridge_join_sends_bearer_header():
+def test_bridge_join_sends_bearer_header(monkeypatch):
+    monkeypatch.setenv(agentkey.HOST_ENV, "127.0.0.1")   # FakeBridge runs on localhost
     async def go():
         fb = FakeBridge()
         base = await fb.start()
@@ -142,3 +145,36 @@ def test_join_never_prints_or_stores_key(monkeypatch, capsys, tmp_path):
     for f in tmp_path.rglob("*"):
         if f.is_file():
             assert FAKE not in f.read_text(errors="ignore"), f
+
+
+@pytest.mark.parametrize("base,host_env,sent", [
+    ("https://voicehook.ai", None, True),
+    ("http://voicehook.ai", None, False),
+    ("https://evil.example", None, False),
+    ("https://voicehook.ai.evil.example", None, False),
+    ("https://staging.example", "staging.example", True),
+    ("http://staging.example", "staging.example", False),
+    ("https://evil.example", "staging.example", False),
+    ("http://localhost:8080", "localhost", True),
+    ("http://127.0.0.1:8080", "127.0.0.1", True),
+    ("http://localhost:8080", None, False),
+])
+def test_key_only_to_trusted_origin(monkeypatch, capsys, base, host_env, sent):
+    if host_env:
+        monkeypatch.setenv(agentkey.HOST_ENV, host_env)
+    s = _mint(monkeypatch, FAKE, base=base)
+    err = capsys.readouterr().err
+    assert ("authorization" in s["client_headers"]) is sent
+    if sent:
+        assert "not trusted" not in err
+    else:
+        assert "agent key not sent" in err and "is not trusted" in err and FAKE not in err
+
+
+def test_bridge_foreign_host_gets_no_key(capsys):
+    room = vt.BridgeRoom("https://evil.example", "a-b-c-AB12", "x", name="C", model="m",
+                         agent_key=FAKE)
+    assert room._agent_key is None
+    assert "not trusted" in capsys.readouterr().err
+    assert vt.BridgeRoom("https://voicehook.ai", "a-b-c-AB12", "x", name="C", model="m",
+                         agent_key=FAKE)._agent_key == FAKE

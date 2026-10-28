@@ -347,6 +347,7 @@ async def _mint_token(api_base: str, slug: str, identity: str,
     missing -> 403 "operator invite required" once enforced). Old servers
     ignore it. It is URL-encoded by httpx and never logged."""
     url = f"{api_base}/api/token"
+    agent_key = vagentkey.for_base(agent_key, api_base)
     params = {"room": slug, "identity": identity, "invite": "1"}
     if name:
         params["name"] = name
@@ -2682,7 +2683,7 @@ async def _connect_and_listen(
     disconnect_reason_name is None for a clean stdin-driven quit; otherwise the
     LK reason that ended the cycle (used by the reconnect loop in #6)."""
     tok: dict | None = None
-    agent_key = vagentkey.get()   # 0.33.1: env only, None when unset / malformed
+    agent_key = vagentkey.for_base(vagentkey.get(), api_base)   # 0.33.1: env only, None when unset / malformed
     if transport == "bridge":
         # Server joins for us over HTTPS (same token/attributes as /api/token?invite=1).
         room = vtransport.BridgeRoom(api_base, slug, ident, name=agent_name or "agent",

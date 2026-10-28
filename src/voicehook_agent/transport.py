@@ -225,7 +225,7 @@ class BridgeRoom:
         self.invite = invite
         self.username = username
         self.voice = voice
-        self._agent_key = agent_key   # 0.33.1: owner agent key, only as the join's Bearer header
+        self._agent_key = vagentkey.for_base(agent_key, api_base)   # 0.33.1: owner agent key, only as the join's Bearer header
         self.user_agent = user_agent
         self._client_factory = client_factory or _client
         self._http: httpx.AsyncClient | None = None

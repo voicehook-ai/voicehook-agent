@@ -19,9 +19,46 @@ import os
 import sys
 
 ENV = "VOICEHOOK_AGENT_KEY"
+HOST_ENV = "VOICEHOOK_AGENT_KEY_HOST"   # extra trusted host (staging/local), exact match
+DEFAULT_HOST = "voicehook.ai"
+LOCAL_HOSTS = ("localhost", "127.0.0.1")
 PREFIX = "vhak_"
 
 _warned = False
+_warned_hosts: set[str] = set()
+
+
+def trusted(api_base: str) -> tuple[bool, str]:
+    """(ok, host): the key may go only to https://voicehook.ai or exactly the host of
+    VOICEHOOK_AGENT_KEY_HOST (https, except localhost / 127.0.0.1)."""
+    from urllib.parse import urlsplit
+
+    try:
+        u = urlsplit(str(api_base).strip())
+        host = (u.hostname or "").lower()
+        scheme = u.scheme.lower()
+    except ValueError:
+        return False, ""
+    extra = (os.environ.get(HOST_ENV) or "").strip().lower()
+    if host and scheme == "https" and (host == DEFAULT_HOST or (extra and host == extra)):
+        return True, host
+    if host and extra and host == extra and host in LOCAL_HOSTS and scheme in ("http", "https"):
+        return True, host
+    return False, host
+
+
+def for_base(key: str | None, api_base: str) -> str | None:
+    """`key` if the join origin is trusted, else None with one warning (no value)."""
+    if not key:
+        return None
+    ok, host = trusted(api_base)
+    if ok:
+        return key
+    if host not in _warned_hosts:
+        _warned_hosts.add(host)
+        print(f"[warn] agent key not sent: {host or 'unknown host'} is not trusted",
+              file=sys.stderr, flush=True)
+    return None
 
 
 def state() -> str:

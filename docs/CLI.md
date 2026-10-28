@@ -784,7 +784,7 @@ watcher's Kanban maintenance.
 3. Export it into the agent's environment: `VOICEHOOK_AGENT_KEY` (e.g. via your secret
    store's run wrapper), then `join` as usual.
 
-The CLI sends it as `Authorization: Bearer vhak_...` on the WebRTC join (`GET /api/token`) and on
+The key goes ONLY to `https://voicehook.ai` (or exactly the host of `VOICEHOOK_AGENT_KEY_HOST` for staging, https unless `localhost` / `127.0.0.1`); an invite URL on any other host or plain http gets no key and a warning `agent key not sent: <host> is not trusted`. The CLI sends it as `Authorization: Bearer vhak_...` on the WebRTC join (`GET /api/token`) and on
 the bridge join (`POST /api/bridge/join`). It is read from the environment only: never written
 to disk, never printed or logged, never in a child process argv. A value without the `vhak_`
 prefix is ignored with a one-line warning. A WebRTC join prints `owner-agent: granted` (or
