@@ -1277,3 +1277,29 @@ def test_watcher_switches_to_a_newer_call(monkeypatch):
     f.t += 50
     w.tick()
     assert W.call_key(w.rel) != old and w.greeted is False
+
+
+def test_one_watcher_per_machine_whatever_state_dir(monkeypatch, tmp_path):
+    """Live 28.10.: a session with its own VOICEHOOK_STATE_DIR started a second watcher and a
+    second summary card. The lock is machine-wide; the spawned child drops the state dir."""
+    fd = W.acquire_lock()
+    assert fd is not None
+    monkeypatch.setenv("VOICEHOOK_STATE_DIR", str(tmp_path / "other-session"))
+    assert W.acquire_lock() is None
+    os.close(fd)
+    seen = {}
+    monkeypatch.delenv("VOICEHOOK_WATCH", raising=False)
+    monkeypatch.setattr(W, "credential", lambda now=None: _relay())
+    W.spawn_detached(popen=lambda argv, **kw: seen.update(kw))
+    assert "VOICEHOOK_STATE_DIR" not in seen["env"]
+
+
+def test_summary_card_at_most_once_per_machine_in_15_min(monkeypatch):
+    f = Fake(monkeypatch)
+    f.unbound = [_cand(key=f"u{i}", label=f"S{i}") for i in range(3)]
+    f.watcher(cmd=None).tick()
+    f2 = Fake(monkeypatch)                      # a re-import looks like a new call
+    f2.rel = {**f2.rel, "token": "tok" + "re1"}
+    f2.unbound = [_cand(key=f"u{i}", label=f"S{i}") for i in range(3)]
+    f2.watcher(cmd=None).tick()
+    assert len(f.proposals) == 1 and not any("parallel" in p["question"] for p in f2.proposals)
