@@ -3,6 +3,10 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.32.0
+
+- **`voicehook-agent watch` (watcher, one per machine):** a detached process (setsid, not a child of any agent session, flock `~/.voicehook/watch.lock`, a second start exits 0) that runs only while a call is active. `join` and `helper-import` start it (`VOICEHOOK_WATCH=0` = off); it ends itself when the credential is gone/expired/dead or the server answers 401/403/410. Per local session (Claude Code, Codex) it sets the board entry to ONE whole German sentence (every interval and on a state change), adds an activity line on a state change, skips sessions that posted their own `status` within the interval, and removes decisions of sessions that went on (404/409 = done; a still waiting session keeps its question). Wording: `claude -p --model haiku` (override `VOICEHOOK_WATCH_MODEL_CMD`), else a fixed sentence; token budget `--tokens-per-hour` (default 40000). Interval 1/5/10/15 min: call page (`GET <relay>/watch`) > `--interval` > `VOICEHOOK_WATCH_INTERVAL` > 15. Log `~/.voicehook/watch.log`: metadata only. The hook registry now also keeps the last event kind and the transcript path per session.
+
 ## 0.31.0
 
 - **image cards carry an invisible `context`:** the voicebot Delta cannot see images, so every image card must carry the full text content of the image (numbers, table rows, labels). `show --card image` now requires `--context TEXT` or `--context-file PATH` (`-` = stdin); without it exit 2, nothing sent. The limit is the card text limit (4000 chars); over it exit 2, never cut. `context` goes into the `operator.card` packet, the bridge `POST /api/bridge/show` body and the helper relay show body; it is optional for text/code/link cards and never shown on the page or logged (only its length appears in errors). The local MCP server gets a `show` tool (card, title, text, file, context) with the same rule; the README, `docs/CLI.md` and the voicehook-join skill tell agents to always send context with an image.

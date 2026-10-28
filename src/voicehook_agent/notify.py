@@ -519,6 +519,31 @@ def open_slot(skey: str) -> dict | None:
     return _with_state(step)
 
 
+def relay_slots() -> list[tuple[str, dict]]:
+    """0.32.0 (watch.py): (session hash, slot copy) of every open, not resolved decision slot
+    on the relay route that has an id. Read-only."""
+    def step(st: dict):
+        out = []
+        for skey, me in st["sessions"].items():
+            o = me.get("open") if isinstance(me, dict) and isinstance(me.get("open"), dict) else None
+            if o and not o.get("resolved") and o.get("route") == "relay" and o.get("id"):
+                out.append((skey, dict(o)))
+        return out
+    return _with_state(step)
+
+
+def drop_slot(skey: str, dec_id: str) -> bool:
+    """0.32.0 (watch.py): the watcher deleted this decision: forget its slot (same id only)."""
+    def step(st: dict):
+        me = st["sessions"].get(skey)
+        o = me.get("open") if isinstance(me, dict) and isinstance(me.get("open"), dict) else None
+        if o is None or o.get("id") != dec_id:
+            return False
+        me.pop("open", None)
+        return True
+    return bool(_with_state(step))
+
+
 def forget(skey: str, qk: str) -> bool:
     """The slot was answered in the call (asks.py): drop it without deleting the decision."""
     def step(st: dict):
