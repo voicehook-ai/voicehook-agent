@@ -226,9 +226,11 @@ def test_watcher_end_retries_later_with_fresh_credential():
     net.calls = [[_call("r1")]]
     c.step()
     FakeWatcher.instances[0].result = W.END
+    net.cred_status = 503           # renewal fails too: the watcher ends
     clk.t += 50
     c.step()
     assert c.watcher is None
+    net.cred_status = 200
     c.step()
     assert c.watcher is None        # retry gap
     clk.t += C.RETRY_MAX_S + 1
@@ -422,3 +424,81 @@ def test_cli_connect_status_disconnect(capsys, monkeypatch):
     except SystemExit:
         pass
     assert D.load_device() is None
+
+
+# ------------------------------------------------------------------ server deviations (PR 758)
+def test_poll_429_slow_down_backs_off_interval():
+    net = Net()
+    net.polls = [(429, {"status": "slow_down"}), (200, {"device_token": DEVTOK, "account_hint": "h"})]
+    sleeps, t = [], [NOW]
+
+    def sl(s):
+        sleeps.append(s)
+        t[0] += s
+    rc = D.connect("box", http=net, sleep=sl, clock=lambda: t[0], out=lambda s: None,
+                   open_url=lambda u: None, env={"VOICEHOOK_API": BASE})
+    assert rc == 0 and sleeps == [1.0, 6.0]
+
+
+def test_poll_unknown_code_410_is_expired():
+    net = Net()
+    net.polls = [(410, {})]
+    rc, out = _connect(net)
+    assert rc == 1 and "expired" in out[-1]
+
+
+def test_caretaker_409_and_429_keep_the_call_and_retry_later():
+    for status, first_gap in ((409, C.SOON_S), (429, C.RETRY_START_S)):
+        net, clk = Net(), Clock()
+        c = _caretaker(net, clk)
+        net.cred_status = status
+        net.calls = [[_call("r1")]]
+        c.step()
+        assert c.watcher is None
+        c.step()
+        assert c.watcher is None                      # still within the gap
+        net.cred_status = 200
+        clk.t += first_gap + 1
+        c.step()
+        assert c.watcher is not None and c.room == "r1"
+
+
+def test_helpers_409_backs_off_without_dropping_the_call(monkeypatch):
+    net, clk = Net(), Clock()
+    c = _caretaker(net, clk)
+    net.calls = [[_call("r1")]]
+    c.step()
+    real = net.__call__
+    state = {"status": 409}
+
+    def http(method, url, body=None, token="", timeout=15.0):
+        if url.endswith("/helpers") and state["status"]:
+            return state["status"], {}
+        return real(method, url, body, token, timeout)
+    c.http = http
+    items = [{"key": "k1", "label": "api 1a2b", "tp": ""}]
+    c.bind(c.rel, items)
+    assert list(vmulti.helpers_dir().glob("*.json")) == [] and c.watcher is not None
+    state["status"] = 0
+    c.bind(c.rel, items)                               # inside the backoff: no request
+    assert list(vmulti.helpers_dir().glob("*.json")) == []
+    clk.t += C.BIND_BACKOFF_S + 1
+    c.bind(c.rel, items)
+    assert len(list(vmulti.helpers_dir().glob("*.json"))) == 1
+
+
+def test_410_after_server_restart_gets_new_credential_while_call_listed():
+    net, clk = Net(), Clock()
+    c = _caretaker(net, clk)
+    net.calls = [[_call("r1")]]
+    c.step()
+    w = FakeWatcher.instances[0]
+    w.result = W.END                                   # relay answered 410 three times
+    clk.t += 50
+    n = sum(1 for l in net.log if l[1].endswith("/caretaker"))
+    c.step()
+    assert sum(1 for l in net.log if l[1].endswith("/caretaker")) == n + 1
+    assert c.watcher is w and w.shut == 0 and c.room == "r1"
+    net.calls = [[]]                                   # /calls no longer lists it: now it is over
+    c.step()
+    assert c.watcher is None and w.shut == 1

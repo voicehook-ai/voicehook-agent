@@ -49,6 +49,8 @@ LOG_MAX_BYTES = 256 * 1024
 IDLE_S = 30.0               # no device.json: look again every 30 s (connect after install works)
 ERROR_BACKOFF_MAX_S = 300.0
 RETRY_START_S = 60.0
+SOON_S = 20.0               # 409: nobody in the call yet
+BIND_BACKOFF_S = 60.0
 RETRY_MAX_S = 600.0
 RENEW_BEFORE_S = 600.0      # renew the caretaker / helper credential this long before it ends
 HELPER_BATCH = 12
@@ -100,6 +102,7 @@ class Caretaker:
         self.fails = 0
         self.retry_at: dict[str, float] = {}
         self.retry_gap: dict[str, float] = {}
+        self.bind_off_until = 0.0
 
     # ----- credential of the current call -----
     def _rel_from(self, room: str, got: dict, now: float) -> dict:
@@ -125,7 +128,8 @@ class Caretaker:
             if e.status == 401:
                 self.revoked()
             log("start", why="credential-failed", status=e.status)
-            self._retry(room, now)
+            # 409: no human in the call yet, 429: join limits. The call stays listed: later again
+            self._retry(room, now, SOON_S if e.status == 409 else RETRY_START_S)
             return False
         self.lock_fd = fd
         self.room = room
@@ -157,8 +161,8 @@ class Caretaker:
             self.lock_fd = None
         log("end", why=why)
 
-    def _retry(self, room: str, now: float) -> None:
-        gap = min(RETRY_MAX_S, self.retry_gap.get(room, RETRY_START_S / 2) * 2)
+    def _retry(self, room: str, now: float, start: float = RETRY_START_S) -> None:
+        gap = min(RETRY_MAX_S, self.retry_gap.get(room, start / 2) * 2)
         self.retry_gap[room] = gap
         self.retry_at[room] = now + gap
 
@@ -168,18 +172,21 @@ class Caretaker:
         log("revoked", note="device.json removed, run connect again")
 
     # ----- credential renewal -----
-    def renew(self, dev: dict, now: float) -> None:
-        if self.rel is None or self.rel["expires_at"] - now > RENEW_BEFORE_S:
-            return
+    def renew(self, dev: dict, now: float, force: bool = False) -> bool:
+        """New caretaker credential for the current call (before it ends, or `force`: the
+        server forgot it, e.g. 410 after a restart while the call is still listed)."""
+        if self.rel is None or (not force and self.rel["expires_at"] - now > RENEW_BEFORE_S):
+            return False
         try:
             got = vdev.caretaker_credential(dev, self.room, self.http)
         except vdev.DeviceError as e:
             if e.status == 401:
                 self.revoked()
             log("renew", ok=0, status=e.status)
-            return
+            return False
         self.rel = self._rel_from(self.room, got, now)
         log("renew", ok=1)
+        return True
 
     # ----- helper credentials for subscribed sessions -----
     def _registry_label(self, tp: str) -> str:
@@ -201,9 +208,9 @@ class Caretaker:
         """Helper credential per subscribed session -> helpers/<label>.json. Idempotent: only
         sessions without a fresh entry for this call cost a request."""
         dev = vdev.load_device()
-        if dev is None or self.room == "":
-            return
         now = self.clock()
+        if dev is None or self.room == "" or now < self.bind_off_until:
+            return
         want: dict[str, dict] = {}
         for it in items:
             label = self._registry_label(str(it.get("tp") or "")) or str(it.get("label") or "")
@@ -222,6 +229,9 @@ class Caretaker:
                 if e.status == 401:
                     self.revoked()
                 log("bind", ok=0, count=len(chunk), status=e.status)
+                if e.status in (409, 429, 410):    # nobody yet / limits / credential forgotten
+                    self.bind_off_until = now + BIND_BACKOFF_S
+                    break
                 continue
             n = 0
             for h in got:
@@ -300,6 +310,13 @@ class Caretaker:
             log("error", where="tick", type=type(e).__name__)
             res = W.OK
         if res == W.END:
+            # 410 after a server restart: the credential is gone but the call may still be
+            # listed (step() ends the call when /calls no longer lists it): ask for a new one
+            dev = vdev.load_device()
+            if dev is not None and self.renew(dev, now, force=True):
+                self.watcher.over = []
+                self.next_tick = now + W.TICK_S
+                return
             room = self.room
             self.end_call("watcher-end")
             self._retry(room, now)     # still listed? try again later with a fresh credential

@@ -41,6 +41,7 @@ HTTP_TIMEOUT_S = 15.0
 CALLS_WAIT_S = 25
 POLL_DEFAULT_S = 5.0
 POLL_MAX_S = 30.0
+SLOW_DOWN_S = 5.0          # 429 slow_down: back off by this much
 FLOW_MAX_S = 900.0
 LOCALHOSTS = ("localhost", "127.0.0.1", "::1")
 
@@ -153,12 +154,14 @@ def start_flow(name: str, base: str, http=http_request) -> dict:
 
 
 def poll_flow(device_code: str, base: str, http=http_request) -> tuple[str, dict]:
-    """('pending'|'ok'|'denied'|'expired', body). Anything else raises DeviceError."""
+    """('pending'|'slow_down'|'ok'|'denied'|'expired', body). Anything else raises DeviceError."""
     status, out = http("POST", f"{base}/api/device/poll", {"device_code": device_code}, "", HTTP_TIMEOUT_S)
     if status == 428:
         return "pending", {}
     if status == 200 and isinstance(out.get("device_token"), str) and out["device_token"]:
         return "ok", out
+    if status == 429:           # polled faster than the server allows
+        return "slow_down", {}
     if status == 403:
         return "denied", {}
     if status == 410:
@@ -216,6 +219,9 @@ def connect(name: str | None = None, *, http=http_request, sleep=time.sleep, clo
                 return 1
             continue
         errors = 0
+        if verdict == "slow_down":
+            interval += SLOW_DOWN_S
+            continue
         if verdict == "pending":
             continue
         if verdict == "ok":

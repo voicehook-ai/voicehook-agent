@@ -798,6 +798,8 @@ voicehook-agent caretaker uninstall  # remove the autostart
   `POST /api/device/calls/{room}/helpers` and writes `helpers/<label>.json`
   (0600), so the session's own commands with `VOICEHOOK_SESSION_LABEL=<label>` land in this call (the label is
   the session's registry label if known, else its transcript label). Entries end with the call.
+* **Same slot:** caretaker and helper credentials carry the machine name as relay label, so the caretaker and the session itself land in the same board slot `<machine>: <label>`; the watcher therefore always merges into the known board (the separate `(Wächter)` board stays the fallback).
+* **Server hiccups:** 409 (nobody in the call yet) and 429 (limits) on a credential: retry later, the call is kept; 410 after a server restart: a new caretaker credential is requested as long as `/calls` still lists the call.
 * **Invisible:** it never posts a status of its own, only for session labels.
 * **Autostart:** `caretaker install` writes `~/.config/systemd/user/voicehook-caretaker.service`
   (`Restart=always`, only PATH and non-secret settings, hint `loginctl enable-linger` if needed) or

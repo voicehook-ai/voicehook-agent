@@ -1392,6 +1392,10 @@ class Watcher:
             if verdict == "over":
                 if self.over_confirmed(now):
                     # 0.33.5: this call is over; a newer call's credential takes over, else end
+                    if self.cred_fn is not None:
+                        self.over = []
+                        log("end", why="server-over")
+                        return END    # caretaker: asks for a new credential if the call is listed
                     self.dead.add(vmulti._token_hash(str(rel.get("token") or "")))
                     self.over = []
                     if self.pick(now, new_call=True) is None:
