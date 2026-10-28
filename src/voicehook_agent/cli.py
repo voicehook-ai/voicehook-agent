@@ -4275,6 +4275,7 @@ def _run_relay_client(args, req: dict, rel: dict) -> int:
     local = vmulti._is_local(rel)
     try:
         frm = vrelayops.check_from(vrelayops.session_label())
+        vmulti.note_helper_session(frm)   # 0.32.2: the watcher can observe this session
         if req["cmd"] == "next":
             return _relay_next_out(rel, frm, getattr(args, "timeout", 0.0))
         if req["cmd"] == "activity":

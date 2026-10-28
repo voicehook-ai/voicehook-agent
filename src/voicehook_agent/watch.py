@@ -468,7 +468,8 @@ def discover(rel: dict, now: float, *, ps=None, claude_root: Path | None = None,
         for key, me in (reg or {}).items():
             if not isinstance(me, dict) or not me.get("label") or key == owner:
                 continue
-            at = max(float(me.get("at") or 0), float(me.get("ev_at") or 0))
+            at = max(float(me.get("at") or 0), float(me.get("ev_at") or 0),
+                     float(me.get("seen_at") or 0))
             if now - at > REGISTRY_RECENT_S:
                 continue
             tp = str(me.get("tp") or "")

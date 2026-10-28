@@ -687,3 +687,24 @@ def test_run_clears_boards_in_finally(monkeypatch):
     with pytest.raises(SystemExit):
         w.run(sleep=sleep)
     assert ("Alpha (Wächter)", {}) in posted and W.sub_boards() == []
+
+
+def test_helper_command_makes_its_session_observable(monkeypatch, tmp_path):
+    """0.32.2: a helper command inside a Claude Code session (no hooks installed) notes
+    label -> transcript in the registry; the watcher then sees that session."""
+    from voicehook_agent import multisession as M
+    from voicehook_agent import relayops as R
+    proj = tmp_path / "cfg" / "projects" / "-home-x"
+    proj.mkdir(parents=True)
+    tp = proj / "sess-1.jsonl"
+    tp.write_text("{}\n")
+    monkeypatch.setattr(R, "_config_dir", lambda: tmp_path / "cfg")
+    M.note_helper_session("dev-9", env={"CLAUDE_CODE_SESSION_ID": "sess-1"})
+    M.note_helper_session("dev-9", env={})                                  # outside a session: nothing
+    M.note_helper_session("dev-8", env={"CLAUDE_CODE_SESSION_ID": "../x"})  # never a path
+    found = [s for s in W.discover(_relay(), time.time(), ps=lambda: "", claude_root=tmp_path / "none",
+                                   codex_root=tmp_path / "none") if s["label"] == "dev-9"]
+    assert len(found) == 1 and found[0]["tp"] == str(tp)
+    assert not [s for s in W.discover(_relay(), time.time(), ps=lambda: "",
+                                      claude_root=tmp_path / "none", codex_root=tmp_path / "none")
+                if s["label"] == "dev-8"]
