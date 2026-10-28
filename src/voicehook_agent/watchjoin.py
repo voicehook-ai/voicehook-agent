@@ -97,7 +97,10 @@ def subscribed_sessions(rel: dict, taken: set[str]) -> list[dict]:
     for key, e in load(rel)["subscribed"].items():
         if key in taken or not isinstance(e, dict) or not e.get("tp") or not e.get("label"):
             continue
-        out.append({"key": key, "label": str(e["label"]), "agent": "claude", "tp": str(e["tp"]),
+        label = str(e["label"])
+        if label == "Session":   # stored before 0.33.2: name it from the transcript now
+            label = label_for(Path(str(e["tp"])).stem, str(e["tp"]))
+        out.append({"key": key, "label": label, "agent": "claude", "tp": str(e["tp"]),
                     "ev": "", "ev_text": "", "ev_at": 0.0})
     return out
 
@@ -159,21 +162,56 @@ def find_unbound(rel: dict, now: float, active_s: float, *, claude_root: Path,
             key = vmulti.session_hash(stem)
             if not m or now - m > active_s or key in keys or tp in tps or key in subscribed:
                 continue
-            label = vmulti.session_label({"session_id": stem, "cwd": "", "transcript_path": tp})
-            out.append({"key": key, "label": label, "agent": "claude", "tp": tp, "active_at": m})
+            out.append({"key": key, "label": label_for(stem, tp), "agent": "claude", "tp": tp,
+                        "active_at": m})
     except Exception:  # noqa: BLE001
         return []
     return sorted(out, key=lambda s: -s["active_at"])
 
 
+def transcript_cwd(tp: str, lines: int = 80) -> str:
+    """Working directory a Claude Code transcript records (field `cwd` of its first lines),
+    else ''. Only the directory path, never message content."""
+    try:
+        with open(tp, encoding="utf-8", errors="replace") as f:
+            for _ in range(lines):
+                line = f.readline()
+                if not line:
+                    break
+                if '"cwd"' not in line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                cwd = d.get("cwd") if isinstance(d, dict) else None
+                if isinstance(cwd, str) and cwd:
+                    return cwd
+    except OSError:
+        pass
+    return ""
+
+
+def label_for(stem: str, tp: str) -> str:
+    """Session label like the hooks build it: /rename title, else ai-title, else
+    `<basename of cwd> <4 hex>`; the cwd comes from the transcript (the plain fallback
+    "Session" made cards read "Session Session arbeitet ...")."""
+    return vmulti.session_label({"session_id": stem, "cwd": transcript_cwd(tp), "transcript_path": tp})
+
+
 # --------------------------------------------------------------------------- #
 # card + answers
 # --------------------------------------------------------------------------- #
+def _named(label: str) -> str:
+    """'Session <label>' unless the label already starts with Session."""
+    return label if label.lower().startswith("session") else f"Session {label}"
+
+
 def proposal_body(label: str, host: str, since: float, now: float) -> dict:
     """The decision card: label and host only, never transcript content."""
     mins = max(1, int((now - since) // 60))
     return {
-        "question": f"Session {label} arbeitet gerade auf {host}, soll sie ins Board?"[:300],
+        "question": f"{_named(label)} arbeitet gerade auf {host}, soll sie ins Board?"[:300],
         "options": ["Ja", "Nein"],
         "context": (f"Die Sitzung {label} auf {host} arbeitet seit etwa {mins} Minuten und gehört noch "
                     "nicht zu diesem Call. Bei Ja zeigt der Wächter ihren Stand auf dem Board, "

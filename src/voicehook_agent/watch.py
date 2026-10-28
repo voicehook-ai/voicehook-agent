@@ -546,7 +546,7 @@ def discover(rel: dict, now: float, *, ps=None, claude_root: Path | None = None,
                 skey = vmulti.session_hash(stem)
                 if skey == owner or any(s["key"] == skey for s in out):
                     continue
-                label = vmulti.session_label({"session_id": stem, "cwd": "", "transcript_path": p})
+                label = J.label_for(stem, p)
                 if agent == "codex":
                     label = f"Codex {vmulti.label_suffix(stem)}"
                 out.append({"key": skey, "label": label, "agent": agent, "tp": p, "ev": "",

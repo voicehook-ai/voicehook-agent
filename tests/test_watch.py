@@ -1224,3 +1224,15 @@ def test_opt_ins_end_with_the_call(monkeypatch):
     w.rel = _relay()
     w.shutdown()
     assert not (W.vact.state_root() / J.STATE_NAME).exists()
+
+
+def test_unbound_label_uses_transcript_cwd_not_bare_session(tmp_path):
+    """Live 28.10.: the card read "Session Session arbeitet ..." (no title, cwd unknown)."""
+    from voicehook_agent import watchjoin as J
+    tp = tmp_path / "abcd1234-0000.jsonl"
+    tp.write_text(json.dumps({"type": "user", "cwd": "/home/x/wt-shop", "message": {"content": "hi"}}) + "\n")
+    label = J.label_for(tp.stem, str(tp))
+    assert label.startswith("wt-shop ") and label != "Session"
+    q = J.proposal_body(label, "crown", 0.0, 120.0)["question"]
+    assert q.startswith("Session wt-shop ") and "Session Session" not in q
+    assert J.proposal_body("Session 1a2b", "crown", 0.0, 120.0)["question"].startswith("Session 1a2b arbeitet")
