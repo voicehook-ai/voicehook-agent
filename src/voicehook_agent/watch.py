@@ -101,10 +101,10 @@ DEFAULT_MODEL_CMD = ["claude", "-p", "--model", "haiku", "--output-format", "jso
                      "--tools", "", "--no-session-persistence", "--disable-slash-commands",
                      "--setting-sources", "", "--strict-mcp-config",
                      "--system-prompt",
-                     "Du schreibst fuer einen Sprachassistenten genau EINEN ganzen deutschen "
+                     ("Du schreibst fuer einen Sprachassistenten genau EINEN ganzen deutschen "
                      "Satz (hoechstens 110 Zeichen, keine Abkuerzungen, keine Dateipfade, keine "
                      "Anfuehrungszeichen), der den Stand einer Programmier-Sitzung nennt. "
-                     "Gib nur den Satz aus."]
+                     "Gib nur den Satz aus.")]
 
 STATE_TEXT = {ARBEITET: "arbeitet gerade", STILL: "ist fertig oder still",
               FRAGE: "wartet auf eine Eingabe oder Freigabe des Menschen"}
@@ -509,8 +509,8 @@ def discover(rel: dict, now: float, *, ps=None, claude_root: Path | None = None,
                 out.append({"key": skey, "label": label, "agent": agent, "tp": p, "ev": "",
                             "ev_text": "", "ev_at": 0.0})
                 room -= 1
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        log("discover_error", err=type(e).__name__)
     return out[:MAX_SESSIONS]
 
 

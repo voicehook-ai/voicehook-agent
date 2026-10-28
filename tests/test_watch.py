@@ -144,7 +144,7 @@ def test_second_foreground_start_exits_0(monkeypatch):
 
 def test_spawn_detached_needs_call_and_not_running(monkeypatch):
     spawned = []
-    popen = lambda argv, **kw: spawned.append((argv, kw))  # noqa: E731
+    popen = lambda argv, **kw: spawned.append((argv, kw))
     monkeypatch.setenv("VOICEHOOK_WATCH", "1")
     assert W.spawn_detached(popen=popen) is False                   # no credential: no call
     vmulti.write_relay(URL, TOK, "room", 3600)
@@ -247,7 +247,7 @@ def test_discover_unregistered_transcripts_capped_by_processes(tmp_path, monkeyp
     for n in ("aaaaaaaa-1", "bbbbbbbb-2"):
         (root / f"{n}.jsonl").write_text(json.dumps({"type": "ai-title", "aiTitle": f"Titel {n[:1]}"}))
     ps = "  10     1 claude\n"
-    kw = dict(ps=lambda: ps, claude_root=tmp_path / "projects", codex_root=tmp_path / "none")
+    kw = {"ps": lambda: ps, "claude_root": tmp_path / "projects", "codex_root": tmp_path / "none"}
     assert W.discover(_relay(), time.time(), **kw) == []        # privacy default: not covered
     monkeypatch.setenv("VOICEHOOK_WATCH_ALL", "1")
     got = W.discover(_relay(), time.time(), **kw)
@@ -600,8 +600,8 @@ def test_unregistered_session_not_posted_by_default_but_with_optin(monkeypatch, 
     root = tmp_path / "projects" / "p"
     root.mkdir(parents=True)
     (root / "cccccccc-3.jsonl").write_text(json.dumps({"type": "ai-title", "aiTitle": "Privat Gehalt"}))
-    kw = dict(ps=lambda: "  10     1 claude\n", claude_root=tmp_path / "projects",
-              codex_root=tmp_path / "none")
+    kw = {"ps": lambda: "  10     1 claude\n", "claude_root": tmp_path / "projects",
+          "codex_root": tmp_path / "none"}
     f = Fake(monkeypatch)
     f.sessions = None
     w = W.Watcher(clock=time.time, discover_fn=lambda rel, now: W.discover(rel, now, **kw), cmd=None)
