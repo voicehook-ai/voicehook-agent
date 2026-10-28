@@ -41,10 +41,19 @@ class Fake:
         monkeypatch.setattr(W, "post_board", self._board)
         monkeypatch.setattr(W, "post_activity", lambda rel, label, s: self._post("act", label, s))
         monkeypatch.setattr(W, "delete_decision", self._delete)
+        self.unbound: list[dict] = []
+        self.proposals: list[dict] = []
+        self.answers: list[dict] = []
+        monkeypatch.setattr(W, "post_proposal", self._propose)
+        monkeypatch.setattr(W, "poll_answers", lambda rel: [self.answers.pop(0)] if self.answers else [])
         self.status = (404, {})          # GET <relay>/status?from=: old server by default
         monkeypatch.setattr(W, "get_status", lambda rel, label: self.status)
         self.deleted: list[str] = []
         self.delete_status = 200
+
+    def _propose(self, rel, body):
+        self.proposals.append(body)
+        return {"ok": True, "id": f"d{len(self.proposals):08d}"}
 
     def _server(self, rel):
         st, body = self.watch
@@ -80,6 +89,7 @@ class Fake:
 
     def watcher(self, **kw):
         w = W.Watcher(clock=lambda: self.t, discover_fn=lambda rel, now: self.sessions,
+                      unbound_fn=lambda rel, now, active_s, **kw: [dict(u) for u in self.unbound],
                       cmd=kw.pop("cmd", ["fake-model"]), **kw)
         return w
 
@@ -623,7 +633,8 @@ def test_unregistered_session_not_posted_by_default_but_with_optin(monkeypatch, 
           "codex_root": tmp_path / "none"}
     f = Fake(monkeypatch)
     f.sessions = None
-    w = W.Watcher(clock=time.time, discover_fn=lambda rel, now: W.discover(rel, now, **kw), cmd=None)
+    w = W.Watcher(clock=time.time, discover_fn=lambda rel, now: W.discover(rel, now, **kw), cmd=None,
+                  unbound_fn=lambda *a, **k: [])
     f.t = time.time()
     f.rel = _relay(expires=f.t + 3600)
     w.clock = lambda: f.t
@@ -1057,3 +1068,159 @@ def test_clean_meta_accepts_card_only_as_positive_int():
     from voicehook_agent import relay
     assert relay.clean_meta({"card": 3}) == {"card": 3}
     assert relay.clean_meta({"card": 0}) is None and relay.clean_meta({"card": True}) is None
+
+
+# ----- 0.33.0 Part C: active sessions outside the call ------------------------------------
+from voicehook_agent import watchjoin as J
+
+
+def _cand(key="u1", label="Fremd", tp="/x/proj/u1.jsonl", at=NOW - 10):
+    return {"key": key, "label": label, "agent": "claude", "tp": tp, "active_at": at}
+
+
+def test_unbound_active_session_proposed_once_with_label_and_host_only(monkeypatch):
+    f = Fake(monkeypatch)
+    f.unbound = [_cand()]
+    w = f.watcher(cmd=None)
+    w.tick()
+    f.t += 50
+    w.tick()
+    assert len(f.proposals) == 1
+    b = f.proposals[0]
+    assert "Fremd" in b["question"] and vmulti.machine_label() in b["question"]
+    assert b["options"] == ["Ja", "Nein"] and len(b["faq"]) == 3
+    assert "jsonl" not in json.dumps(b) and "/x/proj" not in json.dumps(b)
+    logtxt = (W.vact.state_root() / W.LOG_NAME).read_text()
+    assert "/x/proj" not in logtxt
+
+
+def test_ja_covers_session_next_tick_like_a_call_session(monkeypatch, tmp_path):
+    KB(monkeypatch)
+    tp = _tp(tmp_path, "Baue die Kartenansicht")
+    f = Fake(monkeypatch)
+    f.unbound = [_cand(key="u1", label="Fremd", tp=str(tp))]
+    w = f.watcher(cmd=None, interval_flag=5)
+    w.tick()
+    assert [p for p in f.posts if p[0] == "board"] == []
+    f.answers = [{"type": "decision", "id": "d00000001", "verdict": "option", "option": 0}]
+    f.t += 50
+    w.tick()
+    f.unbound = []                    # now covered: no longer listed as unbound
+    f.t += 50
+    w.tick()
+    labels = {p[1] for p in f.posts if p[0] == "board"}
+    assert "Fremd (Wächter)" in labels or "Fremd" in labels
+    assert len(f.proposals) == 1
+
+
+def test_nein_never_again_even_after_inactivity(monkeypatch):
+    f = Fake(monkeypatch)
+    f.unbound = [_cand()]
+    w = f.watcher(cmd=None)
+    w.tick()
+    f.answers = [{"type": "decision", "id": "d00000001", "verdict": "no"}]
+    f.t += 50
+    w.tick()
+    f.unbound = []
+    f.t += 3 * 3600
+    f.rel = _relay(expires=f.t + 3600)
+    w.tick()
+    f.unbound = [_cand(at=f.t)]
+    f.t += 50
+    w.tick()
+    assert len(f.proposals) == 1
+
+
+def test_repropose_only_after_two_hours_inactive(monkeypatch):
+    f = Fake(monkeypatch)
+    f.unbound = [_cand()]
+    w = f.watcher(cmd=None)
+    w.tick()
+    f.unbound = []
+    f.t += J.REPROPOSE_S + 100
+    f.rel = _relay(expires=f.t + 3600)
+    w.tick()
+    f.unbound = [_cand(at=f.t)]
+    f.t += 50
+    w.tick()
+    assert len(f.proposals) == 2
+
+
+def test_at_most_three_open_proposals_rest_queued_not_dropped(monkeypatch):
+    f = Fake(monkeypatch)
+    f.unbound = [_cand(key=f"u{i}", label=f"S{i}") for i in range(5)]
+    w = f.watcher(cmd=None)
+    w.tick()
+    assert len(f.proposals) == 3
+    f.t += 50
+    w.tick()
+    assert len(f.proposals) == 3
+    f.answers = [{"type": "decision", "id": "d00000001", "verdict": "no"}]
+    f.t += 50
+    w.tick()
+    assert len(f.proposals) == 4
+
+
+def test_never_env_filters_label_and_all_env_skips_asking(monkeypatch):
+    f = Fake(monkeypatch)
+    f.unbound = [_cand(key="a", label="Kunde Mueller"), _cand(key="b", label="Okay")]
+    monkeypatch.setenv(J.ENV_NEVER, "kunde, geheim")
+    f.watcher(cmd=None).tick()
+    assert [q["question"].split()[1] for q in f.proposals] == ["Okay"]
+    assert J.is_never("Projekt GEHEIM 1", "") and not J.is_never("Okay", "")
+    assert J.is_never("x", "/h/.claude/projects/-home-kunde-app/s.jsonl")
+    f2 = Fake(monkeypatch)
+    f2.unbound = [_cand()]
+    monkeypatch.setenv(W.ENV_ALL, "1")
+    f2.watcher(cmd=None).tick()
+    assert f2.proposals == []
+
+
+def test_find_unbound_maps_subagents_to_parent(tmp_path):
+    root = tmp_path / "projects"
+    (root / "p1" / "bound1" / "subagents").mkdir(parents=True)
+    (root / "p1" / "free1" / "subagents").mkdir(parents=True)
+    for name in ("bound1", "free1"):
+        (root / "p1" / f"{name}.jsonl").write_text("{}")
+        os.utime(root / "p1" / f"{name}.jsonl", (NOW - 5000, NOW - 5000))   # parent quiet
+        (root / "p1" / name / "subagents" / "agent-x.jsonl").write_text("{}")
+        os.utime(root / "p1" / name / "subagents" / "agent-x.jsonl", (NOW - 5, NOW - 5))
+    bound_tp = str(root / "p1" / "bound1.jsonl")
+    got = J.find_unbound(_relay(), NOW, W.ACTIVE_S, claude_root=root, bound_tps={bound_tp})
+    assert [g["tp"] for g in got] == [str(root / "p1" / "free1.jsonl")]       # subagent of free1 = free1
+    by_hash = J.find_unbound(_relay(), NOW, W.ACTIVE_S, claude_root=root,
+                             bound_keys={vmulti.session_hash("bound1"), vmulti.session_hash("free1")})
+    assert by_hash == []
+    owner = J.find_unbound(_relay(), NOW, W.ACTIVE_S, claude_root=root, bound_tps={bound_tp},
+                           ) and J.find_unbound({**_relay(), "owner_session": vmulti.session_hash("free1")},
+                                                NOW, W.ACTIVE_S, claude_root=root, bound_tps={bound_tp})
+    assert owner == []
+
+
+def test_subagent_activity_keeps_parent_arbeitet(tmp_path):
+    tp = tmp_path / "sess.jsonl"
+    tp.write_text("{}")
+    os.utime(tp, (NOW - 900, NOW - 900))
+    (tmp_path / "sess" / "subagents").mkdir(parents=True)
+    sub = tmp_path / "sess" / "subagents" / "a.jsonl"
+    sub.write_text("{}")
+    os.utime(sub, (NOW - 10, NOW - 10))
+    state, _last = W.classify_state(sess(ev="turn", ev_at=NOW - 900, tp=str(tp)), NOW)
+    assert state == W.ARBEITET
+    state, _ = W.classify_state(sess(ev="stop", ev_at=NOW - 5, tp=str(tp)), NOW)
+    assert state == W.STILL                         # a Stop after the subagent wrote wins
+
+
+def test_opt_ins_end_with_the_call(monkeypatch):
+    f = Fake(monkeypatch)
+    st = J.load(f.rel)
+    st["subscribed"]["k"] = {"label": "X", "tp": "/t.jsonl", "at": NOW}
+    J.save(st)
+    assert J.subscribed_sessions(f.rel, set())[0]["label"] == "X"
+    assert J.subscribed_sessions(_relay(token="tok-" + "b" * 12), set()) == []     # another call
+    w = f.watcher(cmd=None)
+    f.rel = None
+    monkeypatch.setattr(W, "post_board", lambda *a: {"ok": True})
+    w.rel = _relay()
+    w.shutdown()
+    assert not (W.vact.state_root() / J.STATE_NAME).exists()

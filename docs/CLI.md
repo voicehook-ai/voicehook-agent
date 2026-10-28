@@ -741,7 +741,7 @@ after every local session (Claude Code, Codex):
 | activity | an activity line on a state change (arbeitet, still, offene Frage) |
 | decisions | a decision of a local session (created by this machine's hooks) is deleted once the session went on or the question is obsolete (404/409 on delete = done). A session that still waits keeps its decision. Decisions of other machines/sessions are never touched. |
 
-**Privacy:** the watcher covers only sessions that belong to this call: registry entries that reported through the relay (hooks) and sessions with a helper credential (`helpers/<label>.json`; without transcript or hook events their state is unknown and the sentence says so). Other sessions of the machine (private or customer work on a shared box) are never posted. Opt in with `VOICEHOOK_WATCH_ALL=1` to also cover sessions found only by a recent transcript.
+**Privacy:** the watcher covers only sessions that belong to this call: registry entries that reported through the relay (hooks) and sessions with a helper credential (`helpers/<label>.json`; without transcript or hook events their state is unknown and the sentence says so). Other sessions of the machine (private or customer work on a shared box) are never posted. Opt in with `VOICEHOOK_WATCH_ALL=1` to also cover sessions found only by a recent transcript. Since 0.33.0 an active session outside the call is proposed once on the Decision Board (sender `Wächter`, label and host only) and covered after a Ja; `VOICEHOOK_WATCH_NEVER=a,b` (case-insensitive substrings of the label or project folder) are never proposed.
 
 State per session: `arbeitet` (hook event or transcript change in the last 2 min, no Stop
 since), `still` (Stop, or nothing for a while), `frage` (last event waits for input,

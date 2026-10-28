@@ -63,6 +63,7 @@ from . import activity as vact
 from . import multisession as vmulti
 from . import notify
 from . import relayops as vrelayops
+from . import watchjoin as J
 from . import watchkanban as K
 
 ALLOWED_INTERVALS = (1, 5, 10, 15)
@@ -560,6 +561,9 @@ def classify_state(s: dict, now: float) -> tuple[str, float]:
     """(state, last activity time) of one discovered session."""
     mt = _mtime(s.get("tp") or "")
     ev_at = float(s.get("ev_at") or 0)
+    sub = J.sub_mtime(s.get("tp") or "")
+    if sub > ev_at + SETTLE_S and 0 <= now - sub <= ACTIVE_S:   # 0.33.0: a subagent works for it
+        return ARBEITET, max(mt, sub, ev_at)
     last = max(mt, ev_at)
     ev = s.get("ev")
     quiet = mt <= ev_at + SETTLE_S   # nothing written after the event
@@ -767,6 +771,20 @@ def get_status(rel: dict, label: str) -> tuple[int, dict]:
     return vrelayops._http(rel, "GET", url, None, 10.0)
 
 
+def post_proposal(rel: dict, body: dict) -> dict:
+    """The decision card 'Session X arbeitet gerade, soll sie ins Board?' (sender Wächter)."""
+    return vrelayops.remote_decide(rel, J.NAME, body)
+
+
+def poll_answers(rel: dict) -> list[dict]:
+    """Answers to the proposals (non-blocking GET <relay>/next?from=Wächter)."""
+    return vrelayops.remote_next(rel, J.NAME, 0)
+
+
+def find_unbound(rel: dict, now: float, active_s: float, **kw) -> list[dict]:
+    return J.find_unbound(rel, now, active_s, claude_root=vrelayops._config_dir() / "projects", **kw)
+
+
 def post_activity(rel: dict, label: str, sentence: str) -> dict:
     if vmulti._is_local(rel):
         ok = vmulti.append_local(rel, f"{label}: {sentence}")
@@ -786,11 +804,13 @@ def delete_decision(rel: dict, label: str, dec_id: str) -> dict:
 # --------------------------------------------------------------------------- #
 class Watcher:
     def __init__(self, *, interval_flag: object = None, tokens: object = None,
-                 clock=time.time, discover_fn=discover, cmd: list[str] | None | str = "env") -> None:
+                 clock=time.time, discover_fn=discover, cmd: list[str] | None | str = "env",
+                 unbound_fn=None) -> None:
         self.interval_flag = interval_flag
         self.cap = tokens_per_hour(tokens)
         self.clock = clock
         self.discover = discover_fn
+        self.unbound = unbound_fn or find_unbound
         self.cmd = model_cmd() if cmd == "env" else cmd
         self.spent: deque = deque()          # (time, tokens)
         self.mem: dict[str, dict] = {}       # session key -> {state, post_at, call_at, call_last}
@@ -813,6 +833,8 @@ class Watcher:
     def shutdown(self) -> None:
         """Exit: clear every watcher board this machine remembers (call end, SIGTERM)."""
         rel = credential(self.clock()) or self.rel
+        if credential(self.clock()) is None:
+            J.clear()    # the call is over: opt-ins and proposals end with it
         if rel is not None:
             self.duty_cleanup(rel, set())
         else:
@@ -1033,6 +1055,62 @@ class Watcher:
         cur["linked"], cur["tries"] = linked[-50:], {k: v for k, v in tries.items() if k not in linked}
         K.save_cursor(skey, cur, now)
 
+    def duty_join(self, rel: dict, sessions: list[dict], now: float) -> None:
+        """Active sessions that are not part of the call: propose each ONCE as a decision
+        card (sender Wächter, label + host only, max J.MAX_OPEN open), apply the answers
+        (Ja = covered like a call session from the next tick, Nein = never again in this
+        call). Subagents count for their parent. Never raises."""
+        if vmulti._is_local(rel) or watch_all():
+            return
+        try:
+            st = J.load(rel)
+            prop = st["proposed"]
+            try:
+                evs = poll_answers(rel)
+            except vrelayops.RelayError:
+                evs = []
+            by_id = {e.get("id"): k for k, e in prop.items() if e.get("id") and not e.get("answer")}
+            for ev in evs:
+                a = J.answer_of(ev)
+                if not a or a[0] not in by_id:
+                    continue
+                key = by_id[a[0]]
+                prop[key]["answer"] = a[1]
+                if a[1] == "ja":
+                    st["subscribed"][key] = {"label": prop[key]["label"], "tp": prop[key]["tp"], "at": now}
+                log("join", label=prop[key]["label"], answer=a[1])
+            cands = self.unbound(rel, now, ACTIVE_S, bound_keys={x["key"] for x in sessions},
+                                 bound_tps={x["tp"] for x in sessions if x.get("tp")})
+            is_open = lambda e: not e.get("answer") and now - float(e.get("at") or 0) < J.TTL_S
+            n_open = sum(1 for e in prop.values() if is_open(e))
+            host = vmulti.machine_label()
+            for c in cands:
+                e = prop.get(c["key"])
+                if e is not None:
+                    gap = now - float(e.get("last_active") or 0)
+                    e["last_active"] = now
+                    if e.get("answer") or gap <= J.REPROPOSE_S:
+                        continue    # answered, or asked before and not inactive since
+                    if is_open(e):
+                        n_open -= 1
+                if J.is_never(c["label"], c["tp"]) or n_open >= J.MAX_OPEN:
+                    continue        # over the cap: stays queued, asked when a card is answered
+                try:
+                    label = vrelayops.check_from(c["label"])
+                except vrelayops.RelayError:
+                    continue
+                res = post_proposal(rel, J.proposal_body(label, host, c["active_at"], now))
+                if not res.get("ok") or not res.get("id"):
+                    log("join", label=label, why="post-failed", status=res.get("status"))
+                    continue
+                prop[c["key"]] = {"id": res["id"], "at": now, "label": label, "tp": c["tp"],
+                                  "last_active": now, "answer": None}
+                n_open += 1
+                log("join", label=label, why="proposed")
+            J.save(st)
+        except Exception as e:  # noqa: BLE001
+            log("error", where="join", type=type(e).__name__)
+
     def duty_unobserved(self, rel: dict, label: str, now: float, interval_s: float) -> None:
         """A session the watcher cannot see (no transcript, no hook events): read its board
         from the server and track locally when it last changed (the server sends no time).
@@ -1161,7 +1239,10 @@ class Watcher:
         interval_s = minutes * 60.0
         bad = False
         views: dict[str, tuple[str, float]] = {}
-        sessions = self.discover(rel, now)
+        sessions = list(self.discover(rel, now))
+        taken = {x["key"] for x in sessions}
+        taken_tp = {x["tp"] for x in sessions if x.get("tp")}
+        sessions += [x for x in J.subscribed_sessions(rel, taken) if x["tp"] not in taken_tp]
         live: set[str] = set()
         for s in sessions:
             if not observable(s):
@@ -1208,6 +1289,7 @@ class Watcher:
             log("post", label=label, state=state, how=how, tokens=toks, changed=changed,
                 ok=bool(res.get("ok")))
         self.rel = rel
+        self.duty_join(rel, sessions, now)
         self.duty_cleanup(rel, live)
         if self.duty_decisions(rel, views, now) == END:
             return END
