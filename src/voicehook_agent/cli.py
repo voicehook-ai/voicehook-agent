@@ -228,6 +228,7 @@ from livekit import rtc
 from . import __version__, relay
 from . import a2a as va2a
 from . import activity as vactivity
+from . import agentkey as vagentkey
 from . import boardlist as vboardlist
 from . import cards as vcards
 from . import datachan as vdata
@@ -330,7 +331,7 @@ def _operator_invite(url: str) -> str | None:
 async def _mint_token(api_base: str, slug: str, identity: str,
                       name: str | None = None, model: str | None = None,
                       op_invite: str | None = None, username: str | None = None,
-                      voice: str | None = None) -> dict:
+                      voice: str | None = None, agent_key: str | None = None) -> dict:
     """Calls /api/token?room=...&identity=...&invite=1 — invite=1 prevents
     a second voice-ai dispatch (voice-ai is presumably already in the room
     if a user is talking to it; we join as the additional agent participant).
@@ -346,6 +347,7 @@ async def _mint_token(api_base: str, slug: str, identity: str,
     missing -> 403 "operator invite required" once enforced). Old servers
     ignore it. It is URL-encoded by httpx and never logged."""
     url = f"{api_base}/api/token"
+    agent_key = vagentkey.for_base(agent_key, api_base)
     params = {"room": slug, "identity": identity, "invite": "1"}
     if name:
         params["name"] = name
@@ -358,8 +360,11 @@ async def _mint_token(api_base: str, slug: str, identity: str,
     if voice:  # 0.11.0: wish voice for our says (Chirp3-HD, e.g. 'Puck') -> vh.voice
         params["voice"] = voice
     # 0.12.0: X-VH-CLI = the server's version gate (426 below cli_min)
+    # 0.33.1: the owner agent key rides as `Authorization: Bearer vhak_...` (server.py
+    # owner_agent_account); never in the URL, never logged.
     async with httpx.AsyncClient(timeout=10.0, headers={"user-agent": _USER_AGENT,
-                                                        "x-vh-cli": _VERSION}) as cli:
+                                                        "x-vh-cli": _VERSION,
+                                                        **vagentkey.headers(agent_key)}) as cli:
         r = await cli.get(url, params=params)
         if r.status_code >= 400:
             try:
@@ -368,6 +373,7 @@ async def _mint_token(api_base: str, slug: str, identity: str,
                 detail = ""
             if op_invite:
                 detail = detail.replace(op_invite, "***")
+            detail = vagentkey.redact(detail, agent_key)
             try:
                 body = r.json() if r.status_code == 426 else None
             except ValueError:
@@ -2677,15 +2683,18 @@ async def _connect_and_listen(
     disconnect_reason_name is None for a clean stdin-driven quit; otherwise the
     LK reason that ended the cycle (used by the reconnect loop in #6)."""
     tok: dict | None = None
+    agent_key = vagentkey.for_base(vagentkey.get(), api_base)   # 0.33.1: env only, None when unset / malformed
     if transport == "bridge":
         # Server joins for us over HTTPS (same token/attributes as /api/token?invite=1).
         room = vtransport.BridgeRoom(api_base, slug, ident, name=agent_name or "agent",
                                      model=model or "unbekannt", invite=invite,
-                                     user_agent=_USER_AGENT, username=username, voice=voice)
+                                     user_agent=_USER_AGENT, username=username, voice=voice,
+                                     agent_key=agent_key)
     else:
         try:
             tok = await _mint_token(api_base, slug, ident, name=agent_name, model=model,
-                                    op_invite=invite, username=username, voice=voice)
+                                    op_invite=invite, username=username, voice=voice,
+                                    agent_key=agent_key)
         except TokenMintError as e:
             if e.status == 426:  # 0.12.0: CLI below the server's cli_min
                 if updater is not None and await updater.on_outdated(e.body):
@@ -2700,9 +2709,11 @@ async def _connect_and_listen(
                 print(OPERATOR_INVITE_REQUIRED_ERROR, file=sys.stderr, flush=True)
                 return 3, "TOKEN_FORBIDDEN"
             if e.status == 403:
-                print(f"[error] token mint rejected: {e}", file=sys.stderr, flush=True)
+                print(f"[error] token mint rejected: {vagentkey.redact(str(e), agent_key)}",
+                  file=sys.stderr, flush=True)
                 return 3, "TOKEN_FORBIDDEN"
-            print(f"[error] token mint failed: {e}", file=sys.stderr, flush=True)
+            print(f"[error] token mint failed: {vagentkey.redact(str(e), agent_key)}",
+                  file=sys.stderr, flush=True)
             return 3, "TOKEN_MINT_FAILED"
         except httpx.HTTPError as e:
             # type only: the exception text can carry the request URL (op_invite)
@@ -2715,6 +2726,13 @@ async def _connect_and_listen(
         room = rtc.Room()
         if ctl is not None:  # 0.21.0: image cards (POST /api/card/image), newest token per cycle
             ctl.api_base, ctl.lk_jwt = api_base, str(tok.get("token") or "")
+    if agent_key and tok is not None:   # WebRTC: the signed token tells (bridge answer does not)
+        granted = vagentkey.owner_granted(tok.get("token"))
+        if granted is not None:
+            _print_event(json_mode, "system",
+                         "owner-agent: " + ("granted" if granted else "not granted (key unknown "
+                                            "or not the key of this room's account)"),
+                         topic="_meta", owner_agent=granted)
     stop = asyncio.Event()
     turn_event = asyncio.Event()  # set on finalized user-turn → graph re-sync
     disconnect_reason: dict[str, str | None] = {"name": None}

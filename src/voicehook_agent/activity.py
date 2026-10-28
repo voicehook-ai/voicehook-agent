@@ -1414,6 +1414,8 @@ def main(argv: list[str] | None = None) -> int:
         rc, lines = doctor(path)
         print(f"voicehook-agent doctor: {path}")
         print("\n".join(lines))
+        from . import agentkey  # 0.33.1: state only, never the value
+        print(f"agent key: {agentkey.doctor_line()}")
         if rc:
             print(f"-> fix: voicehook-agent hook install  (writes {hook_bin()})")
         return rc

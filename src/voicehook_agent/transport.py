@@ -27,6 +27,7 @@ from typing import Any
 import httpx
 
 from . import __version__
+from . import agentkey as vagentkey
 
 TRANSPORTS = ("auto", "webrtc", "bridge")
 PROXY_VARS = ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")
@@ -214,7 +215,8 @@ class BridgeRoom:
     def __init__(self, api_base: str, slug: str, identity: str, *, name: str, model: str,
                  invite: str | None = None, user_agent: str = "voicehook-agent",
                  client_factory: Callable[..., httpx.AsyncClient] | None = None,
-                 username: str | None = None, voice: str | None = None) -> None:
+                 username: str | None = None, voice: str | None = None,
+                 agent_key: str | None = None) -> None:
         self.api_base = api_base.rstrip("/")
         self.slug = slug
         self.identity = identity
@@ -223,6 +225,7 @@ class BridgeRoom:
         self.invite = invite
         self.username = username
         self.voice = voice
+        self._agent_key = vagentkey.for_base(agent_key, api_base)   # 0.33.1: owner agent key, only as the join's Bearer header
         self.user_agent = user_agent
         self._client_factory = client_factory or _client
         self._http: httpx.AsyncClient | None = None
@@ -265,12 +268,13 @@ class BridgeRoom:
         if self.voice:  # 0.11.0: -> participant attribute vh.voice
             body["voice"] = self.voice
         try:
-            r = await self._http.post(f"{self.api_base}/api/bridge/join", json=body)
+            r = await self._http.post(f"{self.api_base}/api/bridge/join", json=body,
+                                      headers=vagentkey.headers(self._agent_key))
         except httpx.HTTPError as e:
             await self._close_http()
-            raise BridgeError(f"bridge join failed: {e!r}") from e
+            raise BridgeError(vagentkey.redact(f"bridge join failed: {e!r}", self._agent_key)) from e
         if r.status_code != 200:
-            detail = _detail(r)
+            detail = vagentkey.redact(_detail(r), self._agent_key)
             try:
                 body = r.json()
             except Exception:  # noqa: BLE001

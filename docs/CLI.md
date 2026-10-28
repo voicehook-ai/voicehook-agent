@@ -772,6 +772,25 @@ permission or an AskUserQuestion), plus "zuletzt aktiv". Sessions come from the 
 * **Log:** `~/.voicehook/watch.log` (size-rotated, 0600): label, state, counts, tokens,
   durations only, never transcript text or generated sentences.
 
+### Owner agent key (Kanban, 0.33.1)
+
+The server only treats an agent as the account owner's own agent (`owner_agent`) when it joins
+with an account agent key. Without it the Kanban relay routes answer `403 not_owner_agent`, and
+the helper credentials the agent mints are not owner credentials either. That includes the
+watcher's Kanban maintenance.
+
+1. Create a key on voicehook.ai/account (prefix `vhak_`, shown once).
+2. Put it into your secret store.
+3. Export it into the agent's environment: `VOICEHOOK_AGENT_KEY` (e.g. via your secret
+   store's run wrapper), then `join` as usual.
+
+The key goes ONLY to `https://voicehook.ai` (or exactly the host of `VOICEHOOK_AGENT_KEY_HOST` for staging, https unless `localhost` / `127.0.0.1`); an invite URL on any other host or plain http gets no key and a warning `agent key not sent: <host> is not trusted`. The CLI sends it as `Authorization: Bearer vhak_...` on the WebRTC join (`GET /api/token`) and on
+the bridge join (`POST /api/bridge/join`). It is read from the environment only: never written
+to disk, never printed or logged, never in a child process argv. A value without the `vhak_`
+prefix is ignored with a one-line warning. A WebRTC join prints `owner-agent: granted` (or
+`not granted`) from the signed token; `voicehook-agent doctor` reports `agent key: set / not set /
+rejected`.
+
 ### Helper access for every main agent (0.17.0)
 
 The server issues the helper credential (`POST /api/helper/credential`) however the main
