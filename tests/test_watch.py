@@ -59,7 +59,7 @@ class Fake:
         return {"ok": True, "status": 200}
 
     def _board(self, rel, label, body):
-        return self._post("board", label, body["doing"], body)
+        return self._post("board", label, body.get("doing"), body)
 
     def _delete(self, rel, label, dec_id):
         self.deleted.append(dec_id)
@@ -260,7 +260,7 @@ def test_first_tick_board_only_then_change_adds_activity(monkeypatch):
     f = Fake(monkeypatch, [sess(ev="turn", ev_at=NOW - 10)])
     w = f.watcher(cmd=None)
     assert w.tick() == W.OK
-    assert [p[0] for p in f.posts] == ["board"] and f.posts[0][1] == "Alpha"
+    assert [p[0] for p in f.posts] == ["board"] and f.posts[0][1] == "Alpha (Wächter)"
     f.sessions = [sess(ev="stop", ev_at=NOW + 5)]
     f.t += 60                       # well inside the interval: a state change posts at once
     w.tick()
@@ -290,7 +290,7 @@ def test_skip_self_reporting_session(monkeypatch):
     assert f.posts == []
     f.t += 400                      # the self post is older than the interval now
     w.tick()
-    assert [p[1] for p in f.posts] == ["Beta"]
+    assert [p[1] for p in f.posts] == ["Beta (Wächter)"]
 
 
 def test_cli_status_marks_self(monkeypatch):
@@ -540,11 +540,13 @@ def test_watcher_posts_merged_board_with_own_open_items(monkeypatch):
     assert f.posts[-1][2]["body"]["open"] == ["Frage 1"]
 
 
-def test_no_known_board_posts_doing_with_meta_only(monkeypatch):
+def test_unknown_board_goes_to_separate_watcher_board_never_main(monkeypatch):
     f = Fake(monkeypatch, [sess(label="Neu", ev="stop", ev_at=NOW - 500)])
     f.watcher(cmd=None).tick()
+    assert f.posts[0][1] == "Neu (Wächter)" and f.posts[0][1] != "Neu"
+    assert all(p[1] != "Neu" for p in f.posts if p[0] == "board")
     body = f.posts[0][2]["body"]
-    assert set(body) == {"doing", "meta"} and set(body["meta"]) == {"doing"}
+    assert set(body) == {"doing", "meta", "state"} and set(body["meta"]) == {"doing"}
 
 
 def test_cleared_board_is_forgotten(monkeypatch):
@@ -556,3 +558,37 @@ def test_cleared_board_is_forgotten(monkeypatch):
     assert W.known_board("Alpha") is None
     W.remember_board("Old", {"doing": "x"}, now=time.time() - 99999)
     assert W.known_board("Old") is None
+
+
+def test_sub_label_fits_and_is_clean():
+    long = "L" * 40
+    assert len(W.sub_label(long)) <= 40 and W.sub_label(long).endswith("(Wächter)")
+    assert vrelayops.check_from(W.sub_label(long))
+
+
+def test_state_set_on_every_post_and_stale_frage_dropped(monkeypatch):
+    f = Fake(monkeypatch, [sess(ev="stop", ev_at=NOW - 500)])
+    W.mark_self("Alpha", now=f.t - 1000, board={"doing": "x", "open": ["o"], "state": "frage"})
+    w = f.watcher(cmd=None, interval_flag=5)
+    w.tick()
+    b = f.posts[0][2]["body"]
+    assert b["state"] == "leerlauf" and b["open"] == ["o"]       # session moved on: frage gone
+    f.sessions = [sess(ev="wait", ev_at=NOW + 100)]
+    f.t += 400
+    w.tick()
+    assert [p for p in f.posts if p[0] == "board"][-1][2]["body"]["state"] == "frage"
+    assert W.merge_board({"state": "frage"}, "Satz mit drei Worten.", None, W.ARBEITET)["state"] == "arbeitet"
+
+
+def test_watcher_board_is_cleared_once_session_reports_itself(monkeypatch):
+    f = Fake(monkeypatch, [sess(ev="stop", ev_at=NOW - 500)])
+    w = f.watcher(cmd=None, interval_flag=5)
+    w.tick()
+    assert W.known_board("Alpha (Wächter)", f.t) is not None
+    W.mark_self("Alpha", now=f.t + 10, board={"doing": "selbst", "open": ["o"]})
+    f.t += 400
+    w.tick()
+    kinds = [(p[1], p[2]["body"]) for p in f.posts if p[0] == "board"]
+    assert kinds[-2] == ("Alpha", kinds[-2][1]) and kinds[-2][1]["open"] == ["o"]
+    assert kinds[-1] == ("Alpha (Wächter)", {})
+    assert W.known_board("Alpha (Wächter)", f.t) is None

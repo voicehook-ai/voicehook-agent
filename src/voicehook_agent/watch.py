@@ -319,11 +319,24 @@ def doing_meta(label: str, state: str, last: float, now: float) -> dict:
     return {"context": ctx[:2000], "faq": [{"q": f["q"][:200], "a": f["a"][:200]} for f in faq]}
 
 
-def merge_board(base: dict | None, sentence: str, meta: dict | None = None) -> dict:
-    """The board body to post: the known board with ONLY `doing` (and its meta) replaced;
-    open, done, project, state and their meta stay. No known board: doing alone."""
-    out = {k: v for k, v in (base or {}).items() if k != "meta"}
+STATE_FIELD = {ARBEITET: "arbeitet", STILL: "leerlauf", FRAGE: "frage"}   # server board states
+SUB_NAME = "Wächter"
+
+
+def sub_label(label: str) -> str:
+    """Sender of the separate watcher board of a session (max 40 chars)."""
+    return f"{label[:40 - len(SUB_NAME) - 3].rstrip()} ({SUB_NAME})"
+
+
+def merge_board(base: dict | None, sentence: str, meta: dict | None = None,
+                state: str | None = None) -> dict:
+    """The board body to post: the known board with ONLY `doing` (and its meta) replaced and
+    `state` set from our own detection; open, done, project and their meta stay. No known
+    board: doing (+ state) alone."""
+    out = {k: v for k, v in (base or {}).items() if k not in ("meta", "state")}
     out["doing"] = sentence
+    if state in STATE_FIELD:
+        out["state"] = STATE_FIELD[state]
     m = dict((base or {}).get("meta") or {})
     m.pop("doing", None)
     if meta:
@@ -691,13 +704,28 @@ class Watcher:
     # ----- duties (one function each; a Kanban duty is added here later) -----
     def duty_status(self, rel: dict, label: str, sentence: str, state: str, last: float,
                     now: float) -> dict:
-        """Merge the sentence into the session's known board (a relay /status replaces the
-        whole board of a sender) and post it; the result is remembered for the next merge."""
-        body = merge_board(known_board(label, self.clock()), sentence,
-                           doing_meta(label, state, last, now))
+        """Post the sentence. A relay /status REPLACES the whole board of a sender, so:
+        * the session's board is known locally (its own `status` posts of a CLI >= 0.32.0,
+          or our earlier merge): merge into it, replace only `doing` + meta and `state`;
+        * not known (older CLIs post their boards themselves): never touch the main board,
+          post to the separate watcher board (sender `<label> Wächter`) instead."""
+        meta = doing_meta(label, state, last, now)
+        base = known_board(label, self.clock())
+        if base is None:
+            sub = sub_label(label)
+            body = merge_board(None, sentence, meta, state)
+            res = post_board(rel, sub, body)
+            if res.get("ok"):
+                remember_board(sub, body, now)
+            return res
+        body = merge_board(base, sentence, meta, state)
         res = post_board(rel, label, body)
         if res.get("ok"):
             remember_board(label, body, now)
+            sub = sub_label(label)
+            if known_board(sub, self.clock()) is not None:   # the session reports itself now
+                post_board(rel, sub, {})
+                forget_board(sub)
         return res
 
     def duty_activity(self, rel: dict, label: str, sentence: str) -> dict:
