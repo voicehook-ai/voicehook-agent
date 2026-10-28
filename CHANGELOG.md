@@ -3,6 +3,10 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.32.3
+
+- **Watcher survives a server deploy:** one 401/403/410 no longer ends it (seen live: the watcher stopped during a deploy while the call went on). It ends only after 3 such answers in a row over at least 90 s. It never marks a token dead any more (it uses another session's credential), and a 401/403/410 on deleting a decision only skips that session.
+
 ## 0.32.2
 
 - **Watcher sees helper sessions without hooks:** every helper command over the relay (`status`, `activity`, `decide`, `show`) run inside a Claude Code session notes its label and transcript (`CLAUDE_CODE_SESSION_ID`) in the registry. The watcher then observes that session (working or quiet from the transcript) even when no hooks are installed, e.g. on a box where sessions only got a helper credential (`helper-import`).

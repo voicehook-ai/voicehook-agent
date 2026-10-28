@@ -116,10 +116,23 @@ def test_old_server_404_ignored_and_rechecked_late(monkeypatch):
     assert w.not_found_until > f.t
 
 
-def test_server_410_ends(monkeypatch):
+def test_server_410_ends_only_when_confirmed(monkeypatch):
+    """0.32.3: one 401/403/410 (seen live during a deploy) is not the end; three in a row over
+    at least OVER_CONFIRM_S are. The watcher never marks the token dead."""
     for st in (401, 403, 410):
         f = Fake(monkeypatch, [], watch=(st, {}))
-        assert f.watcher().tick() == W.END
+        w = f.watcher()
+        assert w.tick() == W.OK
+        f.t += 45
+        assert w.tick() == W.OK
+        f.t += 50
+        assert w.tick() == W.END
+    f = Fake(monkeypatch, [], watch=(410, {}))
+    w = f.watcher()
+    assert w.tick() == W.OK
+    f.watch = (200, {"interval_min": 5})      # the server is back: the count starts again
+    f.t += 45
+    assert w.tick() == W.OK and w.over == []
 
 
 # ----- lock / detach -------------------------------------------------------------------
@@ -470,13 +483,15 @@ def test_delete_409_is_done_and_5xx_retries(monkeypatch, tmp_path):
     assert notify.relay_slots() == []
 
 
-def test_delete_410_ends(monkeypatch, tmp_path):
+def test_delete_410_keeps_running(monkeypatch, tmp_path):
+    """A 410 on deleting a decision is that session's credential, not the call: keep going,
+    keep the slot, try again later."""
     tp = tmp_path / "t.jsonl"; tp.write_text("{}")
     os.utime(tp, (NOW - 20, NOW - 20))
     f = Fake(monkeypatch, [sess(ev="wait", ev_at=NOW - 100, tp=str(tp))])
     _slot()
     f.delete_status = 410
-    assert f.watcher(cmd=None).tick() == W.END
+    assert f.watcher(cmd=None).tick() == W.OK
 
 
 def test_only_relay_slots_of_this_machine(monkeypatch):
