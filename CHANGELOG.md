@@ -3,6 +3,10 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.33.2
+
+- **Watcher names unbound sessions:** the "should it join the board?" card read "Session Session arbeitet ..." for a session without a title. The label now comes from the transcript's working directory (`<folder> <4 hex>`, like the hooks build it), the card no longer doubles "Session", and sessions subscribed under the bare name get their real name.
+
 ## 0.33.1
 
 - **Owner agent key (`VOICEHOOK_AGENT_KEY`).** The server only treats an agent as the account owner's own agent (`owner_agent`, needed for the Kanban relay routes and for the helper credentials the agent mints) when the join presents an account agent key (`vhak_...`, created on voicehook.ai/account). The CLI now reads it from the environment variable `VOICEHOOK_AGENT_KEY` and sends it as `Authorization: Bearer vhak_...` on both joins: `GET /api/token` (WebRTC, default) and `POST /api/bridge/join`. A value without the `vhak_` prefix is ignored with a one-line warning. The key is never written to disk, never printed or logged (error text is redacted), never in a child argv, never in `join` output. A WebRTC join prints `owner-agent: granted` / `not granted` from the signed token; `doctor` reports `agent key: set / not set / rejected`. The key is sent ONLY to `https://voicehook.ai` or exactly the host in `VOICEHOOK_AGENT_KEY_HOST` (https, except `localhost` / `127.0.0.1`); for any other join origin (e.g. a crafted invite URL, or plain http) it is not sent and one warning `agent key not sent: <host> is not trusted` is printed. Without the variable nothing changes.
