@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -85,6 +86,25 @@ MODEL_TIMEOUT_S = 60.0
 LOG_MAX_BYTES = 256 * 1024
 BUDGET_WINDOW_S = 3600.0
 MAX_SESSIONS = 12
+# 0.35.4 (Oliver 29.10., Karten abräumen): a session that finished its turn (state still) runs no
+# hook, so nobody fetches the answers to its cards and they stay open. After DELIVER_IDLE_S of
+# rest the Session Watcher of ITS device fetches them (GET relay/next with the session's own
+# credential) into the session's local inbox, which its hooks / `relay-next` read first; the
+# server acknowledges a fetched answer itself (voicehook-v4 #789), so the card clears. Three
+# minutes: an active session fetches through its own hooks within seconds, a session quiet for
+# three minutes is done with its turn. Never for a session waiting on a question (frage): its
+# ask-wait hook fetches itself.
+DELIVER_IDLE_S = 180.0
+DELIVER_EVERY_S = 60.0
+# 0.35.4 (Oliver #6): an info card "fertig" per finished order of a covered session (card_type
+# done: no decision, only "Gesehen"); gone after INFO_TTL_S (Oliver: about 10 minutes) or when
+# seen. Only for an order the session worked on at least INFO_MIN_WORK_S (a quick answer is no
+# finished task).
+INFO_TTL_S = 600
+INFO_MIN_WORK_S = 120.0
+# links a session printed itself (PRs, releases, deploy runs, voicehook pages, artifacts)
+URL_RX = re.compile(r"https://(?:github\.com/[\w.-]+/[\w.-]+/(?:pull|releases|commit|actions/runs)/[\w./-]+"
+                    r"|(?:[\w-]+\.)*voicehook\.ai/[\w./?=&%-]+|claude\.ai/(?:code/)?artifact/[\w-]+)")
 NAMES_PER_TICK = 3                # 0.35.0: model calls for names / topics per tick (token cap applies too)
 
 ENV_OFF = "VOICEHOOK_WATCH"
@@ -487,6 +507,40 @@ def fetch_note(label: str, why: str, now: float, since: float) -> dict:
                        else "Nein, der Session Watcher versucht es von selbst weiter.")},
                 {"q": "Wann verschwindet der Hinweis?",
                  "a": "Sobald die Session im Call auftaucht."}]}}}
+
+
+def evidence_links(text: str) -> list[dict]:
+    """Links the session itself printed (URL_RX), at most 3, labelled readably."""
+    out, seen = [], set()
+    for u in URL_RX.findall(text or ""):
+        u = u.rstrip(".,;)")
+        if u in seen:
+            continue
+        seen.add(u)
+        m = re.search(r"/pull/(\d+)", u)
+        lab = (f"Pull Request {m.group(1)}" if m else "Release" if "/releases/" in u
+               else "Deploy-Lauf" if "/actions/runs/" in u else "Artefakt" if "artifact" in u
+               else "Commit" if "/commit/" in u else "Seite")
+        out.append({"label": lab, "url": u})
+        if len(out) >= 3:
+            break
+    return out
+
+
+def info_body(label: str, topic: str, last_text: str) -> dict:
+    """Body of the info card (card_type done; title a whole sentence, summary, own links)."""
+    topic = _cut(topic, 90)
+    title = f"Die Session {label} hat den Auftrag {topic} abgeschlossen."
+    if len(title) > 160:
+        title = f"Die Session {_cut(label, 30)} hat den Auftrag {_cut(topic, 60)} abgeschlossen."
+    body = {"card_type": "done", "title": title,
+            "summary": (f"Thema: {topic}. Die Session hat ihren Turn beendet und wartet auf den "
+                        "nächsten Auftrag. Gemeldet vom Session Watcher.")[:600],
+            "ttl_s": INFO_TTL_S}
+    ev = evidence_links(last_text)
+    if ev:
+        body["evidence"] = ev
+    return body
 
 
 def merge_board(base: dict | None, sentence: str, meta: dict | None = None,
@@ -1476,6 +1530,52 @@ class Watcher:
         except Exception as e:  # noqa: BLE001
             log("error", where="join", type=type(e).__name__)
 
+    def duty_deliver(self, rel: dict, s: dict, label: str, last: float, m: dict, now: float) -> None:
+        """Answers to the cards of a resting session (see DELIVER_IDLE_S) into its local inbox.
+        Only sessions of THIS device with a transcript (hooks read the inbox); the fetch uses the
+        session's own credential (its sender slot), else the watcher's. Logs counts only."""
+        if (not s.get("tp") or s.get("parent") or str(s.get("key") or "").startswith("helper-")
+                or now - last < DELIVER_IDLE_S or now - m.get("deliver_at", 0.0) < DELIVER_EVERY_S):
+            return
+        m["deliver_at"] = now
+        use = vmulti.load_relay(now, session=s["key"]) or rel
+        if vmulti._is_local(use):
+            return
+        try:
+            evs = vrelayops.remote_next(use, label, 0)
+        except vrelayops.RelayError:
+            return
+        n = 0
+        for e in evs:
+            try:
+                vact._private_dir(vact.state_root())
+                vrelayops.append_jsonl(vrelayops.inbox_path(label), e)
+                n += 1
+            except Exception as exc:  # noqa: BLE001
+                log("error", where="deliver", type=type(exc).__name__)
+        if evs:
+            log("deliver", label=label, events=len(evs), kept=n)
+
+    def duty_infocard(self, rel: dict, s: dict, label: str, m: dict, now: float) -> None:
+        """Info card "<Name> hat den Auftrag <Thema> abgeschlossen." when a covered session
+        finished an order it worked on (arbeitet -> still, at least INFO_MIN_WORK_S), once per
+        order. Evidence: only links the session printed itself in its last message. Never
+        raises; logs counts only."""
+        if (vmulti._is_local(rel) or not s.get("tp") or s.get("parent")
+                or now - m.get("work_since", now) < INFO_MIN_WORK_S):
+            return
+        try:
+            _first, order = vnames.orders(s["tp"])
+            h = vnames.order_hash(order) or f"t{int(now)}"
+            if m.get("info_h") == h:
+                return
+            m["info_h"] = h
+            topic = WS.topic_for(s["key"], s["tp"], label, "") or "ohne Titel"
+            res = vrelayops.remote_decide(rel, fetch_label(label), info_body(label, topic, last_assistant_text(s["tp"])))
+            log("info", label=label, ok=bool(res.get("ok")), status=res.get("status"))
+        except Exception as e:  # noqa: BLE001
+            log("error", where="info", type=type(e).__name__)
+
     def owner_tp(self, rel: dict) -> str:
         """Transcript of the session that joined the call (registry), '' unknown."""
         owner = str(rel.get("owner_session") or "")
@@ -1732,6 +1832,12 @@ class Watcher:
             prev = m.get("state")
             changed = prev is not None and prev != state
             m["state"] = state
+            if state == ARBEITET and prev != ARBEITET:
+                m["work_since"] = now
+            if changed and prev == ARBEITET and state == STILL:
+                self.duty_infocard(rel, s, label, m, now)
+            if state == STILL:
+                self.duty_deliver(rel, s, label, last, m, now)
             card_changed = self.duty_kanban(rel, s, label, state, m, now)
             if card_changed:
                 m["post_at"] = 0.0

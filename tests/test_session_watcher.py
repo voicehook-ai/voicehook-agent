@@ -335,3 +335,67 @@ def test_account_saved_choice_is_taken_over(monkeypatch, tmp_path):
     monkeypatch.setattr(WS, "get_picks", lambda rel: (200, got))
     w.tick()
     assert N.picks()[vmulti.session_hash("main1")] is True
+
+
+# ----- 0.35.4: answers of resting sessions, info cards -------------------------------------
+def _covered(tp, key="k1", label="Resend-Einrichtung", ev="stop", ev_at=NOW - 400):
+    return {"key": key, "label": label, "agent": "claude", "tp": str(tp), "ev": ev, "ev_text": "", "ev_at": ev_at}
+
+
+def test_resting_session_answers_go_to_its_local_inbox(monkeypatch, tmp_path):
+    """Karten abräumen: a session that finished its turn runs no hook; its device's watcher
+    fetches the answers into the session's local inbox (the server acknowledges the fetch).
+    Positive control: an active session is never fetched for."""
+    from voicehook_agent import relayops as R
+    tp = tmp_path / "s.jsonl"
+    tp.write_text(_user("Richte Resend ein", ts=NOW - 900) + _assistant("fertig", ts=NOW - 400))
+    os.utime(tp, (NOW - 400, NOW - 400))
+    calls = []
+    monkeypatch.setattr(R, "remote_next", lambda rel, frm, t: calls.append(frm) or
+                        [{"type": "decision", "id": "d1", "verdict": "yes"}])
+    f = _Fake(monkeypatch, sessions=[_covered(tp)])
+    w = f.watcher()
+    w.tick()
+    assert calls == ["Resend-Einrichtung"]
+    inbox = R.take_jsonl(R.inbox_path("Resend-Einrichtung"), lambda o: True)
+    assert inbox == [{"type": "decision", "id": "d1", "verdict": "yes"}]     # never lost
+    w.tick()
+    assert calls == ["Resend-Einrichtung"]                                   # not again within DELIVER_EVERY_S
+    calls.clear()
+    tp.write_text(_user("Weiter", ts=NOW - 10) + _assistant("arbeite", ts=NOW - 5))
+    os.utime(tp, (NOW - 5, NOW - 5))
+    f2 = _Fake(monkeypatch, sessions=[_covered(tp, key="k2", label="Aktiv", ev="", ev_at=0.0)])
+    f2.watcher().tick()
+    assert calls == []                                                       # active: its hooks fetch
+
+
+def test_info_card_once_per_finished_order_with_own_links_only(monkeypatch, tmp_path):
+    from voicehook_agent import relayops as R
+    tp = tmp_path / "s.jsonl"
+    cards = []
+    monkeypatch.setattr(R, "remote_decide", lambda rel, frm, body: cards.append((frm, body)) or {"ok": True, "id": "i1"})
+    monkeypatch.setattr(R, "remote_next", lambda *a: [])
+    tp.write_text(_user("Baue den Resend-Versand", ts=NOW - 600)
+                  + _assistant("PR https://github.com/o/r/pull/42 ist gemergt, siehe https://evil.example/x", ts=NOW - 5))
+    os.utime(tp, (NOW - 5, NOW - 5))
+    t = [NOW]
+    f = _Fake(monkeypatch, sessions=[_covered(tp, ev="", ev_at=0.0)])
+    w = W.Watcher(clock=lambda: t[0], discover_fn=lambda rel, now: f.sessions, unbound_fn=lambda *a, **k: [], cmd=None)
+    w.tick()                                   # arbeitet (since NOW)
+    t[0] = NOW + 200
+    f.sessions = [_covered(tp, ev="stop", ev_at=NOW + 190)]
+    w.tick()                                   # arbeitet -> still after 200 s of work
+    assert len(cards) == 1
+    frm, body = cards[0]
+    assert frm == "Resend-Einrichtung (Session Watcher)" and body["card_type"] == "done"
+    assert body["title"].startswith("Die Session Resend-Einrichtung hat den Auftrag ") and body["ttl_s"] == W.INFO_TTL_S
+    assert body["evidence"] == [{"label": "Pull Request 42", "url": "https://github.com/o/r/pull/42"}]   # no foreign link
+    # same order again: no second card; a quick turn (< INFO_MIN_WORK_S): none
+    t[0] += 100
+    f.sessions = [_covered(tp, ev="", ev_at=0.0)]
+    os.utime(tp, (t[0], t[0]))
+    w.tick()
+    t[0] += 30
+    f.sessions = [_covered(tp, ev="stop", ev_at=t[0])]
+    w.tick()
+    assert len(cards) == 1

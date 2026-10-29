@@ -3,6 +3,11 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.35.4
+
+- **Answered cards clear even when the session rests.** A session that finished its turn runs no hook, so nobody fetched the answers to its cards. After `DELIVER_IDLE_S` (3 min) of rest the Session Watcher of its device fetches them with the session's own credential into the session's local inbox (its hooks and `relay-next` read it first, nothing is lost); the server acknowledges a fetched answer itself (voicehook-v4 #789), so the card leaves the open list. Never for a session waiting on a question.
+- **Info card "fertig".** When a covered session finishes an order it worked on for at least 2 min (arbeitet -> still), the Session Watcher posts one info card per order (`card_type: done`, no decision, only "Gesehen"): "Die Session <Name> hat den Auftrag <Thema> abgeschlossen.", sender `<Name> (Session Watcher)`, links only the session printed itself (pull requests, releases, deploy runs, voicehook pages, artifacts), gone after `INFO_TTL_S` = 10 min or when seen.
+
 ## 0.35.3
 
 - **`decide --context` is spoken.** Help text: Delta now reads open decision cards aloud by himself, one at a time (question, the first two or three sentences of `--context`, the options and what each does, the recommendation) and takes the spoken answer for that card (voicehook-v4). Write `--context` for the ear: an example, at most one key number, no lists, IDs or abbreviations; a `--faq` naming an option or yes/no ("Was passiert bei B?") is spoken as its effect, a "Warum ...?" as the reason for `--recommend`.
