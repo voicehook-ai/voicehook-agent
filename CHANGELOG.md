@@ -3,6 +3,10 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.35.5
+
+- helper_decision carries `option_label` (the chosen option text) next to `option`, so a router never has to guess which option the human picked (server change voicehook-v4 #793).
+
 ## 0.35.4
 
 - **Answered cards clear even when the session rests.** A session that finished its turn runs no hook, so nobody fetched the answers to its cards. After `DELIVER_IDLE_S` (3 min) of rest the Session Watcher of its device fetches them with the session's own credential into the session's local inbox (its hooks and `relay-next` read it first, nothing is lost); the server acknowledges a fetched answer itself (voicehook-v4 #789), so the card leaves the open list. Never for a session waiting on a question.

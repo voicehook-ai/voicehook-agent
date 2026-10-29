@@ -152,3 +152,16 @@ def test_stop_wait_hook_command_wakes(relay, monkeypatch, capsys):
 
 
 REAL_FETCH = board.fetch_answers
+
+
+def test_helper_decision_carries_option_label():
+    """0.35.5: the chosen option text travels with the index (router guessed before, 29.10.)."""
+    from voicehook_agent import relay as vrelay
+
+    ev = vrelay.helper_decision_event({"type": "decision", "sender": "voicehook-dev: dev-1", "id": "d1",
+                                       "number": 24, "verdict": "option", "option": 1,
+                                       "option_label": "Neue Karte anlegen"}, question="Q?")
+    assert ev["option"] == 1 and ev["option_label"] == "Neue Karte anlegen"
+    ev2 = vrelay.helper_decision_event({"type": "decision", "sender": "a: b", "id": "d2", "verdict": "yes"},
+                                       question="Q?")
+    assert "option_label" not in ev2   # control: yes/no has no label
