@@ -461,8 +461,14 @@ on stderr, never refused. `VOICEHOOK_PLAIN_CHECK=0` turns it off.
 `decide --context "<2-4 plain sentences: what, why, what happens on yes, what on no>"`
 (max 1500 chars) and `--recent "<last turn of the asking session>"` (max 600) go into the
 `vh.decide` RPC / `POST /api/bridge/decide` (and over the relay for helper sessions) as
-`context` / `recent`. The human never sees them; Delta explains the question from them when
-asked "what is meant by number 2?". Whitespace is collapsed; longer: error, nothing sent.
+`context` / `recent`. Delta explains the question from them when asked "what is meant by
+number 2?", and since 0.35.3 (voicehook-v4 29.10.) he reads every open card aloud by himself in a
+pause, one at a time by number: the question, the first two or three sentences of `context`, the
+options and what each does, the recommendation, then he asks for the answer and sets that card.
+So write `context` to be understood without a screen: an example, at most one key number, what
+happens on yes and on no, no lists, IDs or abbreviations. A `--faq` whose question names an
+option or yes/no ("Was passiert bei B?", "Und bei Nein?") is spoken as its effect, a "Warum ...?"
+as the reason for `--recommend`. Whitespace is collapsed; longer: error, nothing sent.
 With `--id` they change an open decision (`--context ''` clears). The CLI does not fill
 `recent` by itself: its hooks never keep the text of a turn. Without any background Delta
 may answer `{"type":"decision","verdict":"unclear","text":"... versteht #2 nicht, bitte

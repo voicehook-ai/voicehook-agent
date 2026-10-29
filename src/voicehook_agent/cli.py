@@ -187,8 +187,10 @@ relay (via:"relay", sender/sub = its session name); `relay-next [--timeout S]` p
 answers; `decide --wait [--timeout S]` waits for this one (docs/CLI.md).
 
 Decision background + page control (0.21.0):
-    decide ... --context TEXT        background for Delta (max 1500 chars, never shown): what,
-                                     why, what happens on yes / on no; --recent TEXT (max 600)
+    decide ... --context TEXT        background for Delta (max 1500 chars): what, why, what
+                                     happens on yes / on no; Delta reads it aloud with the card,
+                                     so for the ear: an example, one key number, no lists (0.35.3);
+                                     --recent TEXT (max 600)
                                      = the last turn of the asking session. Also with --id and
                                      over the relay (helper sessions). Longer: error, nothing sent.
     next                             a decision event may carry verdict "unclear" + text: the
@@ -4989,9 +4991,13 @@ def main(argv: list[str] | None = None) -> None:
     p_dec.add_argument("--delete", action="store_true", default=False,
                        help="delete the decision given by --id")
     p_dec.add_argument("--context", default=None, metavar="TEXT",
-                       help=f"0.21.0, mandatory since 0.21.5 for a new decision: background for Delta, never shown to the human "
+                       help=f"0.21.0, mandatory since 0.21.5 for a new decision: background for Delta "
                             f"(max {DECIDE_CONTEXT_MAX} chars): 2-4 plain sentences, what it is about, why, "
-                            "what happens on yes, what on no. With --id: change it ('' clears)")
+                            "what happens on yes, what on no. Delta reads the first two or three sentences "
+                            "aloud with the card (0.35.3), so write it to be understood without a screen: an "
+                            "example, at most one key number, no lists, IDs or abbreviations. A --faq naming "
+                            "an option or yes/no ('Was passiert bei B?::...') is spoken as its effect, a "
+                            "'Warum ...?' as the reason for --recommend. With --id: change it ('' clears)")
     p_dec.add_argument("--faq", action="append", default=[], metavar="'FRAGE::ANTWORT'",
                        help=f"0.21.4: a likely follow-up question of the human + prepared answer "
                             f"(repeatable, max {relay.ITEM_FAQ_MAX}), hidden, for the voicebot")

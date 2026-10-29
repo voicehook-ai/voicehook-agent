@@ -3,6 +3,10 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.35.3
+
+- **`decide --context` is spoken.** Help text: Delta now reads open decision cards aloud by himself, one at a time (question, the first two or three sentences of `--context`, the options and what each does, the recommendation) and takes the spoken answer for that card (voicehook-v4). Write `--context` for the ear: an example, at most one key number, no lists, IDs or abbreviations; a `--faq` naming an option or yes/no ("Was passiert bei B?") is spoken as its effect, a "Warum ...?" as the reason for `--recommend`.
+
 ## 0.35.2
 
 - **Project = git repository, never a folder or a name.** Bug 29.10.: the session "Tradingbot-Anbindung" was filed under "Inbox Kunde": it runs in the home directory (no repository) and still carries the /rename title of an earlier job. The project of a session is now the git repository of its CURRENT working directory (worktree or second clone: the main repository, from the `origin` url); the home directory, `~/inbox-macbook` and other folders outside a repository are no project (empty). Used for the session list, the relation rule of the cards and the project field sent to the page (which no longer falls back to the name).
