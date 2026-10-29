@@ -3,6 +3,11 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.35.1
+
+- **`say_status` `speaking`:** the voicebot now reports when a say really starts playing (voicehook-v4 #782). Before, a playing say still looked `queued`; the router took it for stuck and sent it again with `--mode overwrite`, and the question was spoken twice (29.10.). `next`/`says` show `speaking` with a note "nicht nochmal senden"; a speaking say never gets the stuck hint.
+- **overwrite while your own say plays:** `dropped` with `reason: "already_speaking_same"` (+ `speaking_seq`) = same content is already playing, do not resend; `interrupted` with `reason: "superseded"` = your new content ended the playing say at a sentence end and plays next. Both carry a note.
+
 ## 0.35.0
 
 - **Session Watcher.** The watcher / caretaker ("Hausmeister", "Wächter") is called "Session Watcher" wherever a human sees it, in every language: card sender, board senders `<Name> (Session Watcher)`, the note "Konnte X nicht in den Call holen, weil ..." now from `X (Session Watcher)`, docs. Command `caretaker` stays, alias `watcher`.

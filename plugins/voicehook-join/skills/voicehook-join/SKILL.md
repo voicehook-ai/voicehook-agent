@@ -98,7 +98,7 @@ On goodbye: `leave` with `say: "Danke, bis bald!"`. The handle is invalid afterw
 
 - Plain, complete, phone-ready sentences: no abbreviations, symbols, URLs, codes, markdown, lists or emoji; round numbers. One complete thought per `say`; split long content into several `say` (`mode: "append"`, the default). Never speak lists of numbers (card numbers, ids, columns): at most two in a row, put the figures on a card.
 - Status, decisions and topic changes always with context: which project, what happened, why it matters, what happens on A and on B. One question per topic.
-- `mode: "overwrite"` replaces your not yet spoken says; `"revise"` does the same and sends you a `revise` event.
+- `mode: "overwrite"` replaces your not yet spoken says; `"revise"` does the same and sends you a `revise` event. While your own say is playing (`say_status` `speaking`): same content is dropped (`already_speaking_same`, never resend), new content ends the playing say at its next sentence end (`interrupted`, `superseded`) and plays next.
 - Live mode (realtime voice): the voice phrases `say` itself (`say`/`next` carry `verbatim:false`, `mode:"live_paraphrase"`): say it short, details via `show`.
 
 ### Show instead of reading out (`show`, `ui`)

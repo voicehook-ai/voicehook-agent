@@ -198,3 +198,36 @@ def test_say_status_brake_reason_on_interrupted():
     c = s.update({"seq": 3, "state": "interrupted", "spoken_chars": 12,
                   "reason": "max_duration"}, now=30.0)
     assert c == {"seq": 3, "state": "interrupted", "spoken_chars": 12, "reason": "max_duration"}
+
+
+# ----- 0.35.1: speaking, overwrite while own say plays (v4 #782) ----------------------
+def test_speaking_state_is_known_and_never_stuck():
+    """29.10. flux-onyx-bold-EGZ5: a playing say looked "queued", the router resent it."""
+    s = relay.SayStatus()
+    s.sent(23, "Frage", now=0.0)
+    s.update({"seq": 23, "state": "queued"}, now=0.0)
+    ch = s.update({"seq": 23, "state": "speaking", "spoken_chars": 0, "owner": "claude-x"}, now=11.0)
+    assert ch == {"seq": 23, "state": "speaking", "note": relay.SAY_NOTES["speaking"]}
+    assert s.stuck(now=60.0) is None                       # speaking is not stuck
+    assert s.table(now=12.0)[0]["state"] == "speaking"
+
+
+def test_queued_still_stuck_positive_control():
+    s = relay.SayStatus()
+    s.sent(1, "x", now=0.0)
+    s.update({"seq": 1, "state": "queued"}, now=0.0)
+    assert s.stuck(now=30.0) is not None
+
+
+def test_dropped_already_speaking_same_and_superseded_notes():
+    s = relay.SayStatus()
+    s.sent(24, "Frage", now=0.0)
+    s.sent(25, "Neu", now=0.0)
+    a = s.update({"seq": 24, "state": "dropped", "reason": "already_speaking_same",
+                  "speaking_seq": 23}, now=1.0)
+    assert a == {"seq": 24, "state": "dropped", "reason": "already_speaking_same",
+                 "note": relay.SAY_NOTE_SAME, "speaking_seq": 23}
+    b = s.update({"seq": 25, "state": "interrupted", "spoken_chars": 12, "reason": "superseded"}, now=1.0)
+    assert b["note"] == relay.SAY_NOTE_SUPERSEDED and b["spoken_chars"] == 12
+    c = s.update({"seq": 25, "state": "dropped", "reason": "no_audio"}, now=2.0)
+    assert c["note"] == relay.SAY_NOTES["dropped"]          # other drops unchanged

@@ -93,7 +93,8 @@ voicehook-agent leave --say "See you soon."             # clean exit
   in `--json` output and on `next` user events when the server sends them.
 - **Say receipts (0.9.0):** the voicebot reports each say as `operator.say_status
   {seq, state, spoken_chars}` (`seq` = the `seq` that `say` returned; states `queued`,
-  `spoken`, `interrupted`, `requeued`, `replaced`, live `covered`). `next` carries the changes since the
+  `speaking` (0.35.1: playing now, never resend it), `spoken`, `interrupted`, `requeued`,
+  `replaced`, live `covered`). `next` carries the changes since the
   last `next` as `"say_status": [{"seq":3,"state":"spoken"}]` (`spoken_chars` only for
   `interrupted`/`requeued`); a say stuck in `queued`/`requeued` for more than 20 s adds
   `"say_hint"` (do not push more; if outdated, `say --mode overwrite` a short version).

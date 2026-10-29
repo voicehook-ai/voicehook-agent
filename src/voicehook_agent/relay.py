@@ -1184,7 +1184,7 @@ class TurnClock:
 
 
 # ----- 0.9.0: operator.say_status (worker -> operator) ------------------------------
-SAY_STATES = ("queued", "spoken", "interrupted", "requeued", "replaced", "covered",
+SAY_STATES = ("queued", "speaking", "spoken", "interrupted", "requeued", "replaced", "covered",
               "no_audio", "dropped")
 # 0.12.0 (v4 #162, live mode): the say reached the model as context while the user had the
 # floor, and Delta already said its content in his answer, so it is not spoken (final).
@@ -1194,6 +1194,14 @@ SAY_NOTES = {"covered": "Info steckt schon in Deltas Antwort, nicht nochmal send
              "no_audio": "kein Audio, der Voicebot versucht es einmal neu",
              "dropped": "nicht gesprochen (auch der zweite Versuch ohne Audio): bei Bedarf neu senden"}
 # 0.21.9: dropped with reason=stale (queued longer than VOICEHOOK_SAY_STALE_S, never spoken)
+# 0.35.1 (v4 #782, 29.10.2026 flux-onyx-bold-EGZ5): the say started playing. Before, a running
+# say still looked "queued", the router sent it again with --mode overwrite and the question
+# was spoken twice. speaking is never "stuck".
+SAY_NOTES["speaking"] = "wird gerade gesprochen: nicht nochmal senden, spoken/interrupted folgt"
+# overwrite/revise while your own say plays: same content -> dropped (not spoken twice);
+# new content -> the playing say ends at its next sentence end (interrupted, superseded)
+SAY_NOTE_SAME = "läuft schon mit gleichem Inhalt (speaking_seq), nicht nochmal senden"
+SAY_NOTE_SUPERSEDED = "von deinem overwrite/revise am Satzende beendet, die neue Aussage folgt"
 SAY_NOTE_STALE = "veraltet, nicht gesprochen: nicht wiederholen, falls noch relevant EINE kurze Zusammenfassung"
 SAY_STUCK_S = 20.0          # queued/requeued longer than this -> hint
 SAYS_KEEP = 50              # says remembered for `voicehook-agent says`
@@ -1252,6 +1260,12 @@ class SayStatus:
             change["reason"] = reason[:40]   # no_audio, max_duration (Notbremse)
             if state == "dropped" and reason == "stale":  # 0.21.9: too old, never spoken
                 change["note"] = SAY_NOTE_STALE
+            elif state == "dropped" and reason == "already_speaking_same":  # 0.35.1
+                change["note"] = SAY_NOTE_SAME
+                if payload.get("speaking_seq") is not None:
+                    change["speaking_seq"] = payload["speaking_seq"]
+            elif state == "interrupted" and reason == "superseded":  # 0.35.1
+                change["note"] = SAY_NOTE_SUPERSEDED
         self._changes.append(change)
         return change
 
