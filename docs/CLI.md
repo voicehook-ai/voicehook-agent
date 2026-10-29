@@ -811,6 +811,27 @@ command stays `caretaker` (alias `watcher`), files and routes keep their names.
   (a picked subagent gets its own board line "gehört zu: <Name>. ..."), off = never covered,
   never proposed. No switch = the automatic cards. 404 (older server): asked again later.
 
+### Several devices (0.35.0)
+
+Every device (servers, a laptop) runs its own Session Watcher; all report into the same
+account and call. Per device, once:
+
+```bash
+uv tool install --force voicehook-agent   # or: pipx install --force voicehook-agent
+voicehook-agent connect                   # approve the code in the browser (device pairing)
+voicehook-agent watcher install           # = caretaker install: systemd --user / launchd, restarts itself
+voicehook-agent watcher status            # connected? running? autostart? (never the token)
+voicehook-agent watcher uninstall
+```
+
+The only secret on disk is the device token of the pairing in `~/.voicehook/device.json`
+(0600 in a 0700 dir; a group/world readable or foreign-owned file is ignored); unit / plist
+hold the command line and non-secret settings only, and a second `install` writes the same
+file. The session list shows the device per session (its pairing name), switches are kept
+on the device AND on the account (server, `saved` in `GET <relay>/sessions`), the counts
+cover all devices. Questions of a session are mirrored only by the device it runs on (its
+hooks).
+
 ### Caretaker (Session Watcher daemon): connect once, active in every call (0.34.0)
 
 ```bash

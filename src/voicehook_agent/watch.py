@@ -1337,8 +1337,13 @@ class Watcher:
                 log("sessions", n=len(entries), status=st)
             st, got = WS.get_picks(rel)
             if st < 300:
+                local = vnames.picks()
                 for p in got:
+                    e = L.ids.get(str(p["id"]))
+                    if p.get("saved") and (e is None or local.get(e["key"]) == bool(p.get("on"))):
+                        continue        # the account's choice is known here already
                     self.apply_pick(rel, str(p["id"]), bool(p.get("on")), now)
+                picks = vnames.picks()
             # switched on before (another call, a restart): in this call too
             sub = J.load(rel)["subscribed"]
             for e in L.ids.values():

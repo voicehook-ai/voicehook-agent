@@ -639,3 +639,31 @@ def test_failure_note_cleared_once_the_session_arrives(monkeypatch):
     w.tick()
     last = [b for lab, b in boards if lab == W.fetch_label("s1")][-1]
     assert not str(last.get("doing") or "").startswith("Konnte ") and w.fetch == {}   # board replaced the note
+
+
+def test_install_twice_is_identical_linux_and_darwin(tmp_path):
+    """0.35.0 (Oliver, multi-device): `watcher install` on every device; a second install
+    writes the same file (idempotent), and neither file holds a secret."""
+    for plat, path in (("linux", C.unit_path), ("darwin", C.plist_path)):
+        D.save_device(DEVTOK, "acct", BASE, "box", NOW)
+        kw = {"home": tmp_path, "platform": plat, "runner": Runner(), "argv": ["/x/va", "caretaker", "run"],
+              "env": {"PATH": "/usr/bin", "VOICEHOOK_API": BASE}, "out": lambda s: None}
+        if plat == "darwin":
+            kw["uid"] = 501
+        assert C.install(**kw) == 0
+        first = path(tmp_path).read_bytes()
+        assert C.install(**kw) == 0
+        assert path(tmp_path).read_bytes() == first
+        assert DEVTOK.encode() not in first and b"token" not in first.lower()
+
+
+def test_watcher_alias_runs_the_caretaker_command(monkeypatch):
+    from voicehook_agent import cli
+    called = []
+    monkeypatch.setattr(C, "status", lambda **k: called.append("status") or {})
+    monkeypatch.setattr("sys.argv", ["voicehook-agent", "watcher", "status"])
+    try:
+        cli.main()
+    except SystemExit:
+        pass
+    assert called == ["status"]

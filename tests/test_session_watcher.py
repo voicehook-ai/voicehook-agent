@@ -14,6 +14,7 @@ from voicehook_agent import watchjoin as J
 from voicehook_agent import watchsessions as WS
 
 NOW = 1_800_000_000.0
+REAL_GET_PICKS = WS.get_picks
 
 
 def _iso(ts):
@@ -277,3 +278,21 @@ def test_kanban_403_said_once_then_rests(monkeypatch):
     assert w.kanban_off["Shop"] > NOW
     s = {"key": "k", "label": "Shop", "agent": "claude", "tp": "/x.jsonl"}
     assert w.duty_kanban(f.rel, s, "Shop", W.ARBEITET, {}, NOW + 2) is False   # rests, no request
+
+
+def test_account_saved_choice_is_taken_over(monkeypatch, tmp_path):
+    """0.35.0 multi-device: the server keeps the switch on the account ("saved"); a fresh
+    machine state (reinstall, new call) takes it over once."""
+    root = tmp_path / "claude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    _session(root / "projects", "main1", [_user("Baue die Seite")])
+    f = _Fake(monkeypatch)
+    w = f.watcher()
+    w.tick()
+    sid = f.lists[-1][0]["id"]
+    monkeypatch.setattr(W.vrelayops, "_http", lambda rel, m, url, body, to: (200, {"picks": [], "saved": {sid: True}}))
+    _st, got = REAL_GET_PICKS(f.rel)
+    assert got == [{"id": sid, "on": True, "saved": True}]
+    monkeypatch.setattr(WS, "get_picks", lambda rel: (200, got))
+    w.tick()
+    assert N.picks()[vmulti.session_hash("main1")] is True

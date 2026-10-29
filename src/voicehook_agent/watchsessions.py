@@ -157,6 +157,15 @@ def post_list(rel: dict, entries: list[dict]) -> int:
 
 
 def get_picks(rel: dict) -> tuple[int, list[dict]]:
+    """(status, picks): the switches made on the page since the last GET, then the choices
+    the server keeps on the ACCOUNT for this machine ("saved": {id: on}, cross-device, also
+    after a reinstall) as picks with "saved": True."""
     status, out = vrelayops._http(rel, "GET", vrelayops.endpoint(rel, "sessions"), None, 10.0)
     picks = out.get("picks") if isinstance(out, dict) else None
-    return status, [p for p in (picks or []) if isinstance(p, dict) and isinstance(p.get("id"), str)]
+    got = [p for p in (picks or []) if isinstance(p, dict) and isinstance(p.get("id"), str)]
+    saved = out.get("saved") if isinstance(out, dict) else None
+    if isinstance(saved, dict):
+        fresh = {p["id"] for p in got}
+        got = [{"id": k, "on": bool(v), "saved": True} for k, v in saved.items()
+               if isinstance(k, str) and isinstance(v, bool) and k not in fresh] + got
+    return status, got
