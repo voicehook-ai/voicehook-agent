@@ -818,6 +818,12 @@ command stays `caretaker` (alias `watcher`), files and routes keep their names.
   (a picked subagent gets its own board line "gehört zu: <Name>. ..."), off = never covered,
   never proposed. No switch = the automatic cards. 404 (older server): asked again later.
 
+* **Answers of resting sessions (0.35.4):** a session at rest for 3 min (`DELIVER_IDLE_S`) gets
+  the answers to its cards fetched by its device's watcher into its local inbox; the server
+  acknowledges the fetch, the card clears. Never for a session waiting on a question.
+* **Info card "fertig" (0.35.4):** one `card_type: done` card per finished order of a covered
+  session (worked on at least 2 min), own links only, gone after 10 min (`INFO_TTL_S`) or when seen.
+
 ### Several devices (0.35.0)
 
 Every device (servers, a laptop) runs its own Session Watcher; all report into the same
