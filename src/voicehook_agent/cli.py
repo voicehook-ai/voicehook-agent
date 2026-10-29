@@ -1313,8 +1313,8 @@ a structure (own polygon, multi with label), yes or no (check, cross), a count o
 one to three (one, two, three). When not: not with every sentence, at most every few
 turns, never instead of speaking. Your says stay whole, natural, phone-ready sentences.
 
-Coordinates 0..1, (0,0) top left. Max 200 points, path d max 2 KB, whole shape
-max 8 KB, multi max 4 items, label max 24 chars (no control chars, emoji, <>),
+Coordinates 0..1, (0,0) top left. Max 400 points, path d max 2 KB, whole shape
+max 12 KB, multi max 12 items, label max 24 chars (no control chars, emoji, <>),
 hold 800..8000 ms. Invalid input: exit 2, nothing sent. At most one shape per 2 s
 per operator: faster gives {"type":"rate_limited"}, exit 1.
 
