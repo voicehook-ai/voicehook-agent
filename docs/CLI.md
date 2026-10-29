@@ -737,11 +737,11 @@ after every local session (Claude Code, Codex):
 
 | Duty | What it does |
 |---|---|
-| status | the session's board entry (`doing`) = ONE whole German sentence, every interval and at once when the state changes. A session that posted its own `status` within the interval is skipped (it reports itself). A relay `/status` replaces the whole board of a sender, so the watcher merges: it takes the last board it knows for that session (remembered from the session's own `status` posts and its own earlier posts, `~/.voicehook/watch-boards.json`, 0600) and replaces only `doing` and its meta; `open`, `done`, `project` and their meta stay. No known board (older CLIs post their boards themselves): the main board is never touched; the watcher posts a separate board under the sender `<label> (Wächter)` and clears it once the session reports itself. `state` (arbeitet, leerlauf, frage) is set from the watcher's own detection on every post to the MAIN board only, never on the `(Wächter)` board (a server keeps the last state per sender, such a board could not be removed). The watcher boards are cleared (empty board) when a session disappears and on exit (call end, SIGTERM). A session with no signal at all (helper credential only: no hook events, no transcript) gets no status and no activity line, only the decision cleanup. The `doing` entry always carries a `context` and 3 `faq` pairs built from the state. |
+| status | the session's board entry (`doing`) = ONE whole German sentence, every interval and at once when the state changes. A session that posted its own `status` within the interval is skipped (it reports itself). A relay `/status` replaces the whole board of a sender, so the watcher merges: it takes the last board it knows for that session (remembered from the session's own `status` posts and its own earlier posts, `~/.voicehook/watch-boards.json`, 0600) and replaces only `doing` and its meta; `open`, `done`, `project` and their meta stay. No known board (older CLIs post their boards themselves): the main board is never touched; the watcher posts a separate board under the sender `<label> (Session Watcher)` (before 0.35.0 `<label> (Wächter)`) and clears it once the session reports itself. `state` (arbeitet, leerlauf, frage) is set from the watcher's own detection on every post to the MAIN board only, never on the `(Session Watcher)` board (a server keeps the last state per sender, such a board could not be removed). The watcher boards are cleared (empty board) when a session disappears and on exit (call end, SIGTERM). A session with no signal at all (helper credential only: no hook events, no transcript) gets no status and no activity line, only the decision cleanup. The `doing` entry always carries a `context` and 3 `faq` pairs built from the state. |
 | activity | an activity line on a state change (arbeitet, still, offene Frage) |
 | decisions | a decision of a local session (created by this machine's hooks) is deleted once the session went on or the question is obsolete (404/409 on delete = done). A session that still waits keeps its decision. Decisions of other machines/sessions are never touched. |
 
-**Privacy:** the watcher covers only sessions that belong to this call: registry entries that reported through the relay (hooks) and sessions with a helper credential (`helpers/<label>.json`; without transcript or hook events their state is unknown and the sentence says so). Other sessions of the machine (private or customer work on a shared box) are never posted. Opt in with `VOICEHOOK_WATCH_ALL=1` to also cover sessions found only by a recent transcript. Since 0.33.0 an active session outside the call is proposed once on the Decision Board (sender `Wächter`, label and host only) and covered after a Ja; `VOICEHOOK_WATCH_NEVER=a,b` (case-insensitive substrings of the label or project folder) are never proposed.
+**Privacy:** the watcher covers only sessions that belong to this call: registry entries that reported through the relay (hooks) and sessions with a helper credential (`helpers/<label>.json`; without transcript or hook events their state is unknown and the sentence says so). Other sessions of the machine (private or customer work on a shared box) are never posted. Opt in with `VOICEHOOK_WATCH_ALL=1` to also cover sessions found only by a recent transcript. Since 0.33.0 an active session outside the call is proposed once on the Decision Board (sender `Session Watcher`, name, topic and host only) and covered after a Ja; `VOICEHOOK_WATCH_NEVER=a,b` (case-insensitive substrings of the label or project folder) are never proposed.
 
 State per session: `arbeitet` (hook event or transcript change in the last 2 min, no Stop
 since), `still` (Stop, or nothing for a while), `frage` (last event waits for input,
@@ -772,7 +772,46 @@ permission or an AskUserQuestion), plus "zuletzt aktiv". Sessions come from the 
 * **Log:** `~/.voicehook/watch.log` (size-rotated, 0600): label, state, counts, tokens,
   durations only, never transcript text or generated sentences.
 
-### Caretaker (Hausmeister): connect once, active in every call (0.34.0)
+### Session Watcher: names, topics, session list, cards (0.35.0)
+
+The watcher is called **Session Watcher** wherever a human sees it (participant name in the
+call, card sender, board senders `<Name> (Session Watcher)`, notes), in every language. The
+command stays `caretaker` (alias `watcher`), files and routes keep their names.
+
+* **Names without ids.** A session is named, in this order: `/rename` title > a name the
+  Session Watcher derived from the session's first order with the cheapest model (e.g.
+  "Resend-Einrichtung", stored in `~/.voicehook/session-names.json`) > Claude Code's ai-title >
+  the project folder, made unique on the machine (`oliver`, `oliver 2`). Never a hex suffix
+  (the old `<folder> <4 hex>`), never a random slug like `crown-moonlit-pascal`. The hooks use
+  the same rule, so the session and the watcher post under the same name.
+* **Topic.** What the session works on now, derived from its LATEST order (once per new
+  order, at most 3 model calls a tick, inside the token cap); else the ai-title, else the
+  folder. Board lines name it: "Arbeitet gerade am Thema DNS-Einträge prüfen.", "Wartet beim
+  Thema ... auf eine Antwort", "inaktiv seit 20 Min, Thema: ...". The order text is model
+  input only, never logged or posted; only the short name and topic leave the machine.
+* **Cards only for real activity related to the call.** "Soll <Name> mit Thema <Thema> in den
+  Call?" (English calls: "Should <Name> join the call with topic <Topic>?", language from
+  `GET <relay>/watch` `lang`) appears only for a session whose last REAL step (an order, an
+  assistant turn or a tool result, by the entries' timestamps; Claude Code also rewrites
+  transcripts for bookkeeping lines) is at most `PROPOSE_ACTIVE_S` = 5 min old, AND that is
+  related to the call: same project as a session already in it (git worktrees count as their
+  main repository), a name sharing a word with one in it, or switched on in the list before.
+  The 0.33.3 summary card ("N Sessions arbeiten parallel ...") is gone.
+* **Subagents** (Claude Code Task / background agents and forks: `<session>/subagents/
+  agent-<id>.jsonl` with `isSidechain: true` and the parent's `sessionId`, plus
+  `agent-<id>.meta.json` with the short `description`) are never a session of their own and
+  never get a card; their activity counts for the parent.
+* **Session list on the call page.** Every tick the watcher posts the sessions of this
+  machine of the last 7 days (`POST <relay>/sessions`: id (opaque hash), name, topic,
+  last_active, parent, parent_name, on, in_call, project (git main repository or folder); max 30 sessions, up to 5 subagents each, 80
+  entries) and fetches the switches made on the page (`GET <relay>/sessions` -> `picks`). The
+  page groups them "Heute aktiv" / "Gestern aktiv" / "Älter", subagents indented under their
+  session ("gehört zu: <Name>"). A switch is kept on this machine
+  (`~/.voicehook/session-picks.json`, survives restarts and new calls): on = in every call
+  (a picked subagent gets its own board line "gehört zu: <Name>. ..."), off = never covered,
+  never proposed. No switch = the automatic cards. 404 (older server): asked again later.
+
+### Caretaker (Session Watcher daemon): connect once, active in every call (0.34.0)
 
 ```bash
 voicehook-agent connect              # once: open the printed URL, confirm the code while logged in
@@ -791,8 +830,8 @@ voicehook-agent caretaker uninstall  # remove the autostart
   `GET /api/device/calls?wait=25`, and for your newest call with you present asks
   `POST /api/device/calls/{room}/caretaker` for a relay credential with owner rights. It runs the
   [watcher](#the-watcher-one-process-per-machine-keeps-the-board-current-watch-0320) bound to that
-  credential: board sentences, activity, Kanban and the card "N Sessions arbeiten gerade parallel ...
-  alle abonnieren?". One watcher at a time, for the newest call (the watcher's state is per call).
+  credential: board sentences, activity, Kanban and the cards "Soll <Name> mit Thema <Thema> in den Call?"
+  (0.35.0). One watcher at a time, for the newest call (the watcher's state is per call).
   When the call is no longer listed the watcher stops and the boards it wrote are cleared.
 * **Ja subscribes:** for every subscribed session the daemon calls
   `POST /api/device/calls/{room}/helpers` and writes `helpers/<label>.json`
@@ -800,12 +839,12 @@ voicehook-agent caretaker uninstall  # remove the autostart
   the session's registry label if known, else its transcript label). Entries end with the call.
 * **Ja never fails silently (0.34.1):** a Ja counts as done only when the session has its helper
   credential and a fresh board post of it was accepted by the server. Otherwise the board shows
-  "Konnte X nicht in den Call holen, weil ..." (sender `X (Hausmeister)`) with the concrete reason
+  "Konnte X nicht in den Call holen, weil ..." (sender `X (Session Watcher)`, before 0.35.0 `X (Hausmeister)`) with the concrete reason
   (rate limit, nobody in the call, call over, machine disconnected, board rejected, nothing arrived
   after 150 s), once per reason; it disappears as soon as the session is in the call.
 * **Polling pace (0.34.1):** at least 5 s between two `/calls` polls and the long poll ends when the
   next watcher tick is due, so the device rate limit stays free for helper credentials.
-* **Same slot:** caretaker and helper credentials carry the machine name as relay label, so the caretaker and the session itself land in the same board slot `<machine>: <label>`; the watcher therefore always merges into the known board (the separate `(Wächter)` board stays the fallback).
+* **Same slot:** caretaker and helper credentials carry the machine name as relay label, so the caretaker and the session itself land in the same board slot `<machine>: <label>`; the watcher therefore always merges into the known board (the separate `(Session Watcher)` board stays the fallback).
 * **Server hiccups:** 409 (nobody in the call yet) and 429 (limits) on a credential: retry later, the call is kept; 410 after a server restart: a new caretaker credential is requested as long as `/calls` still lists the call.
 * **Invisible:** it never posts a status of its own, only for session labels (and the failure note of a Ja).
 * **Autostart:** `caretaker install` writes `~/.config/systemd/user/voicehook-caretaker.service`

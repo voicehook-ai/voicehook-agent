@@ -1,4 +1,5 @@
-"""Caretaker daemon (0.34.0): the watcher ("Hausmeister") active in EVERY call of the account
+"""Caretaker daemon (0.34.0), shown as "Session Watcher" since 0.35.0 (before "Hausmeister"):
+the watcher active in EVERY call of the account
 owner, no per-call start.
 
 Prerequisite: `voicehook-agent connect` (once, approved in the browser, see device.py). Then
@@ -21,7 +22,7 @@ overwrite each other's state. A newer call replaces the older one (like 0.33.3 d
 classic watcher). Single thread: the long poll doubles as the loop clock.
 
 Invisible: it never posts its own status; the only senders are session labels (and the
-existing `Wächter` proposal card). One daemon per machine (flock caretaker.lock); the watcher
+proposal cards of the Session Watcher). One daemon per machine (flock caretaker.lock); the watcher
 also holds watch.lock while a call is served, so a classic watcher is never started twice.
 Log ~/.voicehook/caretaker.log: metadata only (no token, no label text beyond counts), rotated.
 
@@ -240,7 +241,7 @@ class Caretaker:
             fail(list(want), vdev.reason_text(401))
             return out
         if self.room == "":
-            fail(list(want), "der Hausmeister gerade keinen Call betreut")
+            fail(list(want), "der Session Watcher gerade keinen Call betreut")
             return out
         if now < self.bind_off_until:
             fail(list(want), self.bind_why or vdev.reason_text(429))
@@ -438,7 +439,7 @@ def plist_path(home: Path | None = None) -> Path:
 def unit_text(argv: list[str], env: dict[str, str]) -> str:
     def q(v: str) -> str:
         return '"' + v.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
-    lines = ["[Unit]", "Description=voicehook caretaker (Hausmeister): active in every call",
+    lines = ["[Unit]", "Description=voicehook Session Watcher (caretaker): active in every call",
              "After=network-online.target", "Wants=network-online.target", "",
              "[Service]", "Type=simple",
              "ExecStart=" + " ".join(q(a) for a in argv),

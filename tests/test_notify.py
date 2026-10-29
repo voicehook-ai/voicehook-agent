@@ -167,7 +167,7 @@ def test_helper_permission_becomes_decision_and_feed_line(relay_lines, monkeypat
 def test_idle_is_only_a_feed_line(relay_lines):
     assert _handle(_ev("Notification", message="Claude is waiting for your input",
                        notification_type="idle_prompt")) is None
-    assert relay_lines == ["voicehook-v4 " + ms.label_suffix("other-1") + ": wartet auf Eingabe"]
+    assert relay_lines == ["voicehook-v4" + ": wartet auf Eingabe"]
 
 
 def test_joining_session_never_asks_through_the_relay(relay_lines):

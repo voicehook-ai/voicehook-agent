@@ -106,7 +106,7 @@ def test_never_set_reminds_once_per_window_with_name():
     assert out["hookEventName"] == "PostToolUse"
     text = out["additionalContext"]
     assert text.startswith("voicehook-Call: Du hast kein Board")
-    assert 'vh-helper status "salesengine ' in text and "<Schritt + ETA>" in text
+    assert 'vh-helper status "salesengine"' in text and "<Schritt + ETA>" in text
     assert "no status board yet" in text
     assert TOKEN not in text
     assert board.handle(ev(), now=T0 + 60) is None              # rate limit
@@ -313,7 +313,7 @@ def test_same_state_resent_after_window_and_local_relay_too(tmp_path):
     (d / "session.json").write_text(json.dumps({"pid": os.getpid()}))
     _relay(local_dir=d, room="other")
     board.handle(ev(sid="x"), now=T0)
-    assert _states() == [("salesengine " + ms.label_suffix("x"), "arbeitet")]   # 0.21.4
+    assert _states() == [("salesengine 2", "arbeitet")]   # 0.21.4; 0.35.0 second session in the folder: " 2"
 
 
 def test_post_state_hits_state_endpoint(monkeypatch):
@@ -447,7 +447,7 @@ def test_subagent_state_only_with_board_and_separate_from_parent():
     sub = {"agent_id": "zz9", "agent_type": "Explore"}
     board.handle(ev(), now=T0)                                        # parent helper: arbeitet
     board.handle(ev(**sub), now=T0 + 1)                               # no board yet: no state
-    assert [p["from"] for p in POSTS] == ["salesengine " + ms.label_suffix("sess-1")]
+    assert [p["from"] for p in POSTS] == ["salesengine"]
     board.handle(bash('vh-helper status "Scout" "x"', **sub), now=T0 + 2)
     board.handle(ev("PreToolUse", tool_name="Read", tool_input={}, **sub), now=T0 + 3)
     assert {k: POSTS[-1][k] for k in ("op", "from", "state")} == \

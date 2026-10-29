@@ -3,6 +3,15 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.35.0
+
+- **Session Watcher.** The watcher / caretaker ("Hausmeister", "Wächter") is called "Session Watcher" wherever a human sees it, in every language: card sender, board senders `<Name> (Session Watcher)`, the note "Konnte X nicht in den Call holen, weil ..." now from `X (Session Watcher)`, docs. Command `caretaker` stays, alias `watcher`.
+- **Readable names, no ids.** Session names: `/rename` > a name derived from the session's own order (cheapest model, e.g. "Resend-Einrichtung") > ai-title > the project folder, unique per machine (`oliver`, `oliver 2`). The `<folder> <4 hex>` fallback ("oliver 43cb") is gone, also for Codex; random slugs are never used. Hooks and watcher share the rule (`~/.voicehook/session-names.json`).
+- **Topic in plain text.** The current order's topic is derived once per new order and named on the board ("Arbeitet gerade am Thema DNS-Einträge prüfen.") and on the card.
+- **Cards: exact format, only real activity related to the call.** "Soll <Name> mit Thema <Thema> in den Call?" (English call: "Should <Name> join the call with topic <Topic>?"), only for a session with a real step (order, assistant turn, tool result by entry time) in the last 5 min (`PROPOSE_ACTIVE_S`) and a relation to the call (same project, git worktrees included; a shared name word; switched on before). No more summary card.
+- **Subagents under their session.** Subagents and forks (`<session>/subagents/agent-*.jsonl`, `isSidechain`, meta `description`) never get a card of their own; in the session list they sit indented under their session ("gehört zu: <Name>").
+- **Session list with switches.** The watcher posts this machine's sessions of the last 7 days to the call page (`POST <relay>/sessions`, names, topics, times, opaque ids only) and applies the switches made there (`GET <relay>/sessions`). A switch is kept on the machine (`~/.voicehook/session-picks.json`): on = in every call, off = never covered or proposed. Needs voicehook-v4 with the session list; older servers: skipped.
+
 ## 0.34.1
 
 - **A Ja on "Session X dazuholen?" fetches the session, or says why not.** Live 28.10. a Ja fetched nobody, silently: the caretaker polled `GET /api/device/calls` without pause while a call ran (the server answered the long poll at once), ~400 requests a minute emptied the device rate limit and every helper request got 429. Now at least 5 s between two polls and the long poll ends when the next watcher tick is due (server side the long poll now waits while the list is unchanged, voicehook-v4). Every Ja is tracked until the session has its helper credential AND its board was accepted by the server (a forced fresh post); otherwise a note "Konnte X nicht in den Call holen, weil ..." (sender `X (Hausmeister)`, concrete reason: rate limit, nobody in the call, call over, device disconnected, board rejected 422, nothing arrived after 150 s) appears on the board once per reason and disappears when the session arrives. Log line `fetch` in watch.log.

@@ -321,15 +321,15 @@ def test_watcher_uses_injected_credential_and_binds_on_ja(monkeypatch):
     monkeypatch.setattr(W, "delete_decision", lambda *a: {"ok": True})
     monkeypatch.setattr(W, "post_board", lambda *a: {"ok": True, "status": 200})
     monkeypatch.setattr(W, "get_status", lambda *a: (404, {}))
-    w = W.Watcher(clock=lambda: NOW, discover_fn=lambda r, n: [], cmd=None,
+    w = W.Watcher(clock=lambda: NOW, discover_fn=lambda r, n: [], cmd=None, related_fn=lambda *a: True,
                   unbound_fn=lambda *a, **k: cands, cred_fn=lambda t=None: rel,
                   bind_fn=lambda r, items: bound.append(sorted(i["label"] for i in items)))
     monkeypatch.setattr(W.J, "subscribed_sessions", lambda r, taken: [])
     assert w.tick() == W.OK
-    assert posted and "2 Sessions" in posted[0]["question"]
+    assert posted and posted[0]["question"].startswith("Soll s1 mit Thema ")   # 0.35.0: single cards
     answers.append({"type": "decision", "id": "D1", "verdict": "yes"})
     assert w.tick() == W.OK
-    assert ["s1", "s2"] in bound
+    assert any(b and b[0] in ("s1", "s2") for b in bound)
 
 
 def test_fallback_without_device_json_classic_spawn(monkeypatch):
@@ -575,7 +575,8 @@ def _fetch_watcher(monkeypatch, bind_result, post_status=200):
 
     def post_board(r, label, body):
         boards.append((label, body))
-        if label.endswith("(Hausmeister)") or post_status < 300:
+        note = body == {} or str(body.get("doing") or "").startswith("Konnte ")
+        if note or post_status < 300:
             return {"ok": True, "status": 200}
         return {"ok": False, "status": post_status}
     monkeypatch.setattr(W, "post_board", post_board)
@@ -587,7 +588,7 @@ def _fetch_watcher(monkeypatch, bind_result, post_status=200):
     subs = []
     monkeypatch.setattr(W.J, "subscribed_sessions", lambda r, taken: list(subs))
     clk = Clock()
-    w = W.Watcher(clock=clk, discover_fn=lambda r, n: [], cmd=None,
+    w = W.Watcher(clock=clk, discover_fn=lambda r, n: [], cmd=None, related_fn=lambda *a: True,
                   unbound_fn=lambda *a, **k: [x for x in cands if not subs], cred_fn=lambda t=None: rel,
                   bind_fn=lambda r, items: {i["label"]: bind_result for i in items})
     assert w.tick() == W.OK                         # single card "s1 dazuholen?"
@@ -601,7 +602,9 @@ def _fetch_watcher(monkeypatch, bind_result, post_status=200):
 
 
 def _notes(boards):
-    return [b for lab, b in boards if lab == W.fetch_label("s1")]
+    # 0.35.0: the note and the watcher board share the sender `s1 (Session Watcher)`
+    return [b for lab, b in boards if lab == W.fetch_label("s1")
+            and (b == {} or str(b.get("doing") or "").startswith("Konnte "))]
 
 
 def test_ja_with_failed_helper_credential_reports_why(monkeypatch):
@@ -634,4 +637,5 @@ def test_failure_note_cleared_once_the_session_arrives(monkeypatch):
     clk.t += W.TICK_S
     w.mem.clear()                                                 # force a post this tick
     w.tick()
-    assert _notes(boards)[-1] == {} and w.fetch == {}
+    last = [b for lab, b in boards if lab == W.fetch_label("s1")][-1]
+    assert not str(last.get("doing") or "").startswith("Konnte ") and w.fetch == {}   # board replaced the note

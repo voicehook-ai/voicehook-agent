@@ -5117,7 +5117,7 @@ def main(argv: list[str] | None = None) -> None:
                       help="run in this process instead of starting a detached one")
     p_co = sub.add_parser(
         "connect", help="0.34.0: connect this machine ONCE (approved in the browser by the "
-        "logged-in account owner) so the caretaker is active in every call of yours without a "
+        "logged-in account owner) so the Session Watcher is active in every call of yours without a "
         "per-call start; --status / --disconnect")
     p_co.add_argument("--name", default=None, help="name of this machine on the account (default: host name)")
     p_co.add_argument("--status", action="store_true", default=False, help="show the connection (never the token)")
@@ -5126,7 +5126,8 @@ def main(argv: list[str] | None = None) -> None:
                       help="also install the autostart (systemd --user / launchd) without asking")
     p_co.add_argument("--no-install", action="store_true", default=False, help="do not offer the autostart")
     p_ca = sub.add_parser(
-        "caretaker", help="0.34.0: the caretaker (Hausmeister) daemon: finds your calls itself and "
+        "caretaker", aliases=["watcher"], help="0.34.0: the Session Watcher daemon (command "
+        "`caretaker`, alias `watcher` since 0.35.0): finds your calls itself and "
         "serves each with the watcher. `caretaker [run]`, `install` (systemd --user / launchd "
         "autostart), `uninstall`, `status`. Needs `connect` once. Log: ~/.voicehook/caretaker.log")
     p_ca.add_argument("action", nargs="?", default="run", choices=["run", "install", "uninstall", "status"])
@@ -5210,7 +5211,7 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(_run_helper_import(args))
     if args.cmd == "connect":
         sys.exit(_run_connect(args))
-    if args.cmd == "caretaker":
+    if args.cmd in ("caretaker", "watcher"):
         from . import caretaker as vcare
         if args.action == "install":
             sys.exit(vcare.install())

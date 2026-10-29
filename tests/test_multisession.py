@@ -19,7 +19,7 @@ from voicehook_agent import multisession as ms
 
 URL = "https://voicehook.ai/api/activity/relay"
 TOKEN = "fake.relay.test.only"  # fake, low entropy (gitleaks)
-V4 = "voicehook-v4 " + ms.label_suffix("other-1")  # cwd fallback label of sid other-1
+V4 = "voicehook-v4"  # cwd fallback label of sid other-1
 
 
 @pytest.fixture(autouse=True)
@@ -140,7 +140,7 @@ def test_joining_session_does_not_report_twice():
     _write()
     assert _run(_bash("gh pr create", "https://github.com/o/r/pull/7", sid="JOINER")) is None
     assert _run(_bash("gh pr create", "https://github.com/o/r/pull/7", sid="other")) \
-        == "voicehook-v4 " + ms.label_suffix("other") + ": PR #7 geöffnet"  # positive control
+        == "voicehook-v4" + ": PR #7 geöffnet"  # positive control
 
 
 def test_garbage_is_silent():
@@ -199,7 +199,7 @@ def test_merge_without_number_takes_it_from_output_or_omits_it():
     assert _run(_bash("gh pr merge --squash", "✓ Squashed and merged pull request o/r#77 (t)")) \
         == V4 + ": PR #77 gemergt"
     assert _run(_bash("gh pr merge --rebase", "done", sid="other-x")) \
-        == "voicehook-v4 " + ms.label_suffix("other-x") + ": PR gemergt"
+        == "voicehook-v4 2: PR gemergt"   # 0.35.0: same folder, second session: " 2", no hex
 
 
 def test_error_line_never_carries_description():
@@ -319,23 +319,23 @@ def test_label_ai_title_when_not_renamed(tmp_path):
 def test_label_ignores_nonexistent_session_title_field():
     _write()
     assert _run(_ev("Stop", sid="b", session_title="Multi Agent CLI")) == \
-        "voicehook-v4 " + ms.label_suffix("b") + ": Turn fertig"
+        "voicehook-v4" + ": Turn fertig"
 
 
 def test_label_cwd_fallback_tells_sessions_apart_and_is_capped(tmp_path):
     _write()
     a = _run(_ev("Stop", sid="s-1", cwd="/home/oliver"))
     b = _run(_ev("Stop", sid="s-2", cwd="/home/oliver"))
-    assert a != b and a.startswith("oliver ") and b.startswith("oliver ")
-    suffix = a.split(":")[0].split()[-1]
-    assert len(suffix) == 4 and "s-1" not in a
+    # 0.35.0: the project folder, a second session there " 2" (never an id or hex)
+    assert a == "oliver: Turn fertig" and b == "oliver 2: Turn fertig" and "s-1" not in a
+    assert ms.session_label({"session_id": "s-1", "cwd": "/home/oliver"}) == "oliver"   # stable
     tr = tmp_path / "t.jsonl"
     tr.write_text(json.dumps({"type": "ai-title", "aiTitle": "Lange Sitzung " * 8}) + "\n")
     lbl = _run(_ev("Stop", sid="s-3", transcript_path=str(tr))).split(":")[0]
-    assert lbl == ("Lange Sitzung " * 8)[:40].strip()
-    long_cwd = "/x/" + "d" * 80
+    assert lbl == "Lange Sitzung Lange Sitzung Lange"   # 0.35.0: cut at a word
+    long_cwd = "/x/" + "Projekt " * 10
     lbl = _run(_ev("Stop", sid="s-4", cwd=long_cwd)).split(":")[0]
-    assert len(lbl) <= 40 and lbl.endswith(" " + ms.label_suffix("s-4"))
+    assert len(lbl) <= 40 and lbl == ("Projekt " * 5).strip()
 
 
 # ----- throttle ---------------------------------------------------------------------
