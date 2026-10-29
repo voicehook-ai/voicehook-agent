@@ -3,6 +3,10 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.35.2
+
+- **Project = git repository, never a folder or a name.** Bug 29.10.: the session "Tradingbot-Anbindung" was filed under "Inbox Kunde": it runs in the home directory (no repository) and still carries the /rename title of an earlier job. The project of a session is now the git repository of its CURRENT working directory (worktree or second clone: the main repository, from the `origin` url); the home directory, `~/inbox-macbook` and other folders outside a repository are no project (empty). Used for the session list, the relation rule of the cards and the project field sent to the page (which no longer falls back to the name).
+
 ## 0.35.1
 
 - **`say_status` `speaking`:** the voicebot now reports when a say really starts playing (voicehook-v4 #782). Before, a playing say still looked `queued`; the router took it for stuck and sent it again with `--mode overwrite`, and the question was spoken twice (29.10.). `next`/`says` show `speaking` with a note "nicht nochmal senden"; a speaking say never gets the stuck hint.

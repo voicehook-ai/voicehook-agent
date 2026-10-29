@@ -185,7 +185,7 @@ def find_unbound(rel: dict, now: float, active_s: float, *, claude_root: Path,
                 continue
             cwd = transcript_cwd(tp)
             out.append({"key": key, "label": label_for(stem, tp), "agent": "claude", "tp": tp,
-                        "active_at": act, "project": vnames.project_of(cwd),
+                        "active_at": act, "project": vnames.project_of(vnames.latest_cwd(tp)),
                         "folder": vact.basename(cwd)})
     except Exception:  # noqa: BLE001
         return []

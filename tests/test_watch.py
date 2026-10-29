@@ -1235,7 +1235,7 @@ def test_find_unbound_needs_real_activity_not_a_file_touch(tmp_path):
     os.utime(new, (NOW - 5, NOW - 5))
     got = J.find_unbound(_relay(), NOW, J.PROPOSE_ACTIVE_S, claude_root=root)
     assert [g["tp"] for g in got] == [str(new)]
-    assert got[0]["project"] == "shop" and "/home" not in got[0]["label"]
+    assert got[0]["project"] == "" and "/home" not in got[0]["label"]   # /home/x/shop is no git repository
 
 
 def test_subagent_activity_keeps_parent_arbeitet(tmp_path):

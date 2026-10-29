@@ -1282,7 +1282,7 @@ class Watcher:
     # ----- 0.35.0: names, topics, session list -----
     def project(self, tp: str) -> str:
         if tp not in self.proj:
-            self.proj[tp] = vnames.project_of(J.transcript_cwd(tp)) if tp else ""
+            self.proj[tp] = vnames.project_of(vnames.latest_cwd(tp)) if tp else ""
         return self.proj[tp]
 
     def derive_names(self, sessions: list[dict], now: float) -> None:
