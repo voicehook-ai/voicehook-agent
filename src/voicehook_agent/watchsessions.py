@@ -80,7 +80,7 @@ class Lister:
         cwd = J.transcript_cwd(tp)
         e = {"key": key, "tp": tp, "label": J.label_for(stem, tp),
              "last": vnames.real_activity(tp) or m, "folder": vnames.clean(Path(cwd).name if cwd else ""),
-             "project": vnames.clean(vnames.project_of(cwd))}
+             "project": vnames.clean(vnames.project_of(vnames.latest_cwd(tp)))}
         self.cache[tp] = (m, e)
         return dict(e)
 

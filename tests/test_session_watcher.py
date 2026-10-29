@@ -89,7 +89,45 @@ def test_project_of_worktree_is_main_repo(tmp_path):
     wt.mkdir()
     (wt / ".git").write_text(f"gitdir: {tmp_path}/voicehook-v4/.git/worktrees/voicehook-v4-watcher\n")
     assert N.project_of(str(wt)) == "voicehook-v4"
-    assert N.project_of(str(tmp_path / "plain")) == "plain" and N.project_of("") == ""
+    assert N.project_of(str(wt / "src" / "deep")) == "voicehook-v4"          # below the toplevel
+    repo = tmp_path / "nexperts-sales-engine"
+    (repo / ".git").mkdir(parents=True)
+    assert N.project_of(str(repo / "react-embeds")) == "nexperts-sales-engine"
+    clone = tmp_path / "voicehook-v4-call-link-fix"
+    (clone / ".git").mkdir(parents=True)
+    (clone / ".git" / "config").write_text('[core]\n[remote "origin"]\n\turl = https://github.com/voicehook-ai/voicehook-v4.git\n')
+    assert N.project_of(str(clone)) == "voicehook-v4"                         # a second clone: the repository
+    assert N.project_of(str(tmp_path / "plain")) == "" and N.project_of("") == ""   # no repository: no project
+
+
+def test_tradingbot_session_with_stale_title_gets_no_invented_project(monkeypatch, tmp_path):
+    """Bug 29.10. (Oliver): the session "Tradingbot-Anbindung" was filed under "Inbox Kunde".
+    Its data: cwd = the home directory (no repository), /rename title from an earlier job
+    ("[R] Sales Engine · Helfer · Inbox Kunde JEV"), latest ai-title "Trading bots Anbindungen".
+    Project only from the git repository of the CURRENT cwd: none here -> '' (page: Sonstiges),
+    never from the name. Positive control: a session in a repository keeps its project."""
+    home = tmp_path / "home"
+    (home / "inbox-macbook").mkdir(parents=True)
+    repo = home / "nexperts-sales-engine"
+    (repo / ".git").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    root = tmp_path / "claude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    p = root / "projects"
+    _session(p, "trade1", [_user("Arbeite in der Inbox", cwd=str(home / "inbox-macbook")),
+                           json.dumps({"type": "custom-title", "customTitle": "[R] Sales Engine · Helfer · Inbox Kunde JEV"}) + "\n",
+                           _user("Binde die Trading-Bots an", cwd=str(home)),
+                           json.dumps({"type": "ai-title", "aiTitle": "Trading bots Anbindungen"}) + "\n"],
+             project="-home")
+    _session(p, "se1", [_user("Fix den Login", cwd=str(repo / "react-embeds"))], project="-home-nexperts")
+    f = _Fake(monkeypatch)
+    f.watcher().tick()
+    by = {e["topic"]: e for e in f.lists[-1]}
+    trade = by["Trading bots Anbindungen"]
+    assert trade["project"] == "" and "inbox" not in trade["project"].lower()
+    se = next(e for e in f.lists[-1] if e is not trade)
+    assert se["project"] == "nexperts-sales-engine"                          # positive control
+    assert N.project_of(str(home / "inbox-macbook")) == "" and N.project_of(str(home)) == ""
 
 
 def test_subagents_from_meta_description_only(tmp_path):
@@ -139,6 +177,7 @@ class _Fake:
 def test_no_card_without_relation_card_with_same_project(monkeypatch, tmp_path):
     root = tmp_path / "claude"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    (tmp_path / "shop" / ".git").mkdir(parents=True)                     # the session works in a repository
     mine = _session(root / "projects", "mine", [_user("Baue die Seite", cwd=str(tmp_path / "shop"))])
     cand = {"key": "u1", "label": "Fremd", "tp": str(tmp_path / "u1.jsonl"), "active_at": NOW - 30,
             "project": "other", "folder": "other"}
@@ -214,7 +253,7 @@ def test_list_groups_data_subagents_under_parent_and_picks_persist(monkeypatch, 
     top, sub, older = entries
     assert sub["parent"] == top["id"] and sub["parent_name"] == "shop" and sub["agent"] == "subagent"
     assert sub["topic"] == ""                              # the description is the name already
-    assert top["project"] == "shop" and sub["project"] == "shop"   # subagents inherit the project
+    assert top["project"] == sub["project"] == ""   # no repository: no project; subagents inherit
     assert older["last_active"] < NOW - 2 * 86400 and top["on"] is False and top["in_call"] is False
     assert all("main1" not in json.dumps(e) and "/" not in e["name"] for e in entries)   # no ids, no paths
     # switch on in the list: kept on the machine, subscribed now

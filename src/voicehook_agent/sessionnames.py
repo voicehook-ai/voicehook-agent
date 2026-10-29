@@ -322,25 +322,65 @@ def transcript_cwd(tp: str, lines: int = 80) -> str:
     return ""
 
 
+def latest_cwd(tp: str) -> str:
+    """The working directory the session uses NOW (last `cwd` in the transcript's tail; a long
+    session moves between folders), else the first one, else ''."""
+    for line in reversed(_lines(tp, tail=True)):
+        if '"cwd"' not in line:
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        cwd = d.get("cwd") if isinstance(d, dict) else None
+        if isinstance(cwd, str) and cwd:
+            return cwd
+    return transcript_cwd(tp)
+
+
 def project_of(cwd: str) -> str:
-    """Project of a working directory: the main repository of a git worktree
-    (~/voicehook-v4-watcher -> voicehook-v4), else the folder name. '' unknown."""
+    """Project of a working directory = its git repository: the folder holding `.git`, for a
+    git worktree its MAIN repository (~/voicehook-v4-watcher -> voicehook-v4). 0.35.1 (bug
+    29.10.: "Tradingbot-Anbindung" filed under "Inbox Kunde"): a folder outside any repository
+    (the home directory, ~/inbox-macbook, ~/macbook-channel ...) is NO project: ''. Never
+    guessed from names."""
     if not cwd:
         return ""
     p = Path(cwd)
+    home = Path.home()
+    for d in (p, *p.parents):
+        if d == home or d == d.parent:
+            return ""                     # reached the home directory / root: no repository
+        g = d / ".git"
+        try:
+            if g.is_dir():
+                return _repo_name(g, d.name)
+            if g.is_file():
+                m = re.match(r"gitdir:\s*(.+)", g.read_text(encoding="utf-8", errors="replace").strip())
+                if m:
+                    parts = Path(m.group(1).strip()).parts
+                    if "worktrees" in parts:
+                        i = parts.index("worktrees")
+                        if i >= 2 and parts[i - 1] == ".git":
+                            return _repo_name(Path(*parts[:i]), parts[i - 2])
+                return d.name
+        except OSError:
+            return ""
+    return ""
+
+
+def _repo_name(gitdir: Path, fallback: str) -> str:
+    """Name of the repository: the last part of the `origin` url in <gitdir>/config (a second
+    clone ~/voicehook-v4-call-link-fix is still voicehook-v4), else the folder name."""
     try:
-        g = p / ".git"
-        if g.is_file():
-            m = re.match(r"gitdir:\s*(.+)", g.read_text(encoding="utf-8", errors="replace").strip())
-            if m:
-                parts = Path(m.group(1).strip()).parts
-                if "worktrees" in parts:
-                    i = parts.index("worktrees")
-                    if i >= 2 and parts[i - 1] == ".git":
-                        return parts[i - 2]
+        text = (gitdir / "config").read_text(encoding="utf-8", errors="replace")
     except OSError:
-        pass
-    return p.name
+        return fallback
+    m = re.search(r'\[remote "origin"\][^\[]*?url\s*=\s*(\S+)', text)
+    if not m:
+        return fallback
+    name = re.split(r"[/:]", m.group(1).rstrip("/"))[-1].removesuffix(".git")
+    return name or fallback
 
 
 def subagents(tp: str) -> list[dict]:
