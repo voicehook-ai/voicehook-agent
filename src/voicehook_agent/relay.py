@@ -866,6 +866,8 @@ def helper_decision_event(payload: dict, *, frm: str | None = None, label: str |
               "number": payload.get("number"), "question": question, "verdict": payload.get("verdict")}
         if "option" in payload:
             ev["option"] = payload.get("option")
+        if payload.get("verdict") == "option" and isinstance(payload.get("option_label"), str):
+            ev["option_label"] = payload["option_label"][:200]   # 0.35.5: chosen option text, never guess
         if payload.get("verdict") in ("other", "unclear", "expired"):  # 0.21.0 unclear/board-hygiene expired: why, as text
             ev["text"] = str(payload.get("answer") or payload.get("text") or "")
         if payload.get("changed"):
