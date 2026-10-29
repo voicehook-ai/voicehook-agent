@@ -141,7 +141,7 @@ def test_session_label_sources(monkeypatch, tmp_path):
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", sid)
     monkeypatch.chdir(tmp_path)
     fallback = ro.session_label()
-    assert fallback == f"{tmp_path.name} {ms.label_suffix(sid)}"
+    assert fallback == tmp_path.name   # 0.35.0: project folder, no hex suffix
     proj = tmp_path / "claude" / "projects" / "-home-x"
     proj.mkdir(parents=True)
     (proj / f"{sid}.jsonl").write_text(

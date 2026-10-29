@@ -105,7 +105,7 @@ def test_helper_turn_and_pr_over_local_relay(monkeypatch):
         "PostToolUse", tool_name="Bash", tool_input={"command": "gh pr create --fill"},
         tool_response="Exit code: 0\nOutput:\nhttps://github.com/o/r/pull/42"))
     agents.opencode_hook("stop", _ev("Stop", turn_id="t2"))
-    label = "shop " + ms.label_suffix(SID)
+    label = "shop"
     assert [ln.split(" ", 1)[1] for ln in _log(d)] == [
         f"relay: Helfer crown: {label}: PR #42 geöffnet",
         f"relay: Helfer crown: {label}: Turn fertig"]

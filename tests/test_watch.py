@@ -89,6 +89,8 @@ class Fake:
         return run
 
     def watcher(self, **kw):
+        kw.setdefault("names", False)                     # 0.35.0 naming: own tests
+        kw.setdefault("related_fn", lambda *a: True)      # 0.35.0 relation rule: own tests
         w = W.Watcher(clock=lambda: self.t, discover_fn=lambda rel, now: self.sessions,
                       unbound_fn=lambda rel, now, active_s, **kw: [dict(u) for u in self.unbound],
                       cmd=kw.pop("cmd", ["fake-model"]), **kw)
@@ -288,7 +290,7 @@ def test_first_tick_board_only_then_change_adds_activity(monkeypatch):
     f = Fake(monkeypatch, [sess(ev="turn", ev_at=NOW - 10)])
     w = f.watcher(cmd=None)
     assert w.tick() == W.OK
-    assert [p[0] for p in f.posts] == ["board"] and f.posts[0][1] == "Alpha (Wächter)"
+    assert [p[0] for p in f.posts] == ["board"] and f.posts[0][1] == "Alpha (Session Watcher)"
     f.sessions = [sess(ev="stop", ev_at=NOW + 5)]
     f.t += 60                       # well inside the interval: a state change posts at once
     w.tick()
@@ -318,7 +320,7 @@ def test_skip_self_reporting_session(monkeypatch):
     assert f.posts == []
     f.t += 400                      # the self post is older than the interval now
     w.tick()
-    assert [p[1] for p in f.posts] == ["Beta (Wächter)"]
+    assert [p[1] for p in f.posts] == ["Beta (Session Watcher)"]
 
 
 def test_cli_status_marks_self(monkeypatch):
@@ -575,7 +577,7 @@ def test_watcher_posts_merged_board_with_own_open_items(monkeypatch):
 def test_unknown_board_goes_to_separate_watcher_board_never_main(monkeypatch):
     f = Fake(monkeypatch, [sess(label="Neu", ev="stop", ev_at=NOW - 500)])
     f.watcher(cmd=None).tick()
-    assert f.posts[0][1] == "Neu (Wächter)" and f.posts[0][1] != "Neu"
+    assert f.posts[0][1] == "Neu (Session Watcher)" and f.posts[0][1] != "Neu"
     assert all(p[1] != "Neu" for p in f.posts if p[0] == "board")
     body = f.posts[0][2]["body"]
     assert set(body) == {"doing", "meta"} and set(body["meta"]) == {"doing"}   # never `state` here
@@ -594,7 +596,7 @@ def test_cleared_board_is_forgotten(monkeypatch):
 
 def test_sub_label_fits_and_is_clean():
     long = "L" * 40
-    assert len(W.sub_label(long)) <= 40 and W.sub_label(long).endswith("(Wächter)")
+    assert len(W.sub_label(long)) <= 40 and W.sub_label(long).endswith("(Session Watcher)")
     assert vrelayops.check_from(W.sub_label(long))
 
 
@@ -616,14 +618,14 @@ def test_watcher_board_is_cleared_once_session_reports_itself(monkeypatch):
     f = Fake(monkeypatch, [sess(ev="stop", ev_at=NOW - 500)])
     w = f.watcher(cmd=None, interval_flag=5)
     w.tick()
-    assert W.known_board("Alpha (Wächter)", f.t) is not None
+    assert W.known_board("Alpha (Session Watcher)", f.t) is not None
     W.mark_self("Alpha", now=f.t + 10, board={"doing": "selbst", "open": ["o"]})
     f.t += 400
     w.tick()
     kinds = [(p[1], p[2]["body"]) for p in f.posts if p[0] == "board"]
     assert kinds[-2] == ("Alpha", kinds[-2][1]) and kinds[-2][1]["open"] == ["o"]
-    assert kinds[-1] == ("Alpha (Wächter)", {})
-    assert W.known_board("Alpha (Wächter)", f.t) is None
+    assert kinds[-1] == ("Alpha (Session Watcher)", {})
+    assert W.known_board("Alpha (Session Watcher)", f.t) is None
 
 
 def test_unregistered_session_not_posted_by_default_but_with_optin(monkeypatch, tmp_path):
@@ -644,7 +646,7 @@ def test_unregistered_session_not_posted_by_default_but_with_optin(monkeypatch, 
     monkeypatch.setenv("VOICEHOOK_WATCH_ALL", "1")
     w.mem.clear()
     w.tick()
-    assert [p[1] for p in f.posts] == ["Privat Gehalt (Wächter)"]
+    assert [p[1] for p in f.posts] == ["Privat Gehalt (Session Watcher)"]
 
 
 def test_helper_credential_session_is_covered(monkeypatch, tmp_path):
@@ -681,18 +683,18 @@ def test_watcher_board_never_carries_state_but_main_does(monkeypatch):
     W.remember_board("Alt", {"doing": "x", "open": ["o"]}, now=f.t - 1000)
     f.watcher(cmd=None).tick()
     by = {p[1]: p[2]["body"] for p in f.posts if p[0] == "board"}
-    assert "state" not in by["Neu (Wächter)"] and by["Alt"]["state"] == "frage"
+    assert "state" not in by["Neu (Session Watcher)"] and by["Alt"]["state"] == "frage"
 
 
 def test_watcher_boards_cleared_when_session_disappears(monkeypatch):
     f = Fake(monkeypatch, [sess(ev="stop", ev_at=NOW - 500)])
     w = f.watcher(cmd=None)
     w.tick()
-    assert W.sub_boards() == ["Alpha (Wächter)"]
+    assert W.sub_boards() == ["Alpha (Session Watcher)"]
     f.sessions = []
     f.t += 60
     w.tick()
-    assert [(p[1], p[2]["body"]) for p in f.posts if p[0] == "board"][-1] == ("Alpha (Wächter)", {})
+    assert [(p[1], p[2]["body"]) for p in f.posts if p[0] == "board"][-1] == ("Alpha (Session Watcher)", {})
     assert W.sub_boards() == []
 
 
@@ -700,12 +702,12 @@ def test_watcher_boards_cleared_on_exit(monkeypatch):
     f = Fake(monkeypatch, [sess(ev="stop", ev_at=NOW - 500)])
     w = f.watcher(cmd=None)
     w.tick()
-    assert W.sub_boards() == ["Alpha (Wächter)"]
+    assert W.sub_boards() == ["Alpha (Session Watcher)"]
     cleared = []
     monkeypatch.setattr(W, "post_board", lambda rel, label, body: cleared.append((label, body)) or {"ok": True})
     f.rel = None                          # the call is over: credential gone, last relay is used
     w.shutdown()
-    assert cleared == [("Alpha (Wächter)", {})] and W.sub_boards() == []
+    assert cleared == [("Alpha (Session Watcher)", {})] and W.sub_boards() == []
 
 
 def test_run_clears_boards_in_finally(monkeypatch):
@@ -717,7 +719,7 @@ def test_run_clears_boards_in_finally(monkeypatch):
         raise SystemExit(0)               # SIGTERM handler path
     with pytest.raises(SystemExit):
         w.run(sleep=sleep)
-    assert ("Alpha (Wächter)", {}) in posted and W.sub_boards() == []
+    assert ("Alpha (Session Watcher)", {}) in posted and W.sub_boards() == []
 
 
 def test_helper_command_makes_its_session_observable(monkeypatch, tmp_path):
@@ -787,7 +789,7 @@ def test_unobservable_session_silent_then_cleared(monkeypatch):
     f.t += 200
     w.tick()
     b = [p for p in f.posts if p[0] == "board"]
-    assert len(b) == 1 and b[0][1] == "crown (Wächter)"
+    assert len(b) == 1 and b[0][1] == "crown (Session Watcher)"
     assert b[0][2]["s"] == "keine Meldung seit 6 Min, letzter Stand: teste den Import"
     assert "state" not in b[0][2]["body"] and len(b[0][2]["body"]["meta"]["doing"]["faq"]) == 3
     f.t += 60
@@ -797,7 +799,7 @@ def test_unobservable_session_silent_then_cleared(monkeypatch):
     f.t += 60
     w.tick()
     last = [p for p in f.posts if p[0] == "board"][-1]
-    assert last[1] == "crown (Wächter)" and last[2]["body"] == {}
+    assert last[1] == "crown (Session Watcher)" and last[2]["body"] == {}
     assert W.sub_boards() == []
 
 
@@ -1088,7 +1090,7 @@ def test_unbound_active_session_proposed_once_with_label_and_host_only(monkeypat
     w.tick()
     assert len(f.proposals) == 1
     b = f.proposals[0]
-    assert "Fremd" in b["question"] and vmulti.machine_label() in b["question"]
+    assert b["question"].startswith("Soll Fremd mit Thema ") and vmulti.machine_label() in b["context"]
     assert b["options"] == ["Ja", "Nein"] and len(b["faq"]) == 3
     assert "jsonl" not in json.dumps(b) and "/x/proj" not in json.dumps(b)
     logtxt = (W.vact.state_root() / W.LOG_NAME).read_text()
@@ -1110,7 +1112,7 @@ def test_ja_covers_session_next_tick_like_a_call_session(monkeypatch, tmp_path):
     f.t += 50
     w.tick()
     labels = {p[1] for p in f.posts if p[0] == "board"}
-    assert "Fremd (Wächter)" in labels or "Fremd" in labels
+    assert "Fremd (Session Watcher)" in labels or "Fremd" in labels
     assert len(f.proposals) == 1
 
 
@@ -1147,41 +1149,34 @@ def test_repropose_only_after_two_hours_inactive(monkeypatch):
     assert len(f.proposals) == 2
 
 
-def test_call_start_one_summary_card_ja_subscribes_all(monkeypatch):
-    """0.33.3 (Oliver, new call): at the start ONE card '5 Sessions arbeiten parallel ...
-    alle abonnieren?', Ja subscribes every listed session; no single cards meanwhile."""
+def test_call_start_no_summary_card_single_cards_in_exact_format(monkeypatch):
+    """0.35.0 (Oliver 29.10.): every card asks exactly "Soll <Name> mit Thema <Thema> in den
+    Call?"; the 0.33.3 summary card is gone, at most J.MAX_OPEN single cards are open."""
     f = Fake(monkeypatch)
     f.unbound = [_cand(key=f"u{i}", label=f"S{i}") for i in range(5)]
     w = f.watcher(cmd=None)
     w.tick()
-    assert len(f.proposals) == 1
-    q = f.proposals[0]["question"]
-    assert q.startswith("5 Sessions arbeiten gerade parallel") and "alle abonnieren" in q
-    assert "S0" in f.proposals[0]["context"] and "S4" in f.proposals[0]["context"]
-    f.t += 50
-    w.tick()
-    assert len(f.proposals) == 1                       # waits for the answer
+    assert len(f.proposals) == J.MAX_OPEN
+    assert f.proposals[0]["question"].startswith("Soll S0 mit Thema ")
+    assert all(p["question"].endswith(" in den Call?") for p in f.proposals)
+    assert all("parallel" not in p["question"] for p in f.proposals)
     f.answers = [{"type": "decision", "id": "d00000001", "verdict": "yes"}]
     f.t += 50
     w.tick()
     sub = J.load({"call_id": w.call_id})["subscribed"]
-    assert {f"u{i}" for i in range(5)} <= set(sub)
+    assert "u0" in sub
 
 
-def test_after_summary_single_cards_capped_at_three(monkeypatch):
+def test_single_cards_capped_at_three_next_after_an_answer(monkeypatch):
     f = Fake(monkeypatch)
-    f.unbound = [_cand(key=f"u{i}", label=f"S{i}") for i in range(2)]
+    f.unbound = [_cand(key=f"n{i}", label=f"N{i}") for i in range(5)]
     w = f.watcher(cmd=None)
     w.tick()
+    assert len(f.proposals) == 3
     f.answers = [{"type": "decision", "id": "d00000001", "verdict": "no"}]
     f.t += 50
-    w.tick()                                           # summary answered Nein: never again
-    f.unbound = [_cand(key=f"n{i}", label=f"N{i}") for i in range(5)]
-    f.answers = []
-    f.t += 50
     w.tick()
-    singles = [p for p in f.proposals[1:]]
-    assert len(singles) == 3 and all("parallel" not in p["question"] for p in singles)
+    assert len(f.proposals) == 4 and f.proposals[3]["question"].startswith("Soll N3 ")
 
 
 def test_never_env_filters_label_and_all_env_skips_asking(monkeypatch):
@@ -1189,7 +1184,7 @@ def test_never_env_filters_label_and_all_env_skips_asking(monkeypatch):
     f.unbound = [_cand(key="a", label="Kunde Mueller"), _cand(key="b", label="Okay")]
     monkeypatch.setenv(J.ENV_NEVER, "kunde, geheim")   # one left after the filter: single card
     f.watcher(cmd=None).tick()
-    assert [q["question"].split()[1] for q in f.proposals] == ["Okay"]
+    assert [q["question"].split()[1] for q in f.proposals] == ["Okay"]   # "Soll Okay mit ..."
     assert J.is_never("Projekt GEHEIM 1", "") and not J.is_never("Okay", "")
     assert J.is_never("x", "/h/.claude/projects/-home-kunde-app/s.jsonl")
     f2 = Fake(monkeypatch)
@@ -1199,14 +1194,21 @@ def test_never_env_filters_label_and_all_env_skips_asking(monkeypatch):
     assert f2.proposals == []
 
 
+def _entry(ts, kind="user", text="Baue die Seite fertig"):
+    from datetime import datetime, timezone
+    iso = datetime.fromtimestamp(ts, timezone.utc).isoformat().replace("+00:00", "Z")
+    msg = {"role": kind, "content": text}
+    return json.dumps({"type": kind, "timestamp": iso, "cwd": "/home/x/shop", "message": msg}) + "\n"
+
+
 def test_find_unbound_maps_subagents_to_parent(tmp_path):
     root = tmp_path / "projects"
     (root / "p1" / "bound1" / "subagents").mkdir(parents=True)
     (root / "p1" / "free1" / "subagents").mkdir(parents=True)
     for name in ("bound1", "free1"):
-        (root / "p1" / f"{name}.jsonl").write_text("{}")
+        (root / "p1" / f"{name}.jsonl").write_text(_entry(NOW - 5000))
         os.utime(root / "p1" / f"{name}.jsonl", (NOW - 5000, NOW - 5000))   # parent quiet
-        (root / "p1" / name / "subagents" / "agent-x.jsonl").write_text("{}")
+        (root / "p1" / name / "subagents" / "agent-x.jsonl").write_text(_entry(NOW - 5, "assistant"))
         os.utime(root / "p1" / name / "subagents" / "agent-x.jsonl", (NOW - 5, NOW - 5))
     bound_tp = str(root / "p1" / "bound1.jsonl")
     got = J.find_unbound(_relay(), NOW, W.ACTIVE_S, claude_root=root, bound_tps={bound_tp})
@@ -1218,6 +1220,22 @@ def test_find_unbound_maps_subagents_to_parent(tmp_path):
                            ) and J.find_unbound({**_relay(), "owner_session": vmulti.session_hash("free1")},
                                                 NOW, W.ACTIVE_S, claude_root=root, bound_tps={bound_tp})
     assert owner == []
+
+
+def test_find_unbound_needs_real_activity_not_a_file_touch(tmp_path):
+    """0.35.0: a transcript rewritten for bookkeeping (mtime new, last real entry old) is not
+    "active"; a recent order or assistant turn is. Positive control included."""
+    root = tmp_path / "projects"
+    (root / "p").mkdir(parents=True)
+    old = root / "p" / "old.jsonl"
+    old.write_text(_entry(NOW - 3600) + json.dumps({"type": "last-prompt", "lastPrompt": "x"}) + "\n")
+    os.utime(old, (NOW - 5, NOW - 5))
+    new = root / "p" / "new.jsonl"
+    new.write_text(_entry(NOW - 3600) + _entry(NOW - 30, "assistant", "Mache weiter"))
+    os.utime(new, (NOW - 5, NOW - 5))
+    got = J.find_unbound(_relay(), NOW, J.PROPOSE_ACTIVE_S, claude_root=root)
+    assert [g["tp"] for g in got] == [str(new)]
+    assert got[0]["project"] == "shop" and "/home" not in got[0]["label"]
 
 
 def test_subagent_activity_keeps_parent_arbeitet(tmp_path):
@@ -1250,15 +1268,17 @@ def test_opt_ins_end_with_the_call(monkeypatch):
 
 
 def test_unbound_label_uses_transcript_cwd_not_bare_session(tmp_path):
-    """Live 28.10.: the card read "Session Session arbeitet ..." (no title, cwd unknown)."""
+    """Live 28.10.: the card read "Session Session arbeitet ..."; 0.35.0: the project folder,
+    never a hex suffix, and the card asks in the exact format."""
     from voicehook_agent import watchjoin as J
     tp = tmp_path / "abcd1234-0000.jsonl"
     tp.write_text(json.dumps({"type": "user", "cwd": "/home/x/wt-shop", "message": {"content": "hi"}}) + "\n")
     label = J.label_for(tp.stem, str(tp))
-    assert label.startswith("wt-shop ") and label != "Session"
-    q = J.proposal_body(label, "crown", 0.0, 120.0)["question"]
-    assert q.startswith("Session wt-shop ") and "Session Session" not in q
-    assert J.proposal_body("Session 1a2b", "crown", 0.0, 120.0)["question"].startswith("Session 1a2b arbeitet")
+    assert label == "wt-shop"
+    q = J.proposal_body(label, "crown", 0.0, 120.0, "Kartenansicht")["question"]
+    assert q == "Soll wt-shop mit Thema Kartenansicht in den Call?"
+    en = J.proposal_body(label, "crown", 0.0, 120.0, "card view", lang="en")
+    assert en["question"] == "Should wt-shop join the call with topic card view?" and en["options"] == ["Yes", "No"]
 
 
 def test_credential_is_the_newest_call_not_the_first_by_name():
@@ -1306,16 +1326,11 @@ def test_one_watcher_per_machine_whatever_state_dir(monkeypatch, tmp_path):
     assert "VOICEHOOK_STATE_DIR" not in seen["env"]
 
 
-def test_summary_card_at_most_once_per_machine_in_15_min(monkeypatch):
+def test_no_summary_card_ever(monkeypatch):
     f = Fake(monkeypatch)
     f.unbound = [_cand(key=f"u{i}", label=f"S{i}") for i in range(3)]
     f.watcher(cmd=None).tick()
-    f2 = Fake(monkeypatch)                      # a re-import looks like a new call
-    f2.rel = {**f2.rel, "token": "tok" + "re1"}
-    f2.unbound = [_cand(key=f"u{i}", label=f"S{i}") for i in range(3)]
-    f2.watcher(cmd=None).tick()
-    assert len(f.proposals) == 1 and not any("parallel" in p["question"] for p in f2.proposals)
-
+    assert len(f.proposals) == 3 and not any("parallel" in p["question"] for p in f.proposals)
 
 def test_never_sessions_are_hidden_not_only_unproposed(monkeypatch):
     monkeypatch.setenv(J.ENV_NEVER, "se-testwall")

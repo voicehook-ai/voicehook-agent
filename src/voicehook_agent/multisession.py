@@ -762,22 +762,26 @@ def classify(event: dict) -> tuple[str, str] | None:
 # session label
 # --------------------------------------------------------------------------- #
 def _clean_label(raw: object) -> str:
-    s = re.sub(r"[|:]", " ", vact.scrub(str(raw or "")))
-    return " ".join(s.split())[:SESSION_LABEL_MAX].strip()
+    """One line, no '|' / ':', at most 40 chars; 0.35.0 cut at a word ("... Selbstsichtb")."""
+    s = " ".join(re.sub(r"[|:]", " ", vact.scrub(str(raw or ""))).split())
+    if len(s) <= SESSION_LABEL_MAX:
+        return s.strip()
+    cut = s[:SESSION_LABEL_MAX + 1].rsplit(" ", 1)[0].rstrip(" .,;-")
+    return cut if len(cut) >= SESSION_LABEL_MAX // 2 else s[:SESSION_LABEL_MAX].strip()
 
 
-def _transcript_title(path: object) -> str:
-    """Session name from the transcript's tail: the last `custom-title` (set with /rename),
-    else the last `ai-title` (Claude Code's generated name, derived from the conversation)."""
+def _transcript_titles(path: object) -> tuple[str, str]:
+    """(custom-title set with /rename, ai-title = Claude Code's generated name) from the
+    transcript's tail, '' each when missing."""
     if not isinstance(path, str) or not path:
-        return ""
+        return "", ""
     try:
         with open(path, "rb") as f:
             f.seek(0, os.SEEK_END)
             f.seek(max(0, f.tell() - TRANSCRIPT_TAIL))
             data = f.read().decode("utf-8", "replace")
     except OSError:
-        return ""
+        return "", ""
     custom = ai = ""
     for line in data.splitlines():
         if '"custom-title"' not in line and '"ai-title"' not in line:
@@ -792,7 +796,14 @@ def _transcript_title(path: object) -> str:
             custom = d["customTitle"] or custom
         elif d.get("type") == "ai-title" and isinstance(d.get("aiTitle"), str):
             ai = d["aiTitle"] or ai
-    return custom.strip() or ai.strip()
+    return custom.strip(), ai.strip()
+
+
+def _transcript_title(path: object) -> str:
+    """Session name from the transcript's tail: the last `custom-title` (set with /rename),
+    else the last `ai-title` (Claude Code's generated name, derived from the conversation)."""
+    custom, ai = _transcript_titles(path)
+    return custom or ai
 
 
 def label_suffix(session_id: object) -> str:
@@ -803,17 +814,26 @@ def label_suffix(session_id: object) -> str:
 
 
 def session_label(event: dict, cached: str = "") -> str:
-    """$VOICEHOOK_SESSION_LABEL > custom-title (/rename) > ai-title of the transcript >
-    the label seen before > `<basename of cwd> <label_suffix>` > `Session`. Max 40."""
-    for raw in (os.environ.get(LABEL_ENV), _transcript_title(event.get("transcript_path"))):
+    """$VOICEHOOK_SESSION_LABEL > custom-title (/rename) > the name the Session Watcher
+    derived from the session's order (sessionnames.py) > ai-title of the transcript > the
+    label seen before > the project folder, unique on this machine (`oliver`, `oliver 2`) >
+    `Session`. Max 40. 0.35.0: never an id; the former `<folder> <4 hex>` fallback is gone
+    (a cached label of that shape is ignored)."""
+    from . import sessionnames as vnames
+    env = _clean_label(os.environ.get(LABEL_ENV))
+    if env:
+        return env
+    custom, ai = _transcript_titles(event.get("transcript_path"))
+    skey = session_hash(event.get("session_id"))
+    for raw, own in ((custom, True), (vnames.derived_name(skey), False), (ai, False)):
         lbl = _clean_label(raw)
-        if lbl:
+        if lbl and (own or not vnames.is_slug(lbl)):
             return lbl
-    if cached:
+    sfx = label_suffix(event.get("session_id"))
+    if cached and cached != "Session" and not (sfx and cached.endswith(" " + sfx)):
         return cached
-    suffix = label_suffix(event.get("session_id"))
-    base = _clean_label(vact.basename(event.get("cwd")))[:SESSION_LABEL_MAX - 5].strip()
-    lbl = f"{base} {suffix}".strip() if base else ""
+    base = _clean_label(vact.basename(event.get("cwd")))
+    lbl = vnames.folder_name(skey, base, time.time()) if base else ""
     return lbl or "Session"
 
 
