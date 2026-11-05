@@ -1442,10 +1442,10 @@ class Watcher:
                         continue        # the account's choice is known here already
                     self.apply_pick(rel, str(p["id"]), bool(p.get("on")), now)
                 picks = vnames.picks()
-            # switched on before (another call, a restart): in this call too
+            # 0.35.6: switched on in an earlier call: only scope=machine pulls it into this one
             sub = J.load(rel)["subscribed"]
             for e in L.ids.values():
-                if picks.get(e["key"]) is True and e["key"] not in sub and \
+                if scope_machine() and picks.get(e["key"]) is True and e["key"] not in sub and \
                         e["key"] not in {x["key"] for x in sessions}:
                     self.subscribe(rel, e, now)
         except vrelayops.RelayError:
