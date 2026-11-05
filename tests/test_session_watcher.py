@@ -261,12 +261,18 @@ def test_list_groups_data_subagents_under_parent_and_picks_persist(monkeypatch, 
     w.tick()
     key = vmulti.session_hash("main1")
     assert N.picks()[key] is True and key in J.load(w.pick(NOW))["subscribed"]
-    # a new call (new watcher, empty call state): switched-on sessions join by themselves
+    # a new call (new watcher, empty call state): 0.35.6 scope=call, nothing is pulled in by itself
     J.clear()
     w2 = f.watcher()
     w2.tick()
     w2.tick()
+    assert key not in J.load(w2.pick(NOW))["subscribed"]
+    # scope=machine (opt-in, old behaviour): switched-on sessions join by themselves
+    monkeypatch.setenv("VOICEHOOK_WATCH_SCOPE", "machine")
+    w2.tick()
+    w2.tick()
     assert key in J.load(w2.pick(NOW))["subscribed"]
+    monkeypatch.delenv("VOICEHOOK_WATCH_SCOPE")
     # switch off: never covered, never proposed
     f.picks = [{"id": top["id"], "on": False, "at": NOW}]
     w2.tick()

@@ -250,6 +250,7 @@ def test_last_assistant_text_claude_and_codex(tmp_path):
 
 def test_hook_event_recorded_in_registry(tmp_path):
     vmulti.write_relay(URL, TOK, "room", 3600, owner_session="someoneelse")
+    vmulti.write_helper("imported", URL, TOK, "r", 3600, owner_session=vmulti.session_hash("sess-1234567890"))
     ev = json.dumps({"hook_event_name": "Stop", "session_id": "sess-1234567890", "cwd": "/x/proj",
                      "transcript_path": "/x/t.jsonl"})
     now = time.time()
@@ -260,6 +261,68 @@ def test_hook_event_recorded_in_registry(tmp_path):
     rel = _relay()
     got = W.discover(rel, now, ps=lambda: "", claude_root=tmp_path / "none", codex_root=tmp_path / "none")
     assert len(got) == 1 and got[0]["ev"] == "stop"
+
+
+def _foreign_session(now):
+    """A local session of the machine that reports through relay.json of someone else's join."""
+    ev = json.dumps({"hook_event_name": "Stop", "session_id": "fremd-1234567890", "cwd": "/x/privat",
+                     "transcript_path": "/x/privat.jsonl"})
+    assert vmulti.handle_event(ev, now=now, post=lambda line: None) is not None
+
+
+def test_scope_call_foreign_local_session_not_reported(tmp_path, monkeypatch):
+    now = time.time()
+    vmulti.write_relay(URL, TOK, "r", 3600, owner_session="codexowner")
+    _foreign_session(now)
+    kw = {"ps": lambda: "", "claude_root": tmp_path / "none", "codex_root": tmp_path / "none"}
+    assert W.discover(_relay(), now, **kw) == []
+    monkeypatch.setenv("VOICEHOOK_WATCH_SCOPE", "machine")      # opt in: the old behaviour
+    assert [g["tp"] for g in W.discover(_relay(), now, **kw)] == ["/x/privat.jsonl"]
+
+
+def test_scope_call_joining_session_listed_when_it_holds_the_credential(tmp_path):
+    """The credential of this call belongs to session X (helper entry bound to it): X is in."""
+    now = time.time()
+    vmulti.write_helper("kollege", URL, TOK, "r", 3600, owner_session=vmulti.session_hash("sess-1234567890"))
+    ev = json.dumps({"hook_event_name": "Stop", "session_id": "sess-1234567890", "cwd": "/x/p",
+                     "transcript_path": "/x/p.jsonl"})
+    assert vmulti.handle_event(ev, now=now, post=lambda line: None) is not None
+    _foreign_session(now)
+    got = W.discover(_relay(), now, ps=lambda: "", claude_root=tmp_path / "n", codex_root=tmp_path / "n")
+    assert [g["tp"] for g in got if g["tp"]] == ["/x/p.jsonl"]
+
+
+def test_scope_call_joiner_itself_still_excluded_from_helpers(tmp_path):
+    now = time.time()
+    owner = vmulti.session_hash("owner-1234567890")
+    vmulti.write_relay(URL, TOK, "r", 3600, owner_session=owner)
+    me = {"label": "Owner", "tp": "/x/o.jsonl", "ev": "stop", "ev_at": now, "at": now}
+    vmulti._with_state(lambda st: st.setdefault("sessions", {}).update({owner: me}))
+    got = W.discover(_relay(owner_session=owner), now, ps=lambda: "", claude_root=tmp_path / "n",
+                     codex_root=tmp_path / "n")
+    assert got == []     # it feeds the call itself (unchanged)
+
+
+def test_scope_call_imported_helper_of_other_call_not_listed(tmp_path):
+    vmulti.write_helper("anderer", URL, "tok-other-call-xx", "andererraum", 3600, owner_session="")
+    vmulti.write_helper("meiner", URL, TOK, "r", 3600, owner_session="")
+    got = W.discover(_relay(), time.time(), ps=lambda: "", claude_root=tmp_path / "n", codex_root=tmp_path / "n")
+    assert [g["label"] for g in got] == ["meiner"]
+
+
+def test_decisions_only_deleted_for_sessions_in_scope(monkeypatch):
+    f = Fake(monkeypatch, [])
+    vmulti.write_helper("mein", URL, TOK, "r", 10**6, owner_session="kmine", now=NOW)
+    _slot(skey="kmine", at=NOW - 100, dec="dmine00001", label="Mein")
+    _slot(skey="kfremd", at=NOW - 100, dec="dfremd0001", label="Fremd")
+    f.t = NOW + notify.OPEN_KEEP_S + 10
+    f.rel = _relay(expires=f.t + 100)
+    f.watcher(cmd=None).tick()
+    assert f.deleted == ["dmine00001"]
+    assert [k for k, _ in notify.relay_slots()] == ["kfremd"]
+    monkeypatch.setenv("VOICEHOOK_WATCH_SCOPE", "machine")
+    f.watcher(cmd=None).tick()
+    assert f.deleted == ["dmine00001", "dfremd0001"]
 
 
 def test_watcher_model_call_hooks_do_not_register(monkeypatch):
@@ -278,6 +341,8 @@ def test_discover_unregistered_transcripts_capped_by_processes(tmp_path, monkeyp
     kw = {"ps": lambda: ps, "claude_root": tmp_path / "projects", "codex_root": tmp_path / "none"}
     assert W.discover(_relay(), time.time(), **kw) == []        # privacy default: not covered
     monkeypatch.setenv("VOICEHOOK_WATCH_ALL", "1")
+    assert W.discover(_relay(), time.time(), **kw) == []        # scope=call: not part of this call
+    monkeypatch.setenv("VOICEHOOK_WATCH_SCOPE", "machine")
     got = W.discover(_relay(), time.time(), **kw)
     assert len(got) == 1                      # one claude process = one session
     got = W.discover(_relay(), time.time(), ps=lambda: "", claude_root=tmp_path / "projects",
@@ -476,6 +541,7 @@ def test_open_decision_of_waiting_session_is_kept(monkeypatch, tmp_path):
 
 def test_decision_of_vanished_session_removed_only_when_old(monkeypatch):
     f = Fake(monkeypatch, [])
+    vmulti.write_helper("alpha", URL, TOK, "r", 10**6, owner_session="k1", now=NOW)
     _slot(at=NOW - 100)
     w = f.watcher(cmd=None)
     w.tick()
@@ -646,11 +712,15 @@ def test_unregistered_session_not_posted_by_default_but_with_optin(monkeypatch, 
     monkeypatch.setenv("VOICEHOOK_WATCH_ALL", "1")
     w.mem.clear()
     w.tick()
+    assert f.posts == []                 # scope=call: a transcript-only session is no member
+    monkeypatch.setenv("VOICEHOOK_WATCH_SCOPE", "machine")
+    w.mem.clear()
+    w.tick()
     assert [p[1] for p in f.posts] == ["Privat Gehalt (Session Watcher)"]
 
 
 def test_helper_credential_session_is_covered(monkeypatch, tmp_path):
-    vmulti.write_helper("crown", URL, TOK, "room", 3600, owner_session="")
+    vmulti.write_helper("crown", URL, TOK, "r", 3600, owner_session="")
     got = W.discover(_relay(), time.time(), ps=lambda: "", claude_root=tmp_path / "n", codex_root=tmp_path / "n")
     assert [g["label"] for g in got] == ["crown"] and got[0]["tp"] == ""
     # a registered session of the same helper is not listed twice
@@ -732,6 +802,7 @@ def test_helper_command_makes_its_session_observable(monkeypatch, tmp_path):
     tp = proj / "sess-1.jsonl"
     tp.write_text("{}\n")
     monkeypatch.setattr(R, "_config_dir", lambda: tmp_path / "cfg")
+    M.write_helper("dev-9", URL, TOK, "r", 3600, owner_session="")
     M.note_helper_session("dev-9", env={"CLAUDE_CODE_SESSION_ID": "sess-1"})
     M.note_helper_session("dev-9", env={})                                  # outside a session: nothing
     M.note_helper_session("dev-8", env={"CLAUDE_CODE_SESSION_ID": "../x"})  # never a path
