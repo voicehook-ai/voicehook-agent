@@ -112,6 +112,7 @@ ENV_INTERVAL = "VOICEHOOK_WATCH_INTERVAL"
 ENV_TOKENS = "VOICEHOOK_WATCH_TOKENS_PER_HOUR"
 ENV_MODEL_CMD = "VOICEHOOK_WATCH_MODEL_CMD"
 ENV_ALL = "VOICEHOOK_WATCH_ALL"      # 1 = also sessions only found by their transcript (privacy: off)
+ENV_SCOPE = "VOICEHOOK_WATCH_SCOPE"   # call (default) | machine = every local session (old behaviour)
 ENV_CHILD = "VOICEHOOK_WATCH_CHILD"   # set for the model command: its hooks must not report
 LOCK_NAME = "watch.lock"
 LOG_NAME = "watch.log"
@@ -647,6 +648,38 @@ def watch_all(env=None) -> bool:
     return str(env.get(ENV_ALL) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def scope_machine(env=None) -> bool:
+    """VOICEHOOK_WATCH_SCOPE=machine: opt in to the pre-0.35.6 behaviour (every local session
+    of the machine that reports through the relay). Default = call."""
+    env = os.environ if env is None else env
+    return str(env.get(ENV_SCOPE) or "").strip().lower() == "machine"
+
+
+def same_call(entry: dict, rel: dict) -> bool:
+    """A helper entry is a credential of THIS call: same room, else (no room known) same token."""
+    r1, r2 = str(entry.get("room") or ""), str(rel.get("room") or "")
+    if r1 and r2:
+        return r1 == r2
+    t1, t2 = str(entry.get("token") or ""), str(rel.get("token") or "")
+    return bool(t1) and t1 == t2
+
+
+def call_members(rel: dict, now: float) -> tuple[set[str], set[str]]:
+    """(session hashes, helper names) explicitly registered for THIS call: the usable helper
+    entries (helper-import, or a relay-route entry of an own session) with the call's room.
+    A session that merely falls back to relay.json of someone else's join is NOT a member."""
+    keys: set[str] = set()
+    names: set[str] = set()
+    for p, e in vmulti._helper_entries():
+        if vmulti._usable(e, p, now) is None or not same_call(e, rel):
+            continue
+        if e.get("owner_session"):
+            keys.add(str(e["owner_session"]))
+        if e.get("helper"):
+            names.add(str(e["helper"]))
+    return keys, names
+
+
 def discover(rel: dict, now: float, *, ps=None, claude_root: Path | None = None,
              codex_root: Path | None = None) -> list[dict]:
     """Local sessions of THIS call: [{key, label, agent, tp, ev, ev_text, ev_at}].
@@ -655,9 +688,16 @@ def discover(rel: dict, now: float, *, ps=None, claude_root: Path | None = None,
     credential (helpers/<label>.json). Privacy: other sessions of the machine (private or
     customer work on a shared box) are NOT covered; only with VOICEHOOK_WATCH_ALL=1 also
     unregistered sessions whose transcript changed recently (at most as many as agent
-    processes run). Never raises."""
+    processes run).
+    0.35.6 scope=call (default): a registry entry counts only when the session has its own
+    helper entry for THIS call (owner_session == its hash, or the entry's name == its label
+    key; same room as `rel`); the transcript scan of VOICEHOOK_WATCH_ALL only finds sessions
+    of that set. VOICEHOOK_WATCH_SCOPE=machine = every session of the machine as before.
+    Never raises."""
     out: list[dict] = []
     try:
+        machine = scope_machine()
+        m_keys, m_names = (set(), set()) if machine else call_members(rel, now)
         owner = str(rel.get("owner_session") or "") if not rel.get("helper") else ""
         try:
             st = json.loads((vact.state_root() / vmulti.STATE_NAME).read_text(encoding="utf-8"))
@@ -667,6 +707,8 @@ def discover(rel: dict, now: float, *, ps=None, claude_root: Path | None = None,
         seen_tp: set[str] = set()
         for key, me in (reg or {}).items():
             if not isinstance(me, dict) or not me.get("label") or key == owner:
+                continue
+            if not machine and key not in m_keys and vmulti.helper_key(me["label"]) not in m_names:
                 continue
             at = max(float(me.get("at") or 0), float(me.get("ev_at") or 0),
                      float(me.get("seen_at") or 0))
@@ -683,7 +725,7 @@ def discover(rel: dict, now: float, *, ps=None, claude_root: Path | None = None,
                         "ev_text": str(me.get("ev_text") or ""),
                         "ev_at": float(me.get("ev_at") or 0)})
         for p, e in vmulti._helper_entries():   # (b) helper credential = in this call
-            if vmulti._usable(e, p, now) is None:
+            if vmulti._usable(e, p, now) is None or (not machine and not same_call(e, rel)):
                 continue
             name = str(e.get("helper") or "")
             if not name or any(vmulti.helper_key(x["label"]) == name or x["key"] == e.get("owner_session")
@@ -706,6 +748,8 @@ def discover(rel: dict, now: float, *, ps=None, claude_root: Path | None = None,
                 stem = Path(p).stem
                 skey = vmulti.session_hash(stem)
                 if skey == owner or any(s["key"] == skey for s in out):
+                    continue
+                if not machine and skey not in m_keys:
                     continue
                 label = J.label_for(stem, p)
                 if agent == "codex":   # 0.35.0: never the hex suffix, the folder (unique) instead
@@ -1721,9 +1765,13 @@ class Watcher:
     def duty_activity(self, rel: dict, label: str, sentence: str) -> dict:
         return post_activity(rel, label, sentence)
 
-    def duty_decisions(self, rel: dict, views: dict[str, tuple[str, float]], now: float) -> str:
-        """Remove decisions of local sessions that went on / are obsolete. OK or END."""
+    def duty_decisions(self, rel: dict, views: dict[str, tuple[str, float]], now: float,
+                       scope: set[str] | None = None) -> str:
+        """Remove decisions of local sessions that went on / are obsolete. OK or END.
+        0.35.6: `scope` (session hashes of this call) limits it to those sessions; None = all."""
         for skey, slot in notify.relay_slots():
+            if scope is not None and notify._base(skey) not in scope and skey not in scope:
+                continue
             if (views.get(skey) or ("", 0.0))[0] == FRAGE:
                 continue            # still waiting: the question is open, keep it
             at = float(slot.get("at") or 0)
@@ -1870,7 +1918,9 @@ class Watcher:
         self.duty_join(rel, sessions, now)
         self.duty_fetch(rel, now)
         self.duty_cleanup(rel, live)
-        if self.duty_decisions(rel, views, now) == END:
+        scope = None if scope_machine() else (
+            {x["key"] for x in sessions} | call_members(rel, now)[0] | {str(rel.get("owner_session") or "")}) - {""}
+        if self.duty_decisions(rel, views, now, scope) == END:
             return END
         self.fails = self.fails + 1 if bad else 0
         log("tick", sessions=len(sessions), interval=minutes, src=src, used=self.used(now),

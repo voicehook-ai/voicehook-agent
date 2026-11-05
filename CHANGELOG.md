@@ -3,6 +3,10 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## Unreleased
+
+- **Session Watcher reports only sessions of its own call.** Bug 05.11.: a call started by a Codex agent showed every local Claude Code session of the machine as helper (they fell back to `relay.json` of that join). Now a session counts only when it is the joining session or has its own helper entry for this call (`helper-import` / relay route with the same room; bound to its session or named like its label). Everything else is not posted, and decisions are cleaned up only for those sessions. `VOICEHOOK_WATCH_ALL=1` is unchanged but also stays inside that scope. Opt in to the old behaviour with `VOICEHOOK_WATCH_SCOPE=machine` (default `call`).
+
 ## 0.35.5
 
 - helper_decision carries `option_label` (the chosen option text) next to `option`, so a router never has to guess which option the human picked (server change voicehook-v4 #793).

@@ -133,7 +133,7 @@ Watcher (0.32.0): while a call is active, `join` and `helper-import` start ONE d
 one whole German sentence (cheapest model, `claude -p --model haiku`, hourly token cap, else a
 fixed sentence), adds an activity line on state changes and removes decisions of sessions that
 went on. Interval 1/5/10/15 min (call page > `--interval` > 15); it ends with the call;
-`VOICEHOOK_WATCH=0` turns it off
+`VOICEHOOK_WATCH=0` turns it off; only sessions of the own call are covered (`VOICEHOOK_WATCH_SCOPE=machine` = every local session)
 ([watcher](docs/CLI.md#the-watcher-one-process-per-machine-keeps-the-board-current-watch-0320)).
 
 Session Watcher (0.34.0, named so since 0.35.0): `voicehook-agent connect` once (approve the code in the browser), then
