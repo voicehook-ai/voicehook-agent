@@ -228,7 +228,7 @@ def test_derive_names_model_once_per_new_order_no_content_in_log(monkeypatch, tm
 
 
 # ----- session list ----------------------------------------------------------------------
-def test_list_groups_data_subagents_under_parent_and_picks_persist(monkeypatch, tmp_path):
+def test_list_heads_only_and_picks_persist(monkeypatch, tmp_path):
     root = tmp_path / "claude"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
     p = root / "projects"
@@ -249,11 +249,10 @@ def test_list_groups_data_subagents_under_parent_and_picks_persist(monkeypatch, 
     w.tick()
     entries = f.lists[-1]
     names = [e["name"] for e in entries]
-    assert names == ["shop", "Tests reparieren", "shop 2"]
-    top, sub, older = entries
-    assert sub["parent"] == top["id"] and sub["parent_name"] == "shop" and sub["agent"] == "subagent"
-    assert sub["topic"] == ""                              # the description is the name already
-    assert top["project"] == sub["project"] == ""   # no repository: no project; subagents inherit
+    assert names == ["shop", "shop 2"]                     # 0.35.6: heads only, no subagent
+    top, older = entries
+    assert all(e["parent"] is None and e["agent"] == "claude" for e in entries)
+    assert top["project"] == ""                            # no repository: no project
     assert older["last_active"] < NOW - 2 * 86400 and top["on"] is False and top["in_call"] is False
     assert all("main1" not in json.dumps(e) and "/" not in e["name"] for e in entries)   # no ids, no paths
     # switch on in the list: kept on the machine, subscribed now
@@ -280,7 +279,8 @@ def test_list_groups_data_subagents_under_parent_and_picks_persist(monkeypatch, 
     assert str(old)  # listed above as "shop 2"
 
 
-def test_subagent_picked_shows_belongs_to_and_gets_no_card(monkeypatch, tmp_path):
+def test_subagent_picked_before_is_no_longer_covered(monkeypatch, tmp_path):
+    """0.35.6: a subagent switched on in an older list (0.35.0) gets no board any more."""
     root = tmp_path / "claude"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
     tp = _session(root / "projects", "main1", [_user("Baue die Seite")])
@@ -288,17 +288,34 @@ def test_subagent_picked_shows_belongs_to_and_gets_no_card(monkeypatch, tmp_path
     d.mkdir(parents=True)
     (d / "agent-z9.jsonl").write_text(_assistant("ok", ts=NOW - 10))
     os.utime(d / "agent-z9.jsonl", (NOW - 10, NOW - 10))
-    (d / "agent-z9.meta.json").write_text(json.dumps({"description": "Tests reparieren"}))
     f = _Fake(monkeypatch)
     w = f.watcher(related_fn=lambda *a: True)
+    st = J.load(w.pick(NOW))
+    st["subscribed"]["sub-0123456789abcdef"] = {"label": "Tests reparieren", "tp": str(d / "agent-z9.jsonl"),
+                                                "at": NOW, "parent": "shop"}
+    J.save(st)
     w.tick()
-    sub = next(e for e in f.lists[-1] if e["parent"])
-    f.picks = [{"id": sub["id"], "on": True, "at": NOW}]
     w.tick()
-    w.tick()
-    boards = [(lab, b) for lab, b in f.posts if lab.startswith("Tests reparieren")]
-    assert boards and boards[-1][1]["doing"].startswith("gehört zu: shop.")
-    assert not any("Tests reparieren" in p["question"] for p in f.props)
+    assert not any(lab.startswith("Tests reparieren") for lab, _b in f.posts)
+    assert all(not e["parent"] for e in f.lists[-1])
+
+
+def test_list_same_name_once_the_one_in_the_call_wins(monkeypatch, tmp_path):
+    """0.35.6: the same head twice (two transcripts with one /rename title, e.g. after
+    /resume) is listed once: the one in the call, else the newest."""
+    root = tmp_path / "claude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    title = json.dumps({"type": "custom-title", "customTitle": "Ravi"}) + "\n"
+    p = root / "projects"
+    _session(p, "new1", [_user("a"), title], mtime=NOW - 5)
+    _session(p, "old1", [_user("b"), title], mtime=NOW - 50)
+    L = WS.Lister()
+    got = L.build(p, NOW, set(), set(), {})
+    assert [e["name"] for e in got] == ["Ravi"] and got[0]["id"] == WS.session_id_of(vmulti.session_hash("new1"))
+    got = L.build(p, NOW, {vmulti.session_hash("old1")}, set(), {})
+    assert [e["name"] for e in got] == ["Ravi"] and got[0]["in_call"] is True
+    assert got[0]["id"] == WS.session_id_of(vmulti.session_hash("old1"))
+    assert set(L.ids) == {got[0]["id"]}
 
 
 def test_list_route_missing_is_quiet(monkeypatch):

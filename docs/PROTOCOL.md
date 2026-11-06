@@ -60,7 +60,9 @@ stdin (JSONL):
 | `operator.inject`     | out       | force voice-ai to react (user-role)    |
 | `operator.backchannel`| out       | silent operator↔agent side-channel, relayed as-is (#10) |
 | `operator.status`     | out       | your status board `{doing, open[], done[], faq?[{q, a}], project?}` (0.7.0, `status` command; `faq` 0.10.0; `project` 0.21.0 = `--project`, overrides the derived project of the focus filter); replaces the last one, never spoken |
-| `operator.activity`   | room      | 0.10.0: `{lines[], ts, project?}`, newest 15 tool-call lines of the coding agent (Pre/PostToolUse hook, 0.13.0 also `voicehook-agent activity` notes), on change, at most every 5 s; `project` (0.21.0) = the last `activity --project` of this join |
+| `operator.activity`   | room      | 0.10.0: `{lines[], ts, project?}`, newest 15 tool-call lines of the coding agent (Pre/PostToolUse hook, 0.13.0 also `voicehook-agent activity` notes), on change, at most every 5 s; `project` (0.21.0) = the last `activity --project` of this join; 0.35.6 `priority: "high"` / `decision: <id>` / `reply: <id>` from `activity --priority/--decision/--reply`, once with the packet holding that line |
+| `operator.decision_ack` | to worker | 0.35.6: `{ids[], sender}`: the main agent took the answers `ids` to its OWN decisions via `next`/`listen`/mid-turn (`sender` = own identity), once per id |
+| `delta.msg`          | in        | 0.35.6: worker → agents `{id, to: [identity] \| "all", text}`; for us: `next` event `{type: "delta_msg", id, text, reply_hint}` (wakes `listen`); answer `activity --reply <id>` = field `reply` on `operator.activity` |
 | `operator.alive`     | room      | 0.8.0: `{alive, ts, idle_s}` every 10 s while the agent serves `next`/`say` (within 15 s); nothing while orphaned; `alive:false` on leave. The web UI dims the operator after ~20 s without it |
 | `operator.say_status` | in    | 0.9.0: `{seq, state, spoken_chars}` per state change of your say; `next` carries `say_status`, `says` the table |
 | `operator.status_request` | in    | the user asked what you are doing; `next` yields `{"type":"status_request"}` |

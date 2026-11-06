@@ -111,13 +111,13 @@ def subscribed_sessions(rel: dict, taken: set[str]) -> list[dict]:
     for key, e in load(rel)["subscribed"].items():
         if key in taken or not isinstance(e, dict) or not e.get("tp") or not e.get("label"):
             continue
+        if e.get("parent"):   # 0.35.6: a subagent picked before (0.35.0): heads only now
+            continue
         label = str(e["label"])
         if label == "Session":   # stored before 0.33.2: name it from the transcript now
             label = label_for(Path(str(e["tp"])).stem, str(e["tp"]))
         item = {"key": key, "label": label, "agent": "claude", "tp": str(e["tp"]),
                 "ev": "", "ev_text": "", "ev_at": 0.0}
-        if e.get("parent"):   # 0.35.0: a subagent picked in the session list
-            item["parent"] = str(e["parent"])
         out.append(item)
     return out
 

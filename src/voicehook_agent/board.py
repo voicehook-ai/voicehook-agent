@@ -27,10 +27,16 @@ The hook (`voicehook-agent-hook post-tool-use|user-prompt-submit|stop|...`) now:
 * delivers the human's answers to the session's own questions (fetch_answers / deliver):
   additionalContext, or on Stop `decision: block` + reason, exactly once per answer.
 
-Subagents (Agent tool, 0.21.1): their hook events carry the parent's session_id plus
-agent_id; each subagent is its own helper (key session + agent_id hash), also inside the
-joining session: own board name (the `from` it used, else `<agent_type> <4 hex>`), reminder
-only after 3 min of work without a board, state only once it has a board.
+Subagents (Agent tool): their hook events carry the parent's session_id plus agent_id.
+0.35.6 (Oliver 06.11.: only the main sessions the user sees in his own UI): a subagent has
+NO board, state, reminder or answers of its own; its events are dropped here (0.21.1 gave
+each one its own board, which showed up as extra heads). Its `voicehook-agent status` runs
+with the parent's session id, so it lands on the parent's board anyway.
+
+Only sessions that take part in the call send a state (0.35.6): an own helper credential
+(helpers/<name>.json: helper-import, or picked/subscribed in the session list), a legacy
+helper relay.json, or a board the session set itself. A session that merely falls back to
+relay.json of someone else's join sends nothing, and never under the generic name `Session`.
 
 Name: the `from` this session already used for its board, else the hook's session label
 (multisession.session_label: $VOICEHOOK_SESSION_LABEL > /rename title > ai-title > cwd
@@ -472,10 +478,7 @@ def _session_key(event: dict) -> str:
     return vmulti.session_hash(event.get("session_id")) or vmulti.own_session_hash()
 
 
-def _agent_label(event: dict, skey: str) -> str:
-    """Name of a subagent without its own `from` yet: `<agent_type> <4 hex>` (max 40)."""
-    kind = vmulti._clean_label(event.get("agent_type") or "Subagent")[:30] or "Subagent"
-    return f"{kind} {vmulti._h(str(event.get('agent_id') or ''), 'vh-agent-label')[:4]}"
+GENERIC_NAME = "Session"   # session_label's last fallback: never a board of its own
 
 
 def _label(event: dict, skey: str) -> str:
@@ -563,19 +566,17 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
         rel = vmulti.load_relay(now, session=_session_key(event))  # 0.22.2: own helper entry
         if rel is None:
             return None
+        if str(event.get("agent_id") or "").strip():
+            return None  # 0.35.6: a subagent never has a board, state or reminder of its own
         skey = _session_key(event)
-        agent = str(event.get("agent_id") or "").strip()
-        if not skey or (not agent and vmulti.relay_owned(rel, skey)):  # 0.25.0 owned_by
+        if not skey or vmulti.relay_owned(rel, skey):  # 0.25.0 owned_by
             return None  # the joining session: own board (status_due), own `next`
-        if agent:  # 0.21.1: a subagent (Agent tool) has its own board, name, state, answers
-            skey = f"{skey}-a{vmulti._h(agent, 'vh-agent')[:8]}"
         t = time.time() if now is None else now
         room = _room(rel)
         local = vmulti._is_local(rel)
         # 0.22.2: this session takes part in the call: its own helper credential (entry, or
-        # a legacy helper relay.json), or a subagent of the router (0.21.1 own boards)
-        helper = bool(rel.get("helper")) or vmulti.is_legacy_helper(rel) or bool(
-            agent and vmulti.relay_owned(rel, base_key(skey)))
+        # a legacy helper relay.json)
+        helper = bool(rel.get("helper")) or vmulti.is_legacy_helper(rel)
         got = asked = doing_set = None
         seen_answers = 0
         recorded = None
@@ -599,7 +600,7 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
                                            and str(event.get("tool_name") or "") == "AskUserQuestion")
         need = name_ev in NAME_EVENTS or got is not None or asked is not None or is_ask \
             or not _known_name(skey)
-        label = (_agent_label(event, skey) if agent else _label(event, skey)) if need else ""
+        label = _label(event, skey) if need else ""
         # 0.21.4: a Stop with an open question (own decide, or the reply asks) is `wartet`
         waits = name_ev == "Stop" and _stop_waits(event, skey, t)
         spid = 0 if _known_pid(skey) else session_pid()
@@ -634,15 +635,15 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
             me["asks"] = asks
             for k in sorted(asks, key=lambda k: -_float(asks[k]))[:1] if seen_answers else []:
                 _open_add(me, k, -seen_answers)  # 0.21.4: the session read answers itself
-            name = str(me.get("from") or me.get("name") or label or "Session")
+            name = str(me.get("from") or me.get("name") or label or GENERIC_NAME)
             out: dict = {"name": name}
             if name_ev in WORK_EVENTS:
                 me["work_at"] = t
             state = next_state(event, me)
             if state == STATE_IDLE and waits:
                 state = STATE_WAIT
-            if agent and not me.get("from"):
-                state = None     # a subagent's state goes out once it has its own board
+            if not (helper or me.get("from")) or name == GENERIC_NAME:
+                state = None     # 0.35.6: not in the call (only falls back to relay.json)
             # 0.21.4: local relay too; a Stop always goes out (heals a lost or late update)
             if state and not _off(STATE_ENV_OFF) and (
                     state != me.get("state") or name_ev == "Stop"
@@ -677,10 +678,7 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
             if got is None and name_ev in REMIND_EVENTS and (helper or me.get("from")):
                 at = _float(me.get("at"))
                 age = None if not at else t - at
-                # a subagent without a board is reminded only once it works for 3 min (a
-                # short Explore/Read subagent never gets the line)
-                young = agent and at == 0 and t - _float(me.get("first_at")) < REMIND_AFTER_S
-                if not young and (age is None or age >= REMIND_AFTER_S) and \
+                if (age is None or age >= REMIND_AFTER_S) and \
                         t - _float(me.get("reminded_at")) >= REMIND_GAP_S:
                     me["reminded_at"] = t
                     out["remind"] = reminder_text(name, None if me.get("cleared") else age, local)
