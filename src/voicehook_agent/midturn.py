@@ -35,7 +35,8 @@ import time
 
 ENV_OFF = "VOICEHOOK_MIDTURN_EVENTS"
 # 0.21.9: "revise:stale" = only the stale drops (a normal revise stays for `listen`)
-TYPES = ("user", "decision", "helper_decision", "onboarding", "revise:stale")
+TYPES = ("user", "decision", "helper_decision", "onboarding", "revise:stale",
+         "delta_msg")  # 0.35.6
 WAIT_S = 20.0
 TIMEOUT_S = 1.0
 TEXT_MAX = 400
@@ -73,6 +74,9 @@ def _line(ev: dict, now: float, last_say: float | None) -> str:
         cmds = ev.get("commands") if isinstance(ev.get("commands"), dict) else {}
         inv = "; ".join(f"`{c}`" for c in (cmds.get("invite") or [])[:4])
         return f"{str(ev.get('text') or '').strip()[:300]}{' Befehle: ' + inv + '.' if inv else ''}"
+    if typ == "delta_msg":  # 0.35.6: Delta asks this agent (delta.msg)
+        text = " ".join(str(ev.get("text") or "").split())[:TEXT_MAX]
+        return f'Delta fragt: {text} — antworte per voicehook-agent activity --reply {ev.get("id") or ""} "<Antwort>"'
     if typ == "user":
         text = str(ev.get("text") or "").strip()[:TEXT_MAX]
         line = f"{who} hat im Call gesagt{when}: \"{text}\"."
@@ -122,7 +126,7 @@ def text_for(reply: dict) -> str | None:
     has_user = any(e.get("type") in ("user", "onboarding") for e in evs)
     tail = ("Antworte ZUERST per `voicehook-agent say \"...\"`, delegiere längere Arbeit an einen "
             "Hintergrund-Agenten, dann weiter." if has_user else
-            "" if all(e.get("stale") is True for e in evs) else
+            "" if all(e.get("stale") is True or e.get("type") == "delta_msg" for e in evs) else
             "Bestätige kurz per `voicehook-agent say`, dann handle danach.")
     return ("voicehook-Call (neu, während du arbeitest): " + " ".join(lines) + (" " + tail if tail else "")
             + f" {RULE} (Neue Ereignisse sind damit gelesen, `listen` bringt sie nicht noch einmal.)")

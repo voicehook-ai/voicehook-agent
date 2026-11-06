@@ -9,6 +9,7 @@ voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the vers
 - **Sessions not in the call send no board.** The hook sent the session state (`/state`) of every session of the machine that fell back to `relay.json` of someone else's join; the server made a board of it. Now only a session in the call sends a state: its own helper credential (helper-import, or picked in the session list), a legacy helper relay.json, or a board it set itself. Never under the generic fallback name `Session`.
 - **`activity --priority high` / `--decision <id>`:** field `priority: "high"` (Delta says the line first, in the next pause) / `decision: <id>` (the decision this line confirms, "angekommen: ...") on the `operator.activity` packet holding the line, once; helper sessions: in the relay body.
 - **Delivery ack for own decisions:** when the main agent (own join) takes the answer to its own decision via `next` / `listen` / mid-turn, the join sends `operator.decision_ack` `{ids, sender: own identity}` once per id (remembered next to the event spool, also across a join restart).
+- **Messages of Delta (`delta.msg`):** the worker sends `{id, to: [identity] | "all", text}`; addressed to us (or "all"), `next` / `listen` deliver it as event `delta_msg` `{id, text, reply_hint}` and it wakes the session like an utterance addressed to it (mid-turn hook: "Delta fragt: <text> — antworte per voicehook-agent activity --reply <id> "<Antwort>""). `activity --reply <id>` sets field `reply: <id>` on the activity packet.
 
 ## 0.35.6
 

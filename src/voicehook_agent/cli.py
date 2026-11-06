@@ -2050,6 +2050,30 @@ def _print_stale(ctl: _Control, json_mode: bool) -> None:
 
 
 TOPIC_DECISION_ACK = "operator.decision_ack"  # server decisions.py TOPIC_ACK
+TOPIC_DELTA_MSG = "delta.msg"   # 0.35.6: worker -> agents {id, to: [identity] | "all", text}
+DELTA_MSG_ID_RX = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+DELTA_MSG_TEXT_MAX = 2000
+
+
+def delta_msg_hint(mid: str, text: str) -> str:
+    return f'Delta fragt: {text} — antworte per voicehook-agent activity --reply {mid} "<Antwort>"'
+
+
+def delta_msg_event(payload: object, own: set[str]) -> dict | None:
+    """0.35.6: a `delta.msg` packet as `next` event {type: delta_msg, id, text, reply_hint}
+    when it is for us (`to` "all" or a list holding one of our identities); None otherwise."""
+    if not isinstance(payload, dict):
+        return None
+    to = payload.get("to")
+    if not (to == "all" or (isinstance(to, list) and any(isinstance(x, str) and x in own
+                                                           for x in to))):
+        return None
+    mid = str(payload.get("id") or "").strip()
+    text = " ".join(str(payload.get("text") or "").split())[:DELTA_MSG_TEXT_MAX]
+    if not DELTA_MSG_ID_RX.fullmatch(mid) or not text:
+        return None
+    return {"type": "delta_msg", "id": mid, "text": text, "ts": time.time(),
+            "reply_hint": delta_msg_hint(mid, text)}
 
 
 def own_decision_ids(evs: list) -> list[str]:
@@ -2878,6 +2902,14 @@ async def _connect_and_listen(
             # 0.23.1: a call page loaded (or failed to load) one of our image cards
             if ctl is not None and pkt.participant is not None:
                 ctl.card_acks.note(payload, getattr(pkt.participant, "identity", ""))
+        elif topic == TOPIC_DELTA_MSG:
+            # 0.35.6: a message of Delta to agents, only from the worker (agent kind); a `next`
+            # event that wakes `listen` like an utterance addressed to us (never printed)
+            if ctl is not None and getattr(pkt.participant, "kind", None) == 4:
+                ev = delta_msg_event(payload, _own_ids())
+                if ev is not None:
+                    ctl.events.put_nowait(ev)
+                    _print_event(json_mode, "system", f"({topic}) id={ev['id']}", topic=topic)
         elif topic == vdata.TOPIC:
             # 0.21.4 agent-to-agent data: a `next` event (never printed with its content)
             ev = vdata.receive_event(ctl.ident if ctl is not None else "", pkt.participant, payload)
@@ -3977,6 +4009,11 @@ def _client_request(args) -> dict:
             if not DECISION_ID_RX.fullmatch(dec.strip()):
                 raise ValueError("activity --decision: id is d + 8 hex (e.g. d1a2b3c4d)")
             req["decision"] = dec.strip()
+        rep = getattr(args, "reply", None)
+        if rep is not None:
+            if not DELTA_MSG_ID_RX.fullmatch(rep.strip()):
+                raise ValueError("activity --reply: the id of Delta's message (delta_msg event)")
+            req["reply"] = rep.strip()
         return req
     if args.cmd == "ui":
         return {"cmd": "ui", "body": vui.command(args.action, args.args, args.preset)}
@@ -4332,6 +4369,9 @@ def activity_flags(req: dict) -> dict:
     dec = str(req.get("decision") or "").strip()
     if DECISION_ID_RX.fullmatch(dec):
         out["decision"] = dec
+    rep = str(req.get("reply") or "").strip()
+    if DELTA_MSG_ID_RX.fullmatch(rep):
+        out["reply"] = rep   # 0.35.6: the answer to Delta's message (delta.msg) with this id
     return out
 
 
@@ -5058,6 +5098,9 @@ def main(argv: list[str] | None = None) -> None:
     p_act.add_argument("--decision", default=None, metavar="ID",
                        help="0.35.6: id of the decision this line confirms (d + 8 hex, from "
                             "the decision event), e.g. 'angekommen: ...' after an answer")
+    p_act.add_argument("--reply", default=None, metavar="ID",
+                       help="0.35.6: answer to Delta's message (`next`/`listen` event type "
+                            "delta_msg): its id; TEXT is the answer (field reply on the packet)")
     _add_session(p_act)
     # Decision Board: a question only the human can decide (yes/no or 2-3 options). The
     # result comes back as a `next` event type "decision". Create, change or delete.

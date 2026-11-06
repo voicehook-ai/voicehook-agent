@@ -533,6 +533,13 @@ When the main agent (own join, not a helper) takes the answer to one of its OWN 
 via `next` / `listen` (or mid-turn through the hook), the join sends `operator.decision_ack`
 `{ids: [id], sender: <own identity>}` once per id (kept next to the event spool).
 
+Delta can message the agents: the worker sends `delta.msg` `{id, to: [identity] | "all",
+text}`. When `to` is "all" or holds the own identity, `next` / `listen` deliver it as event
+`{"type": "delta_msg", id, text, reply_hint}` and it wakes the session like an utterance
+addressed to it (the mid-turn hook shows "Delta fragt: <text> — antworte per voicehook-agent
+activity --reply <id> \"<Antwort>\""). Answer with `activity --reply <id> "<answer>"`: field
+`reply: <id>` on the activity packet holding the line.
+
 ## How to speak in the call
 
 Everything you send with `say` or `--greet` is read aloud to a person on the phone. **Local style

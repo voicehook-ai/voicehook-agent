@@ -49,7 +49,8 @@ EPHEMERAL = frozenset({"restarting"})
 # 0.24.0 task/task_acked/task_due: agent-to-agent tasks (a2a.py), additive & backward compatible
 WAKE_TYPES = ("user", "decision", "helper_decision", "voicebot_left", "missed",
               "status_request", "revise", "call_end", "data", "onboarding",  # 0.21.8 onboarding
-              "task", "task_acked", "task_due")  # 0.24.0 a2a.WAKE_TYPES
+              "task", "task_acked", "task_due",  # 0.24.0 a2a.WAKE_TYPES
+              "delta_msg")  # 0.35.6: Delta's message to this agent (delta.msg)
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 

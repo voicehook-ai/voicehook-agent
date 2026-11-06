@@ -110,7 +110,7 @@ def test_help_names_the_flags(capsys):
     with pytest.raises(SystemExit):
         cli.main(["activity", "--help"])
     out = capsys.readouterr().out
-    assert "--priority" in out and "--decision" in out
+    assert "--priority" in out and "--decision" in out and "--reply" in out
 
 
 # ----- operator.decision_ack for the own decisions ------------------------------------------
@@ -158,3 +158,53 @@ def test_mid_turn_take_acks_too(tmp_path):
         assert r["events"]
     asyncio.run(run())
     assert _acks(ctl) == [{"ids": ["d33333333"], "sender": "claude-x"}]
+
+
+# ----- delta.msg -> next event delta_msg, activity --reply ----------------------------------
+def test_delta_msg_for_us_or_all_only():
+    own = {"claude-x"}
+    ev = cli.delta_msg_event({"id": "m1", "to": "all", "text": "Wie weit  ist der Deploy?"}, own)
+    assert ev["type"] == "delta_msg" and ev["id"] == "m1" and ev["text"] == "Wie weit ist der Deploy?"
+    assert ev["reply_hint"] == ('Delta fragt: Wie weit ist der Deploy? — antworte per '
+                                'voicehook-agent activity --reply m1 "<Antwort>"')
+    assert cli.delta_msg_event({"id": "m2", "to": ["claude-x", "codex-y"], "text": "x"}, own)
+    assert cli.delta_msg_event({"id": "m3", "to": ["codex-y"], "text": "x"}, own) is None
+    assert cli.delta_msg_event({"id": "m4", "to": "claude-x", "text": "x"}, own) is None
+    assert cli.delta_msg_event({"id": "bad id!", "to": "all", "text": "x"}, own) is None
+    assert cli.delta_msg_event({"id": "m5", "to": "all", "text": "  "}, own) is None
+
+
+def test_delta_msg_wakes_listen_and_mid_turn():
+    from voicehook_agent import midturn
+    assert "delta_msg" in spool.WAKE_TYPES and "delta_msg" in cli.LISTEN_WAKE
+    assert "delta_msg" in midturn.TYPES
+    t = midturn.text_for({"events": [{"type": "delta_msg", "id": "m1", "text": "Status?"}], "now": 0})
+    assert 'Delta fragt: Status? — antworte per voicehook-agent activity --reply m1 "<Antwort>"' in t
+    assert "Bestätige kurz" not in t
+
+
+def test_delta_msg_next_event_from_the_spool(tmp_path):
+    q = spool.SpoolQueue(tmp_path, armed=True)
+    ctl = _ctl(tmp_path, events=q)
+
+    async def run():
+        q.put_nowait(cli.delta_msg_event({"id": "m1", "to": "all", "text": "Status?"}, {"claude-x"}))
+        return await cli._control_handler(ctl, {"cmd": "next", "timeout": 1})
+    r = asyncio.run(run())
+    assert r["type"] == "delta_msg" and r["id"] == "m1" and "--reply m1" in r["reply_hint"]
+
+
+def test_activity_reply_field(tmp_path):
+    req = _parse(["activity", "--reply", "m1", "Deploy läuft, fertig in fünf Minuten"])
+    assert req["reply"] == "m1"
+    with pytest.raises(ValueError):
+        _parse(["activity", "--reply", "bad id!", "x"])
+    ctl = _ctl(tmp_path)
+
+    async def run():
+        r = await cli._control_handler(ctl, {"cmd": "activity", "text": "fertig gleich", "reply": "m1"})
+        await cli._publish_activity(ctl, [r["line"]])
+        await cli._publish_activity(ctl, [r["line"]])
+    asyncio.run(run())
+    a, b = _acts(ctl)
+    assert a["reply"] == "m1" and "reply" not in b
