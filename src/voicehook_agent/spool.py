@@ -36,6 +36,8 @@ from pathlib import Path
 
 EVENTS_NAME = "events.jsonl"
 CURSOR_NAME = "cursor.json"
+ACKS_NAME = "decision-acks.json"   # 0.35.6: decision ids already acknowledged to the server
+ACKS_KEEP = 200
 LEASE_S = 15.0        # an un-acked event goes out again after this (consumer died)
 RESUME_S = 600.0      # a spool left by a join restart is picked up when younger than this
 COMPACT_AT = 400      # acked events kept in the file before it is rewritten
@@ -110,6 +112,7 @@ class SpoolQueue:
         self.last_consumed: float | None = None  # clock of the last ack
         self._shown: dict[int, float] = {}  # 0.21.7: seq -> clock, shown to the agent mid-turn
         self.before_add = None  # 0.24.0: callable(event) on every wake-type event before it is queued
+        self._dec_acks: list[str] | None = None  # 0.35.6 first_decision_ack, loaded lazily
 
     # ------------------------------------------------------------------ files
     @property
@@ -215,7 +218,8 @@ class SpoolQueue:
 
     def clear(self) -> None:
         """Delete the spool files (the join leaves: no turn of the call stays on disk)."""
-        for p in (self.events_path, self.cursor_path):
+        acks = self.dir / ACKS_NAME if self.dir is not None else None
+        for p in (self.events_path, self.cursor_path, acks):
             if p is None:
                 continue
             try:
@@ -419,6 +423,33 @@ class SpoolQueue:
         while len(self._shown) > 2 * self.maxlen:
             self._shown.pop(next(iter(self._shown)))
         return out
+
+    def first_decision_ack(self, did: str) -> bool:
+        """0.35.6: True exactly once per decision id (the join then sends operator.decision_ack);
+        kept in ACKS_NAME next to the spool, so a join restart never acks twice. In memory when
+        the disk fails."""
+        did = str(did or "")
+        if not did:
+            return False
+        if self._dec_acks is None:
+            self._dec_acks = []
+            if self._disk_ok:
+                try:
+                    with open(self.dir / ACKS_NAME, encoding="utf-8") as f:
+                        got = json.load(f)
+                    self._dec_acks = [str(x) for x in got if isinstance(x, str)] \
+                        if isinstance(got, list) else []
+                except (OSError, ValueError):
+                    pass
+        if did in self._dec_acks:
+            return False
+        self._dec_acks = (self._dec_acks + [did])[-ACKS_KEEP:]
+        if self._disk_ok:
+            try:
+                _write_atomic(self.dir / ACKS_NAME, json.dumps(self._dec_acks))
+            except OSError as e:
+                self._disk_error(e)
+        return True
 
     async def get(self, timeout: float | None) -> dict | None:
         """EventQueue.get: the oldest event, consumed at once (lease + ack)."""

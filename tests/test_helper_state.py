@@ -40,8 +40,12 @@ def _relay(local_dir=None):
     if local_dir is not None:
         return ms.write_local_relay(local_dir, "room-a", owner_pid=os.getpid(), owner_session="own",
                                     now=T0 - 10)
-    return ms.write_relay(URL, TOKEN, "room-a", 3600 * 24 * 365 * 10, owner_pid=os.getpid(),
-                          owner_session="own", now=T0 - 10)
+    rel = ms.write_relay(URL, TOKEN, "room-a", 3600 * 24 * 365 * 10, owner_pid=os.getpid(),
+                         owner_session="own", now=T0 - 10)
+    # 0.35.6: a state only for a session in the call (own helper credential)
+    ms.write_helper("Helfer", URL, TOKEN, "room-a", 3600 * 24 * 365 * 10, owner_session=SK,
+                    now=T0 - 10)
+    return rel
 
 
 def ev(name="PostToolUse", **kw):
@@ -78,6 +82,8 @@ def test_stop_with_open_decide_or_question_is_wartet():
     board.handle(ev("Stop", last_assistant_message="Fertig."), now=T0 + 5)
     assert _states()[-1] == "wartet"
     POSTS.clear()
+    ms.write_helper("Helfer-2", URL, TOKEN, "room-a", 3600 * 24 * 365 * 10,
+                    owner_session=ms.session_hash("sess-2"), now=T0 - 10)
     board.handle(ev("Stop", session_id="sess-2", last_assistant_message="Soll ich mergen?"),
                  now=T0 + 6)
     assert _states() == ["wartet"]

@@ -280,6 +280,7 @@ def _states():
 
 def test_state_from_hook_events_only_on_change(monkeypatch):
     _relay()
+    _helper()   # 0.35.6: state only for a session in the call
     monkeypatch.setenv(ms.LABEL_ENV, "SE Gate")
     board.handle(ev("UserPromptSubmit", prompt="x"), now=T0)
     board.handle(ev("PreToolUse", tool_name="Bash", tool_input={}), now=T0 + 1)
@@ -294,6 +295,7 @@ def test_state_from_hook_events_only_on_change(monkeypatch):
 
 def test_failure_streak_is_problem_and_success_heals():
     _relay()
+    _helper()   # 0.35.6: state only for a session in the call
     for i in range(3):
         board.handle(ev("PostToolUseFailure", tool_name="Bash"), now=T0 + i)
     assert [s for _, s in _states()] == ["arbeitet", "problem"]
@@ -304,6 +306,7 @@ def test_failure_streak_is_problem_and_success_heals():
 
 def test_same_state_resent_after_window_and_local_relay_too(tmp_path):
     _relay()
+    _helper()   # 0.35.6: state only for a session in the call
     board.handle(ev(), now=T0)
     board.handle(ev(), now=T0 + board.STATE_RESEND_S + 1)
     assert len(_states()) == 2
@@ -313,7 +316,9 @@ def test_same_state_resent_after_window_and_local_relay_too(tmp_path):
     (d / "session.json").write_text(json.dumps({"pid": os.getpid()}))
     _relay(local_dir=d, room="other")
     board.handle(ev(sid="x"), now=T0)
-    assert _states() == [("salesengine 2", "arbeitet")]   # 0.21.4; 0.35.0 second session in the folder: " 2"
+    assert _states() == []        # 0.35.6: only falls back to relay.json -> not in the call
+    board.handle(bash('vh-helper status "Lokal" "baut"', sid="x"), now=T0 + 1)
+    assert _states() == [("Lokal", "arbeitet")]   # 0.21.4: local too, once it set its own board
 
 
 def test_post_state_hits_state_endpoint(monkeypatch):
@@ -425,33 +430,47 @@ def test_answer_text_scrubs():
     assert "fakefakefakefake" not in t and "Oliver hat im Call-Board geantwortet: eigene Antwort" in t
 
 
-def test_subagent_has_its_own_board_also_in_the_joining_session():
-    """Agent tool: hook events carry the parent's session_id plus agent_id. 0.21.1: each
-    subagent is its own helper, also inside the joining session (Oliver: "ich seh immer nur
-    deine"); reminder only after 3 min without a board, then with its own name."""
+def test_subagent_has_no_board_state_or_reminder():
+    """0.35.6 (Oliver 06.11.: only the main sessions the user sees in his own UI): hook events
+    of a subagent (agent_id) never make a board, a state or a reminder, neither inside the
+    joining session nor inside a helper session; the parent keeps its own."""
     _relay(owner=ms.session_hash("sess-1"))
     sub = {"agent_id": "a1b2c3", "agent_type": "general-purpose"}
-    assert board.handle(ev(), now=T0) is None                         # the joining session itself
-    assert board.handle(ev(**sub), now=T0) is None                    # subagent, just started
-    out = ctx(board.handle(ev(**sub), now=T0 + board.REMIND_AFTER_S + 1))["additionalContext"]
-    assert "kein Board" in out and '"general-purpose ' in out
-    board.handle(bash('vh-helper status "Hook" "PR 84, ETA 5 Min"', **sub), now=T0 + 200)
-    assert board.handle(ev(**sub), now=T0 + 300) is None              # fresh
-    out = ctx(board.handle(ev(**sub), now=T0 + 200 + 400))["additionalContext"]
-    assert 'vh-helper status "Hook"' in out and "6 Min alt" in out
-    assert board.handle(ev(), now=T0 + 700) is None                   # parent still silent
+    assert board.handle(ev(**sub), now=T0) is None
+    assert board.handle(ev(**sub), now=T0 + board.REMIND_AFTER_S + 1) is None
+    assert board.handle(bash('vh-helper status "Hook" "PR 84"', **sub), now=T0 + 200) is None
+    assert board.handle(ev("Stop", **sub), now=T0 + 300) is None
+    assert POSTS == []
+    _helper("sess-2")
+    board.handle(ev(sid="sess-2"), now=T0)                            # parent helper: arbeitet
+    board.handle(ev(sid="sess-2", **sub), now=T0 + 1)
+    board.handle(bash('vh-helper status "Scout" "x"', sid="sess-2", **sub), now=T0 + 2)
+    board.handle(ev("PreToolUse", tool_name="Read", tool_input={}, sid="sess-2", **sub), now=T0 + 3)
+    assert [(p["from"], p["state"]) for p in POSTS] == [("salesengine", "arbeitet")]
+    st = json.loads((activity.state_root() / board.STATE_NAME).read_text())
+    assert all("-a" not in k for k in st.get("sessions", {}))       # no subagent entry
 
 
-def test_subagent_state_only_with_board_and_separate_from_parent():
+def test_session_only_on_relay_json_sends_no_state():
+    """0.35.6: a session that merely falls back to relay.json of someone else's join is not in
+    the call: no state (the page made a board of it), no reminder."""
     _relay()
-    sub = {"agent_id": "zz9", "agent_type": "Explore"}
-    board.handle(ev(), now=T0)                                        # parent helper: arbeitet
-    board.handle(ev(**sub), now=T0 + 1)                               # no board yet: no state
-    assert [p["from"] for p in POSTS] == ["salesengine"]
-    board.handle(bash('vh-helper status "Scout" "x"', **sub), now=T0 + 2)
-    board.handle(ev("PreToolUse", tool_name="Read", tool_input={}, **sub), now=T0 + 3)
-    assert {k: POSTS[-1][k] for k in ("op", "from", "state")} == \
-        {"op": "state", "from": "Scout", "state": "arbeitet"}
+    for name in ("UserPromptSubmit", "PostToolUse", "Stop"):
+        board.handle(ev(name, prompt="x") if name == "UserPromptSubmit" else ev(name), now=T0)
+    assert _states() == []
+    _helper()
+    board.handle(ev(), now=T0 + 1)
+    assert _states() == [("salesengine", "arbeitet")]
+
+
+def test_generic_name_session_never_posts(monkeypatch):
+    """0.35.6: `Session` (session_label's last fallback) is no board name ("crown: Session")."""
+    _relay()
+    _helper()
+    monkeypatch.setattr(board, "_label", lambda event, skey: "")
+    monkeypatch.setattr(board, "_known_name", lambda skey: False)
+    board.handle(ev(cwd=""), now=T0)
+    assert _states() == []
 
 
 def test_raw_helper_credential_in_relay_json_is_usable(monkeypatch):
@@ -526,6 +545,7 @@ def test_helper_poll_loop_is_wartet_and_reported_only_on_change(monkeypatch):
     """The live bug: a Trello helper that only runs `vh-helper next` (25 s long poll) and a
     board update every 3 min showed `arbeitet`."""
     _relay()
+    _helper()   # 0.35.6: state only for a session in the call
     monkeypatch.setenv(ms.LABEL_ENV, "Trello")
     t = T0
     for _ in range(6):                      # 2.5 min of polling
@@ -556,6 +576,7 @@ def test_board_update_during_work_stays_arbeitet(monkeypatch):
 
 def test_failing_wait_loop_is_still_problem(monkeypatch):
     _relay()
+    _helper()   # 0.35.6: state only for a session in the call
     for i in range(3):
         board.handle(bash('vh-helper next "T"', tool_response={"exit_code": 7, "stderr": "x"}),
                      now=T0 + i)

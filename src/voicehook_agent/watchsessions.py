@@ -2,9 +2,11 @@
 
 The call page shows every local Claude Code session of this machine of the last LIST_DAYS,
 grouped by the page into "Heute aktiv" / "Gestern aktiv" / "Älter", each with name, topic,
-"zuletzt aktiv" and a switch "mit in den Call". Subagents of a session (Claude Code writes
-them to <session>/subagents/agent-<id>.jsonl, see sessionnames.subagents) are listed
-indented under their session ("gehört zu: <Name>"), never as sessions of their own.
+"zuletzt aktiv" and a switch "mit in den Call". 0.35.6 (Oliver 06.11.: "nur die Heads"):
+only main sessions, the ones the user sees in his own UI; subagents of a session (Claude
+Code writes them to <session>/subagents/agent-<id>.jsonl) are never listed, and a name
+appears once (two transcripts with the same name, e.g. after /resume: the one in the call,
+else the newest).
 
 The watcher POSTs the list to <relay>/sessions (voicehook-v4 watch_sessions.py) and fetches
 the switches made on the page with GET <relay>/sessions ({"picks": [{id, on, at}]}). A
@@ -29,9 +31,6 @@ from . import watchjoin as J
 
 LIST_DAYS = 7               # sessions touched in the last week (today / yesterday / older)
 LIST_MAX = 30               # top-level sessions in the list, newest first
-SUB_RECENT_S = 6 * 3600.0   # finished subagents stay listed this long
-SUB_PER_SESSION = 5
-ENTRIES_MAX = 80            # server limit
 POST_EVERY_S = 300.0        # repost an unchanged list now and then (server memory, restarts)
 
 
@@ -41,11 +40,6 @@ def _id(prefix: str, value: str) -> str:
 
 def session_id_of(key: str) -> str:
     return _id("s", key)
-
-
-def sub_key(parent_key: str, agent_id: str) -> str:
-    """Watcher key of a subagent (subscription, picks)."""
-    return "sub-" + hashlib.sha256(f"vh-sub|{parent_key}|{agent_id}".encode()).hexdigest()[:16]
 
 
 def topic_for(key: str, tp: str, name: str, folder: str) -> str:
@@ -86,7 +80,7 @@ class Lister:
 
     def build(self, claude_root: Path, now: float, in_call_keys: set[str], in_call_tps: set[str],
               picks: dict[str, bool]) -> list[dict]:
-        """List entries for the server, newest first; subagents follow their session."""
+        """List entries for the server, newest first; main sessions only, one per name."""
         tops: list[tuple[float, str]] = []
         try:
             for p in claude_root.glob("*/*.jsonl"):
@@ -102,7 +96,7 @@ class Lister:
         out: list[dict] = []
         ids: dict[str, dict] = {}
         for m, tp in tops:
-            if len([x for x in out if not x["parent"]]) >= LIST_MAX or len(out) >= ENTRIES_MAX:
+            if len(out) >= LIST_MAX:
                 break
             e = self._top(tp, m)
             if J.is_never(e["label"], tp):
@@ -112,33 +106,20 @@ class Lister:
             except vrelayops.RelayError:
                 continue
             in_call = e["key"] in in_call_keys or tp in in_call_tps
+            dup = next((i for i, x in enumerate(out) if x["name"] == name), None)
+            if dup is not None and (not in_call or out[dup]["in_call"]):
+                continue           # the newer one (or the one in the call) stays
             sid = session_id_of(e["key"])
             ids[sid] = {"kind": "session", "key": e["key"], "tp": tp, "label": name}
-            out.append({"id": sid, "name": name, "topic": topic_for(e["key"], tp, name, e["folder"]),
+            row = {"id": sid, "name": name, "topic": topic_for(e["key"], tp, name, e["folder"]),
                         "last_active": round(e["last"], 1), "parent": None, "parent_name": "",
                         "on": bool(picks.get(e["key"], in_call)), "in_call": in_call, "agent": "claude",
-                        "project": e["project"]})
-            if now - m > 86400.0:
-                continue
-            n = 0
-            for sub in vnames.subagents(tp):
-                if n >= SUB_PER_SESSION or len(out) >= ENTRIES_MAX:
-                    break
-                age = now - sub["mtime"]
-                if age > SUB_RECENT_S and (sub["finished"] or age > 86400.0):
-                    continue
-                skey = sub_key(e["key"], sub["id"])
-                uid = _id("u", skey)
-                s_in = skey in in_call_keys or sub["tp"] in in_call_tps
-                ids[uid] = {"kind": "sub", "key": skey, "tp": sub["tp"], "label": sub["name"],
-                            "parent_label": name, "parent_key": e["key"]}
-                out.append({"id": uid, "name": sub["name"],
-                            "topic": "" if sub["topic"].lower().startswith(sub["name"].lower()) else sub["topic"],
-                            "last_active": round(vnames.real_activity(sub["tp"]) or sub["mtime"], 1),
-                            "parent": sid, "parent_name": name,
-                            "on": bool(picks.get(skey, s_in)), "in_call": s_in, "agent": "subagent",
-                            "project": e["project"]})
-                n += 1
+                        "project": e["project"]}
+            if dup is None:
+                out.append(row)
+            else:                  # the one in the call replaces the newer one, same place
+                ids.pop(out[dup]["id"], None)
+                out[dup] = row
         self.ids = ids
         return out
 
