@@ -18,12 +18,15 @@ stdlib only; no import of watch.py.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import socket
 from pathlib import Path
 
 from . import activity as vact
 from . import multisession as vmulti
+from . import session as vsession
 from . import sessionnames as vnames
 
 STATE_NAME = "watch-subscribed.json"
@@ -151,8 +154,81 @@ def registry() -> tuple[set[str], set[str]]:
     return set(reg), {str(e.get("tp")) for e in reg.values() if isinstance(e, dict) and e.get("tp")}
 
 
+SESSION_ENVS = ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID")
+
+
+def _sock_alive(path: Path, timeout: float = 0.2) -> bool:
+    """A join's control socket that still answers (a crashed join leaves a dead file)."""
+    try:
+        if not path.is_socket():
+            return False
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            s.connect(str(path))
+        return True
+    except OSError:
+        return False
+
+
+def name_of_identity(identity: str) -> str:
+    """'malik-crown-5217' -> 'malik' (join identity = <name>-<host>-<suffix>)."""
+    parts = str(identity or "").split("-")
+    return parts[0].lower() if len(parts) >= 3 else str(identity or "").lower()
+
+
+def room_joins(rel: dict, *, proc_root: Path = Path("/proc"), sess_root: Path | None = None) -> tuple[set[str], set[str]]:
+    """0.35.6 (Oliver 06.11.: "fragt mich der Sessionwatcher staendig, ob Leute in den Call
+    sollen, die schon im Call sind"): sessions of THIS machine that sit in THIS room with
+    their OWN join (data channel). Returns (transcript stems, names).
+    (a) /proc (Linux): every running `voicehook-agent join` whose command line names this
+        room; its environment carries the session id of the Claude Code / Codex session
+        that started it (CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID = transcript stem).
+    (b) ONLY without /proc (Mac): every join dir of the room with a control socket that still
+        answers: its name (identity prefix). Names are a fallback, they are fuzzy.
+    Only ids and names, no content. Never raises."""
+    room = str((rel or {}).get("room") or "")
+    stems: set[str] = set()
+    names: set[str] = set()
+    if not room:
+        return stems, names
+    with contextlib.suppress(Exception):
+        for d in proc_root.glob("[0-9]*"):
+            try:
+                cmd = [c.decode("utf-8", "replace") for c in (d / "cmdline").read_bytes().split(b"\0") if c]
+            except OSError:
+                continue
+            line = " ".join(cmd)
+            if "join" not in cmd or ("voicehook-agent" not in line and "voicehook_agent" not in line):
+                continue
+            if f"/r/{room}" not in line and f"room={room}" not in line:
+                continue
+            try:
+                env = (d / "environ").read_bytes().split(b"\0")
+            except OSError:
+                continue
+            for e in env:
+                k, _, v = e.decode("utf-8", "replace").partition("=")
+                if k in SESSION_ENVS and v.strip():
+                    stems.add(v.strip())
+    # Review Ines 06.11.: der Namensabgleich ist unscharf (ein fremder Titel mit einem Head-Namen
+    # wuerde ausgeblendet). Unter Linux genuegen die Session-Ids; Namen nur ohne /proc.
+    if proc_root.is_dir():
+        return stems, names
+    with contextlib.suppress(Exception):
+        rd = (sess_root / room) if sess_root is not None else vsession.room_dir(room)
+        for sub in rd.iterdir() if rd.is_dir() else []:
+            if _sock_alive(sub / vsession.SOCKET_NAME):
+                names.add(name_of_identity(sub.name))
+    return stems, names
+
+
+def _label_names(label: str) -> set[str]:
+    return {w.strip("·:,()[]").lower() for w in str(label or "").replace("-", " ").split() if len(w.strip("·:,()[]")) >= 3}
+
+
 def find_unbound(rel: dict, now: float, active_s: float, *, claude_root: Path,
-                 bound_keys: set[str] = frozenset(), bound_tps: set[str] = frozenset()) -> list[dict]:
+                 bound_keys: set[str] = frozenset(), bound_tps: set[str] = frozenset(),
+                 joined: tuple[set[str], set[str]] | None = None) -> list[dict]:
     """Claude Code sessions with REAL activity within `active_s` (sessionnames.real_activity:
     entry timestamps of orders, assistant turns, tool results; the file time only preselects)
     that are not part of the call: not in the hook registry, no helper credential / noted
@@ -165,6 +241,8 @@ def find_unbound(rel: dict, now: float, active_s: float, *, claude_root: Path,
         keys = set(reg_keys) | set(bound_keys) | {str(rel.get("owner_session") or "")}
         tps = set(reg_tps) | set(bound_tps)
         subscribed = set(load(rel)["subscribed"])
+        j_stems, j_names = room_joins(rel) if joined is None else joined
+        keys |= {vmulti.session_hash(x) for x in j_stems}
         seen: dict[str, list[str]] = {}
         for p in claude_root.glob("*/*.jsonl"):
             if now - _mtime(p) <= active_s:
@@ -183,8 +261,11 @@ def find_unbound(rel: dict, now: float, active_s: float, *, claude_root: Path,
             act = max((vnames.real_activity(f) for f in files), default=0.0)
             if not act or now - act > active_s:
                 continue
+            lbl = label_for(stem, tp)
+            if stem in j_stems or (j_names and _label_names(lbl) & j_names):
+                continue        # sits in this room with its own join: already in the call
             cwd = transcript_cwd(tp)
-            out.append({"key": key, "label": label_for(stem, tp), "agent": "claude", "tp": tp,
+            out.append({"key": key, "label": lbl, "agent": "claude", "tp": tp,
                         "active_at": act, "project": vnames.project_of(vnames.latest_cwd(tp)),
                         "folder": vact.basename(cwd)})
     except Exception:  # noqa: BLE001

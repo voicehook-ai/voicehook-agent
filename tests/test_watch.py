@@ -1408,3 +1408,100 @@ def test_never_sessions_are_hidden_not_only_unproposed(monkeypatch):
     out = W._visible([{"label": "se-testwall 3e66", "tp": ""}, {"label": "SE-UI", "tp": ""},
                       {"label": "x", "tp": "/h/.claude/projects/-home-oliver-archiv-se-se-testwall/a.jsonl"}])
     assert [s["label"] for s in out] == ["SE-UI"]
+
+
+# 0.35.6: keine Karte fuer Sessions, die mit eigenem Join schon im Raum sitzen (Oliver 06.11.).
+def _fake_proc(root, pid, argv, env):
+    d = root / str(pid)
+    d.mkdir(parents=True)
+    (d / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
+    (d / "environ").write_bytes(b"\0".join(f"{k}={v}".encode() for k, v in env.items()) + b"\0")
+
+
+def _active_tp(root, stem):
+    (root / "p").mkdir(parents=True, exist_ok=True)
+    tp = root / "p" / f"{stem}.jsonl"
+    tp.write_text(_entry(NOW - 5, "assistant"))
+    os.utime(tp, (NOW - 5, NOW - 5))
+    return str(tp)
+
+
+def test_room_joins_reads_session_ids_of_own_room_only(tmp_path):
+    proc = tmp_path / "proc"
+    room = _relay().get("room") or "room-x"
+    _fake_proc(proc, 11, ["/py", "-c", "x", "/sp", "join", f"https://voicehook.ai/r/{room}?invite=t", "--data-channel"],
+               {"CLAUDE_CODE_SESSION_ID": "sess-im-raum"})
+    _fake_proc(proc, 12, ["/py", "-c", "x", "/sp", "join", "https://voicehook.ai/r/anderer-raum?invite=t"],
+               {"CLAUDE_CODE_SESSION_ID": "sess-anderswo"})
+    _fake_proc(proc, 13, ["/usr/bin/claude"], {"CLAUDE_CODE_SESSION_ID": "sess-ohne-join"})
+    stems, _names = J.room_joins({"room": room}, proc_root=proc, sess_root=tmp_path / "leer")
+    assert "voicehook" not in " ".join(stems)
+    assert stems == set()    # Positivkontrolle unten: ohne 'voicehook-agent' im Aufruf kein Treffer
+    _fake_proc(proc, 14, ["/home/u/.local/share/uv/tools/voicehook-agent/bin/python", "-c", "x", "join",
+                          f"https://voicehook.ai/r/{room}?invite=t"], {"CLAUDE_CODE_SESSION_ID": "sess-im-raum"})
+    stems, _ = J.room_joins({"room": room}, proc_root=proc, sess_root=tmp_path / "leer")
+    assert stems == {"sess-im-raum"}
+
+
+def test_room_joins_names_from_live_sockets_dead_socket_ignored(tmp_path):
+    import socket as so
+    sess = tmp_path / "sess"
+    room = "room-y"
+    live = sess / room / "ravi-crown-41dc"
+    dead = sess / room / "kian-crown-0ddd"
+    live.mkdir(parents=True)
+    dead.mkdir(parents=True)
+    srv = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+    srv.bind(str(live / "ctl.sock"))
+    srv.listen(1)
+    s2 = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+    s2.bind(str(dead / "ctl.sock"))
+    s2.close()                                   # Datei bleibt, niemand hoert zu
+    try:
+        _, names = J.room_joins({"room": room}, proc_root=tmp_path / "noproc", sess_root=sess)
+        assert names == {"ravi"}
+    finally:
+        srv.close()
+
+
+def test_find_unbound_skips_sessions_with_own_join_in_room(tmp_path):
+    root = tmp_path / "projects"
+    tp_join = _active_tp(root, "sess-im-raum")
+    tp_frei = _active_tp(root, "sess-frei")
+    got = J.find_unbound(_relay(), NOW, W.ACTIVE_S, claude_root=root, joined=({"sess-im-raum"}, set()))
+    assert [g["tp"] for g in got] == [tp_frei]
+    assert tp_join not in [g["tp"] for g in got]
+    # Positivkontrolle: ohne Join-Info kommen beide
+    both = J.find_unbound(_relay(), NOW, W.ACTIVE_S, claude_root=root, joined=(set(), set()))
+    assert sorted(g["tp"] for g in both) == sorted([tp_join, tp_frei])
+
+
+def test_find_unbound_skips_by_name_of_live_join(tmp_path, monkeypatch):
+    root = tmp_path / "projects"
+    _active_tp(root, "s1")
+    monkeypatch.setattr(J, "label_for", lambda stem, tp: "[R] 🎙️ Ravi · Head of Voice Platform ·")
+    assert J.find_unbound(_relay(), NOW, W.ACTIVE_S, claude_root=root, joined=(set(), {"ravi"})) == []
+    assert len(J.find_unbound(_relay(), NOW, W.ACTIVE_S, claude_root=root, joined=(set(), {"kian"}))) == 1
+
+
+def test_name_of_identity():
+    assert J.name_of_identity("malik-crown-5217") == "malik"
+    assert J.name_of_identity("theo-qwpnb35qwpde-fc27") == "theo"
+
+
+def test_room_joins_names_only_without_proc(tmp_path):
+    """Review Ines: mit /proc zaehlen nur Session-Ids, keine Namen (ein Titel 'Theo-Bericht' bliebe sonst aus)."""
+    import socket as so
+    sess = tmp_path / "sess"
+    live = sess / "room-z" / "theo-mac-1234"
+    live.mkdir(parents=True)
+    srv = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+    srv.bind(str(live / "ctl.sock"))
+    srv.listen(1)
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    try:
+        assert J.room_joins({"room": "room-z"}, proc_root=proc, sess_root=sess) == (set(), set())
+        assert J.room_joins({"room": "room-z"}, proc_root=tmp_path / "keinproc", sess_root=sess)[1] == {"theo"}
+    finally:
+        srv.close()
