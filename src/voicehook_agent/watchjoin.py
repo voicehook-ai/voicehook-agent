@@ -182,8 +182,8 @@ def room_joins(rel: dict, *, proc_root: Path = Path("/proc"), sess_root: Path | 
     (a) /proc (Linux): every running `voicehook-agent join` whose command line names this
         room; its environment carries the session id of the Claude Code / Codex session
         that started it (CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID = transcript stem).
-    (b) every join dir of the room with a control socket that still answers: its name
-        (identity prefix), for machines without /proc.
+    (b) ONLY without /proc (Mac): every join dir of the room with a control socket that still
+        answers: its name (identity prefix). Names are a fallback, they are fuzzy.
     Only ids and names, no content. Never raises."""
     room = str((rel or {}).get("room") or "")
     stems: set[str] = set()
@@ -211,6 +211,10 @@ def room_joins(rel: dict, *, proc_root: Path = Path("/proc"), sess_root: Path | 
                     stems.add(v.strip())
     except Exception:  # noqa: BLE001
         pass
+    # Review Ines 06.11.: der Namensabgleich ist unscharf (ein fremder Titel mit einem Head-Namen
+    # wuerde ausgeblendet). Unter Linux genuegen die Session-Ids; Namen nur ohne /proc.
+    if proc_root.is_dir():
+        return stems, names
     try:
         rd = (sess_root / room) if sess_root is not None else vsession.room_dir(room)
         for sub in rd.iterdir() if rd.is_dir() else []:

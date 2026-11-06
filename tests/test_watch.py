@@ -1487,3 +1487,21 @@ def test_find_unbound_skips_by_name_of_live_join(tmp_path, monkeypatch):
 def test_name_of_identity():
     assert J.name_of_identity("malik-crown-5217") == "malik"
     assert J.name_of_identity("theo-qwpnb35qwpde-fc27") == "theo"
+
+
+def test_room_joins_names_only_without_proc(tmp_path):
+    """Review Ines: mit /proc zaehlen nur Session-Ids, keine Namen (ein Titel 'Theo-Bericht' bliebe sonst aus)."""
+    import socket as so
+    sess = tmp_path / "sess"
+    live = sess / "room-z" / "theo-mac-1234"
+    live.mkdir(parents=True)
+    srv = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+    srv.bind(str(live / "ctl.sock"))
+    srv.listen(1)
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    try:
+        assert J.room_joins({"room": "room-z"}, proc_root=proc, sess_root=sess) == (set(), set())
+        assert J.room_joins({"room": "room-z"}, proc_root=tmp_path / "keinproc", sess_root=sess)[1] == {"theo"}
+    finally:
+        srv.close()
