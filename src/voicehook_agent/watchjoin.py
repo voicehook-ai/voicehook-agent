@@ -18,6 +18,7 @@ stdlib only; no import of watch.py.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import socket
@@ -25,8 +26,8 @@ from pathlib import Path
 
 from . import activity as vact
 from . import multisession as vmulti
-from . import sessionnames as vnames
 from . import session as vsession
+from . import sessionnames as vnames
 
 STATE_NAME = "watch-subscribed.json"
 NAME = "Session Watcher"            # sender of the proposals (0.35.0, before "Wächter")
@@ -190,7 +191,7 @@ def room_joins(rel: dict, *, proc_root: Path = Path("/proc"), sess_root: Path | 
     names: set[str] = set()
     if not room:
         return stems, names
-    try:
+    with contextlib.suppress(Exception):
         for d in proc_root.glob("[0-9]*"):
             try:
                 cmd = [c.decode("utf-8", "replace") for c in (d / "cmdline").read_bytes().split(b"\0") if c]
@@ -209,19 +210,15 @@ def room_joins(rel: dict, *, proc_root: Path = Path("/proc"), sess_root: Path | 
                 k, _, v = e.decode("utf-8", "replace").partition("=")
                 if k in SESSION_ENVS and v.strip():
                     stems.add(v.strip())
-    except Exception:  # noqa: BLE001
-        pass
     # Review Ines 06.11.: der Namensabgleich ist unscharf (ein fremder Titel mit einem Head-Namen
     # wuerde ausgeblendet). Unter Linux genuegen die Session-Ids; Namen nur ohne /proc.
     if proc_root.is_dir():
         return stems, names
-    try:
+    with contextlib.suppress(Exception):
         rd = (sess_root / room) if sess_root is not None else vsession.room_dir(room)
         for sub in rd.iterdir() if rd.is_dir() else []:
             if _sock_alive(sub / vsession.SOCKET_NAME):
                 names.add(name_of_identity(sub.name))
-    except Exception:  # noqa: BLE001
-        pass
     return stems, names
 
 

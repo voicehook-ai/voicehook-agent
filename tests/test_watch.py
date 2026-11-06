@@ -1434,7 +1434,7 @@ def test_room_joins_reads_session_ids_of_own_room_only(tmp_path):
     _fake_proc(proc, 12, ["/py", "-c", "x", "/sp", "join", "https://voicehook.ai/r/anderer-raum?invite=t"],
                {"CLAUDE_CODE_SESSION_ID": "sess-anderswo"})
     _fake_proc(proc, 13, ["/usr/bin/claude"], {"CLAUDE_CODE_SESSION_ID": "sess-ohne-join"})
-    stems, names = J.room_joins({"room": room}, proc_root=proc, sess_root=tmp_path / "leer")
+    stems, _names = J.room_joins({"room": room}, proc_root=proc, sess_root=tmp_path / "leer")
     assert "voicehook" not in " ".join(stems)
     assert stems == set()    # Positivkontrolle unten: ohne 'voicehook-agent' im Aufruf kein Treffer
     _fake_proc(proc, 14, ["/home/u/.local/share/uv/tools/voicehook-agent/bin/python", "-c", "x", "join",
