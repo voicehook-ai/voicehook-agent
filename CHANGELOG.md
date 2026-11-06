@@ -3,8 +3,9 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
-## Unreleased
+## 0.35.6
 
+- **Session Watcher no longer proposes sessions that already sit in the room with their own join.** Bug 06.11. (Oliver in the call: it kept asking whether sessions should join that were already in the call): heads with their own data-channel join were not "bound" (no relay or helper entry) and got "Soll <Name> ... in den Call?". Now `find_unbound` skips sessions with a running `voicehook-agent join` for this room (Linux: session id from the join process); without /proc only joins with a live control socket, matched by name.
 - **Session Watcher reports only sessions of its own call.** Bug 05.11.: a call started by a Codex agent showed every local Claude Code session of the machine as helper (they fell back to `relay.json` of that join). Now a session counts only when it is the joining session or has its own helper entry for this call (`helper-import` / relay route with the same room; bound to its session or named like its label). Everything else is not posted, and decisions are cleaned up only for those sessions. `VOICEHOOK_WATCH_ALL=1` is unchanged but also stays inside that scope. A session switched on in the session list during an earlier call is no longer pulled into a NEW call by itself. Opt in to the old behaviour with `VOICEHOOK_WATCH_SCOPE=machine` (default `call`).
 
 ## 0.35.5
