@@ -19,6 +19,8 @@ he waits for minutes. The productive behavior now lives in the product:
   reliably shows its additionalContext in the running turn (PreToolUse is not used: an
   event taken there could get lost). 0.21.9: a stale drop (revise with stale=true: our
   queued says were older than the server's limit and never spoken) is shown here too.
+  Delta's transcript (type transcript) is only ANNOUNCED here (minutes, line count, never
+  a line of the call) and stays unread: its content comes via `voicehook-agent next`/listen.
   Other events (status_request, a normal revise, voicebot_left,
   ...) stay for `listen` only.
 * Never for subagents (agent_id), other sessions (owner_session), another agent process
@@ -35,8 +37,9 @@ import time
 
 ENV_OFF = "VOICEHOOK_MIDTURN_EVENTS"
 # 0.21.9: "revise:stale" = only the stale drops (a normal revise stays for `listen`)
+# "transcript" (Delta's send_transcript): only announced, counts without content, never consumed
 TYPES = ("user", "decision", "helper_decision", "onboarding", "revise:stale",
-         "delta_msg")  # 0.35.6
+         "delta_msg", "transcript")  # 0.35.6 delta_msg, 0.35.7 transcript
 WAIT_S = 20.0
 TIMEOUT_S = 1.0
 TEXT_MAX = 400
@@ -70,6 +73,10 @@ def _line(ev: dict, now: float, last_say: float | None) -> str:
         return (f"Veraltet, nicht gesprochen ({len(items)} Aussage(n)): {texts}{more}. "
                 "Nicht wiederholen; falls noch relevant, EINE kurze aktuelle Zusammenfassung "
                 "neu senden (`voicehook-agent say --mode overwrite`).")
+    if typ == "transcript":  # never the content here, only counts (calltranscript.summary)
+        from . import calltranscript
+        return (calltranscript.summary(ev) + " Lesen mit `voicehook-agent next` "
+                "(nur dort der Inhalt).")
     if typ == "onboarding":  # 0.21.8: offer the human to bring in the other sessions
         cmds = ev.get("commands") if isinstance(ev.get("commands"), dict) else {}
         inv = "; ".join(f"`{c}`" for c in (cmds.get("invite") or [])[:4])
@@ -124,12 +131,17 @@ def text_for(reply: dict) -> str | None:
              + _line(e, now, reply.get("last_say_at")) + (" (kam auch über listen)" if e.get("delivered")
                                                            else "") for e in evs]
     has_user = any(e.get("type") in ("user", "onboarding") for e in evs)
+    only_transcript = all(e.get("type") == "transcript" for e in evs)
     tail = ("Antworte ZUERST per `voicehook-agent say \"...\"`, delegiere längere Arbeit an einen "
             "Hintergrund-Agenten, dann weiter." if has_user else
-            "" if all(e.get("stale") is True or e.get("type") == "delta_msg" for e in evs) else
+            "" if all(e.get("stale") is True or e.get("type") in ("delta_msg", "transcript") for e in evs) else
             "Bestätige kurz per `voicehook-agent say`, dann handle danach.")
+    if only_transcript:
+        return "voicehook-Call (neu, während du arbeitest): " + " ".join(lines)
     return ("voicehook-Call (neu, während du arbeitest): " + " ".join(lines) + (" " + tail if tail else "")
-            + f" {RULE} (Neue Ereignisse sind damit gelesen, `listen` bringt sie nicht noch einmal.)")
+            + f" {RULE} (Neue Ereignisse sind damit gelesen, `listen` bringt sie nicht noch einmal"
+            + ("; den Verlauf bringt `next`/`listen` weiterhin" if any(e.get("type") == "transcript"
+                                                                    for e in evs) else "") + ".)")
 
 
 def take(dir_) -> dict | None:

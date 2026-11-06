@@ -232,6 +232,7 @@ from . import a2a as va2a
 from . import activity as vactivity
 from . import agentkey as vagentkey
 from . import boardlist as vboardlist
+from . import calltranscript as vtranscript
 from . import cards as vcards
 from . import datachan as vdata
 from . import helperaccess as vhelp
@@ -856,7 +857,8 @@ PHONE_MESSAGE_MAX = {"notify_me": 120, "call_me": 200}
 CLI_PHONE_PATH = "/api/cli/{kind}"
 PHONE_HTTP_TIMEOUT_S = {"notify_me": 20.0, "call_me": 720.0}   # server dials up to 690 s
 PHONE_SOCK_TIMEOUT_S = {"notify_me": 30.0, "call_me": 750.0, "data": 120.0,  # data: upload
-                        "card": 60.0}  # 0.23.1: image upload + wait for the call pages
+                        "card": 60.0,
+                        "transcript": 75.0}  # room wait 10 s + up to 60 s for the parts  # 0.23.1: image upload + wait for the call pages
 
 
 def phone_request(kind: str, reason: str, message: str | None) -> dict:
@@ -1090,6 +1092,10 @@ class _Control:
         self.listen_end: float | None = None
         self.last_say_at: float | None = None  # 0.21.7 (midturn.py): wall clock of the last say
         self.onboarding: dict | None = None  # 0.21.8: queued once, with the first say/next
+        # `transcript` / Delta's send_transcript (calltranscript.py): parts put together in
+        # memory only; request id -> the waiting `transcript` command
+        self.transcripts = vtranscript.Assembler()
+        self.transcript_waits: dict[str, asyncio.Future] = {}
 
     def attach(self, room: rtc.Room) -> None:
         self.room = room
@@ -1616,6 +1622,92 @@ async def _decide_rpc(ctl: _Control, req: dict) -> dict:
         await asyncio.sleep(0.25)
 
 
+def _transcript_sender_ok(room, pkt) -> bool:
+    """operator.transcript only from the worker (voicebot, kind agent). A sender that is known
+    in the room and is anything else (a human, another operator) is dropped; the bridge may
+    name no sender (the server sends it only to us)."""
+    p = getattr(pkt, "participant", None)
+    ident = getattr(p, "identity", None) if p is not None else None
+    if not ident:
+        return True
+    known = (getattr(room, "remote_participants", None) or {}).get(ident)
+    if known is not None:
+        return _kind_label(known) == "agent"
+    return getattr(p, "kind", None) is None or _kind_label(p) == "agent"
+
+
+def _on_transcript(ctl: _Control | None, room, pkt, payload, json_mode: bool) -> None:
+    """One `operator.transcript` packet: complete answers go to the waiting `transcript`
+    command (by id) or, from Delta (by: delta, no id), into `next`/`listen` as one event.
+    Content only in memory; stdout gets one line with counts."""
+    if ctl is None or not isinstance(payload, dict) or not _transcript_sender_ok(room, pkt):
+        return
+    done = ctl.transcripts.add(payload)
+    if done is None:
+        return
+    key, res = done
+    fut = ctl.transcript_waits.get(key)
+    if fut is not None:
+        if not fut.done():
+            fut.set_result(res)
+        return
+    if key != vtranscript.DELTA_KEY or res.get("error"):
+        return  # an answer nobody waits for any more (timed out)
+    ev = vtranscript.delta_event(res)
+    ctl.events.put_nowait(ev)
+    _print_event(json_mode, "system", ev["summary"], topic=vtranscript.TOPIC, by="delta",
+                 n=ev["n"], **({"minutes": ev["minutes"]} if "minutes" in ev else {}))
+
+
+async def _transcript_request(ctl: _Control, req: dict) -> dict:
+    """`transcript`: operator.transcript_request to the worker, wait for every part."""
+    try:
+        timeout = max(1.0, min(60.0, float(req.get("timeout") or vtranscript.TIMEOUT_S)))
+        since_s = float(req["since_s"]) if req.get("since_s") is not None else None
+        max_lines = int(req["max_lines"]) if req.get("max_lines") is not None else None
+    except (TypeError, ValueError):
+        return {"ok": False, "type": "transcript", "error": "since_s/max_lines/timeout must be numbers"}
+    room = await ctl.wait_room(10.0)
+    if room is None:
+        return {"ok": False, "type": "transcript", "error": "not connected to the room (yet)"}
+    worker = next((p.identity for p in room.remote_participants.values()
+                   if _kind_label(p) == "agent"), None)
+    if worker is None:
+        return {"ok": False, "type": "transcript", "status": 503,
+                "error": "voicebot not in the call, try again shortly"}
+    rid = vtranscript.new_id()
+    fut = asyncio.get_running_loop().create_future()
+    ctl.transcript_waits[rid] = fut
+    try:
+        body = vtranscript.request_payload(rid, since_s, max_lines)
+        try:
+            await room.local_participant.publish_data(
+                json.dumps(body).encode("utf-8"), reliable=True, topic=vtranscript.TOPIC_REQUEST,
+                destination_identities=[worker])
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "type": "transcript", "error": f"request failed: {type(e).__name__}"}
+        try:
+            res = await asyncio.wait_for(fut, timeout)
+        except asyncio.TimeoutError:
+            got, parts = ctl.transcripts.progress(rid)
+            ctl.transcripts.drop(rid)
+            return {"ok": False, "type": "transcript", "id": rid, "error": "timeout",
+                    "parts_received": got, "parts": parts,
+                    "hint": "no (complete) answer from the voicebot; an older server has no "
+                            "transcript yet"}
+    finally:
+        ctl.transcript_waits.pop(rid, None)
+    if res.get("error"):
+        if res["error"] == "not_allowed":
+            return {"ok": False, "type": "transcript", "id": rid, "error": "not_allowed",
+                    "message": vtranscript.NOT_ALLOWED_DE, "hint": vtranscript.NOT_ALLOWED}
+        return {"ok": False, "type": "transcript", "id": rid, "error": res["error"]}
+    lines = res.get("lines") or []
+    return {"ok": True, "type": "transcript", "id": rid, "n": len(lines),
+            "total": res.get("total") or len(lines), "truncated": bool(res.get("truncated")),
+            "parts": res.get("parts", 1), "lines": lines}
+
+
 async def _control_handler(ctl: _Control, req: dict) -> dict:
     """One request from `voicehook-agent say|next|leave|status|activity`."""
     cmd = req.get("cmd")
@@ -1725,6 +1817,9 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
     if cmd == "data":  # 0.21.4 `voicehook-agent send-data` (datachan.py)
         ctl.watchdog.touch()
         return await _send_data(ctl, req)
+    if cmd == "transcript":  # `voicehook-agent transcript` (calltranscript.py)
+        ctl.watchdog.touch()
+        return await _transcript_request(ctl, req)
     if cmd == "board_list":  # 0.21.4 `voicehook-agent board` / `decide --list`
         # Router-Fund 21.10.: the server's listing (all helpers of the room) merged with our own ledger
         return ctl.ledger.merged(await _list_rpc(ctl), only_open=bool(req.get("open")))
@@ -2918,6 +3013,10 @@ async def _connect_and_listen(
                     ctl.events.put_nowait(ev)
                 _print_event(json_mode, "system", ev["summary"], topic=topic,
                              **{k: ev[k] for k in ("from", "kind", "id", "name", "size") if k in ev})
+        elif topic == vtranscript.TOPIC:
+            # the call's transcript (a requested one or Delta's send_transcript); the lines
+            # never go to stdout or a log here, only counts
+            _on_transcript(ctl, room, pkt, payload, json_mode)
         elif topic.startswith("operator."):
             if topic in ("operator.revise", "operator.say_status") and relay.foreign_owner(
                     payload, _own_ids()):
@@ -4021,6 +4120,17 @@ def _client_request(args) -> dict:
         return {"cmd": "leave", "say": args.say} if args.say else {"cmd": "leave"}
     if args.cmd == "rejoin":  # 0.25.0: re-exec the join in place (keeps identity/queue/board)
         return {"cmd": "rejoin"}
+    if args.cmd == "transcript":
+        req = {"cmd": "transcript", "timeout": args.timeout}
+        if args.since_min is not None:
+            if args.since_min <= 0:
+                raise ValueError("--since-min must be > 0")
+            req["since_s"] = args.since_min * 60
+        if args.max_lines is not None:
+            if not 1 <= args.max_lines <= vtranscript.MAX_LINES:
+                raise ValueError(f"--max-lines must be 1..{vtranscript.MAX_LINES}")
+            req["max_lines"] = args.max_lines
+        return req
     if args.cmd == "send-data":  # 0.21.4
         return _data_request(args)
     if args.cmd in DELTA_KINDS:  # 0.23.0
@@ -4294,12 +4404,35 @@ def _run_client(args) -> int:
         print(line + (" (no human in the call, nothing shown)" if reply.get("humans") == 0 else ""),
               flush=True)
         return 0
+    if req.get("cmd") == "transcript" and not getattr(args, "json", False):
+        return _print_transcript(reply)
     print(json.dumps(reply, ensure_ascii=False), flush=True)
     if req.get("cmd") == "next":
         _ack(vsession.request, sock, reply)
     if reply.get("type") == "ended":
         return 3
     return 0 if reply.get("ok") else 1
+
+
+def _print_transcript(reply: dict) -> int:
+    """`transcript` without --json: 'HH:MM Sprecher: Text' per line to stdout (the calling
+    agent only, never a file); errors as one clear line."""
+    if not reply.get("ok"):
+        if reply.get("error") == "not_allowed":
+            print(f"[error] {reply.get('message') or vtranscript.NOT_ALLOWED_DE}", flush=True)
+        else:
+            print(f"[error] transcript: {reply.get('error')}"
+                  + (f" ({reply['hint']})" if reply.get("hint") else ""), flush=True)
+        return 1
+    lines = reply.get("lines") or []
+    if not lines:
+        print("(noch keine Zeilen im Verlauf)", flush=True)
+        return 0
+    print(vtranscript.render(lines), flush=True)
+    if reply.get("truncated"):
+        print(f"[info] gekürzt: {len(lines)} von {reply.get('total')} Zeilen, älteres fehlt",
+              file=sys.stderr, flush=True)
+    return 0
 
 
 # 0.22.2: the requests a helper session (no own join) sends over the relay; one routing rule
@@ -4891,7 +5024,8 @@ def main(argv: list[str] | None = None) -> None:
     listen_help = (
         "0.21.4: the gapless listen loop: repeats `next` and prints ONE JSON line "
         "on the first event that needs you (user, decision, helper_decision, voicebot_left, "
-        "missed, status_request, revise, call_end, data), then exits 0 (3 = join ended). Run it "
+        "missed, status_request, revise, call_end, data, transcript), then exits 0 (3 = join "
+        "ended). Run it "
         "with the harness's background mode (Claude Code: run_in_background), never detached "
         "with & or nohup: the exit is what wakes you. Start it again after handling the event. "
         "0.21.5: it reads the join's event spool with a cursor (an event is acked after the "
@@ -5150,6 +5284,24 @@ def main(argv: list[str] | None = None) -> None:
     p_dec.add_argument("--timeout", type=float, default=120.0, metavar="SEC",
                        help="0.16.0, with --wait (no SEC): wait up to SEC for the answer (default 120)")
     _add_session(p_dec, answer_wait=True)
+    p_tr = sub.add_parser(
+        "transcript", help="read the whole call so far (also the lines before your join): asks the "
+        "voicebot over the running join (topic operator.transcript_request), prints 'HH:MM "
+        "Sprecher: Text' per line (--json: one JSON line {lines:[{t, speaker, role, text}], ...}). "
+        "Only own agents of the owner (joined with the owner's agent key); nothing is stored on "
+        "disk. Delta can also send it on request: then it comes as a `next`/`listen` event "
+        "type transcript",
+        description="Den ganzen Call lesen. Read the call's transcript (in memory on the server, "
+        "gone with the call end). Exit 0 = ok, 1 = not allowed / timeout, 3 = no join.")
+    p_tr.add_argument("--since-min", dest="since_min", type=float, default=None, metavar="N",
+                      help="only the last N minutes")
+    p_tr.add_argument("--max-lines", dest="max_lines", type=int, default=None, metavar="N",
+                      help=f"at most N lines, the newest (1..{vtranscript.MAX_LINES})")
+    p_tr.add_argument("--json", action="store_true", default=False,
+                      help="one JSON line {ok, n, total, truncated, lines} instead of text")
+    p_tr.add_argument("--timeout", type=float, default=vtranscript.TIMEOUT_S, metavar="SEC",
+                      help=f"wait up to SEC for all parts (default {vtranscript.TIMEOUT_S:g})")
+    _add_session(p_tr)
     p_sd = sub.add_parser(
         "send-data", help="0.21.4: agent-to-agent data (topic operator.data, like MCP send_data): "
         "JSON, text or a file to another operator agent of the call, never spoken, never to the "
@@ -5374,7 +5526,7 @@ def main(argv: list[str] | None = None) -> None:
             sys.exit(130)
     if args.cmd in ("say", "next", "says", "leave", "rejoin", "status", "activity", "decide",
                     "helper-credential", "vocab", "ui", "notify-me", "call-me", "board", "send-data",
-                    *DELTA_KINDS):
+                    "transcript", *DELTA_KINDS):
         sys.exit(_run_client(args))
     if args.cmd == "show":
         sys.exit(_run_client(args))
