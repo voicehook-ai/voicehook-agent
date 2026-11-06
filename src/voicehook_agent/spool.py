@@ -21,7 +21,10 @@ read from the spool with a cursor:
 
 Files: `events.jsonl` + `cursor.json`, mode 0600 (O_NOFOLLOW), in the 0700 session dir. The
 spool IS the event queue, so it holds the call's turns; nothing else in this module logs
-event content. Disk errors never break the call: the spool then keeps working in memory.
+event content. Exception VOLATILE (type "transcript", Delta's send_transcript = the whole call
+at once): only its metadata (counts, minutes) goes into the file, the lines stay in memory. A
+join restart then hands out the stub with `lost: true` and a hint to fetch it again with
+`voicehook-agent transcript` (the worker still holds the call). Disk errors never break the call: the spool then keeps working in memory.
 
 Stdlib only.
 """
@@ -33,6 +36,8 @@ import os
 import sys
 import time
 from pathlib import Path
+
+from . import calltranscript as vtranscript
 
 EVENTS_NAME = "events.jsonl"
 CURSOR_NAME = "cursor.json"
@@ -50,7 +55,12 @@ EPHEMERAL = frozenset({"restarting"})
 WAKE_TYPES = ("user", "decision", "helper_decision", "voicebot_left", "missed",
               "status_request", "revise", "call_end", "data", "onboarding",  # 0.21.8 onboarding
               "task", "task_acked", "task_due",  # 0.24.0 a2a.WAKE_TYPES
-              "delta_msg")  # 0.35.6: Delta's message to this agent (delta.msg)
+              "delta_msg",  # 0.35.6: Delta's message to this agent (delta.msg)
+              "transcript")  # Delta's send_transcript (calltranscript.py)
+# content only in memory, the file gets the metadata (calltranscript.meta_only)
+VOLATILE = frozenset({vtranscript.TYPE})
+VOLATILE_LOST_HINT = ("Inhalt nach einem Neustart des Joins nicht mehr da (nie auf Platte); "
+                      "`voicehook-agent transcript` holt den Verlauf neu.")
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 
@@ -59,6 +69,14 @@ def wanted(ev: dict, types) -> bool:
     type (midturn shows a stale-drop revise, a normal revise stays for `listen`)."""
     typ = ev.get("type")
     return typ in types or (ev.get("stale") is True and f"{typ}:stale" in types)
+
+
+def _disk_item(item: dict) -> dict:
+    """The item as written to the file: a VOLATILE event without its content."""
+    ev = item.get("event")
+    if isinstance(ev, dict) and ev.get("type") in VOLATILE:
+        return {**item, "event": {**vtranscript.meta_only(ev), "volatile": True}}
+    return item
 
 
 def _open_private(path: Path, flags: int):
@@ -136,7 +154,7 @@ class SpoolQueue:
         try:
             fd = _open_private(self.events_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT)
             try:
-                os.write(fd, (json.dumps(item, ensure_ascii=False) + "\n").encode("utf-8"))
+                os.write(fd, (json.dumps(_disk_item(item), ensure_ascii=False) + "\n").encode("utf-8"))
             finally:
                 os.close(fd)
         except OSError as e:
@@ -162,8 +180,8 @@ class SpoolQueue:
         if not self._disk_ok:
             return
         try:
-            _write_atomic(self.events_path, "".join(json.dumps(it, ensure_ascii=False) + "\n"
-                                                    for it in keep))
+            _write_atomic(self.events_path, "".join(json.dumps(_disk_item(it), ensure_ascii=False)
+                                                    + "\n" for it in keep))
         except OSError as e:
             self._disk_error(e)
 
@@ -207,6 +225,9 @@ class SpoolQueue:
             self._seq = max(self._seq, seq, cursor)
             if seq <= cursor or seq in acked or it["event"].get("type") in EPHEMERAL:
                 continue
+            if it["event"].get("volatile") is True:  # its content was never on disk
+                it["event"] = {**it["event"], "lines": [], "text": "", "lost": True,
+                               "hint": VOLATILE_LOST_HINT}
             items.append(it)
         self._items = sorted(items, key=lambda it: it["seq"])
         self._cursor = max(cursor, self._seq if not self._items else self._items[0]["seq"] - 1)
@@ -402,7 +423,9 @@ class SpoolQueue:
         oldest first, younger than `recent_s` (by `ts`). Each is shown once; one still unread
         is consumed (acked), so `listen`/`next` never deliver it again. One a consumer
         (`listen`) already took is shown too, marked `delivered: true`: the background listen
-        may not have woken the agent yet in the middle of its turn."""
+        may not have woken the agent yet in the middle of its turn. A VOLATILE event (the
+        call transcript) is only announced: shown once WITHOUT its content and never acked,
+        so `next`/`listen` still deliver it."""
         wall = time.time()
         out: list[dict] = []
         for it in self._items:
@@ -418,6 +441,9 @@ class SpoolQueue:
                 pass
             delivered = seq in self._acked or seq <= self._cursor
             self._shown[seq] = self.clock()
+            if ev.get("type") in VOLATILE:
+                out.append({**vtranscript.meta_only(ev), "delivered": delivered})
+                continue
             if not delivered:
                 self.ack(seq)
             out.append({**ev, "delivered": delivered})
