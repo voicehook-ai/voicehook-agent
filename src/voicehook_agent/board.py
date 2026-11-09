@@ -991,7 +991,7 @@ def record_question(skey: str, dec_id: str, question: str, number: object = None
             me = st["sessions"].setdefault(skey, {})
             qs = me.get("qs") if isinstance(me.get("qs"), dict) else {}
             qs.pop(dec_id, None)
-            qs[dec_id] = {"question": str(question or "")[:200], "src": src,
+            qs[dec_id] = {"question": str(question or "")[:200], "src": src, "at": time.time(),
                           **({"number": number} if isinstance(number, int) else {}),
                           **({"options": [str(o)[:60] for o in options][:4]} if options else {})}
             while len(qs) > QUESTIONS_KEEP:
@@ -1014,6 +1014,30 @@ def mirror_note(question: str, number: object, src: str) -> str:
             f"({src_de}); Oliver kann sie dort beantworten, die Antwort kommt hierher und "
             f"zitiert sie. / Your question {q} is now on the voicehook board as{nr} ({src_en}); "
             "the answer comes here and quotes it.")
+
+
+def room_questions(skey: str, since: float) -> tuple[list[str], list[str]]:
+    """0.35.8 (asks.mirror_question): (the board names of the other sessions in this
+    session's room, the decide questions any session of the room asked since `since`, open
+    or answered). ([], []) without state. Never raises."""
+    try:
+        st = json.loads((vact.state_root() / STATE_NAME).read_text(encoding="utf-8"))
+        sessions = st.get("sessions") if isinstance(st.get("sessions"), dict) else {}
+    except (OSError, ValueError, AttributeError):
+        return [], []
+    me = sessions.get(skey) if isinstance(sessions.get(skey), dict) else {}
+    room = me.get("room")
+    names: list[str] = []
+    asked: list[str] = []
+    for k, s in sessions.items():
+        if not isinstance(s, dict) or (room and s.get("room") != room) or (not room and k != skey):
+            continue
+        if k != skey:
+            names += [str(s.get(f)) for f in ("from", "name") if s.get(f)]
+        qs = s.get("qs") if isinstance(s.get("qs"), dict) else {}
+        asked += [str(q.get("question")) for q in qs.values() if isinstance(q, dict)
+                  and q.get("src") == "decide" and q.get("question") and _float(q.get("at")) >= since]
+    return names, asked
 
 
 def question_info(skey: str, dec_id: object) -> dict | None:
@@ -1256,7 +1280,7 @@ def _stop_waits(event: dict, skey: str, t: float) -> bool:
         if open_names(skey, t):
             return True
         from . import asks
-        return asks.stop_question(asks.last_message(event)) is not None
+        return asks.mirror_question(event, skey, t) is not None
     except Exception:  # noqa: BLE001
         return False
 

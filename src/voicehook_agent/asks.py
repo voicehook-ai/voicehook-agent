@@ -113,9 +113,27 @@ def _last_sentence(par: str) -> str:
     return parts[-1].strip() if parts else ""
 
 
+_WORD = re.compile(r"[^\W\d_]{2,}")      # a word of at least two letters
+_TOKEN = re.compile(r"[#\w]{3,}")
+SIMILAR_MIN = 0.6           # token overlap (Jaccard) of two questions that are the same one
+DECIDE_FRESH_S = 1800.0     # a decide question this young (open or answered) blocks its mirror
+
+
+def _asks_human(sent: str) -> bool:
+    """0.35.8 (Ravi, 09.11.): a complete sentence addressed to the human: it ends with "?"
+    or starts like a request (_ASK_START), and has at least two real words (never a
+    fragment like "27):" cut out of "(Frage Nr. 27):")."""
+    s = sent.strip()
+    if not (s.rstrip(" )").endswith("?") or _ASK_START.match(s)):
+        return False
+    return bool(_ASK_START.match(s)) or len(_WORD.findall(s)) >= 2
+
+
 def stop_question(text: object) -> dict | None:
     """The open question a reply ends with, or None:
-    {question, options (2-3 or []), labels, raw, context}. Language as written."""
+    {question, options (2-3 or []), labels, raw, context}. Language as written.
+    0.35.8: only a complete question to the human (_asks_human), also on the options path:
+    "Die drei Sätze für Oliver:" + a list is no question."""
     if not isinstance(text, str) or not text.strip():
         return None
     body = _FENCE.sub("", text[-TEXT_MAX:]).strip()
@@ -129,7 +147,7 @@ def stop_question(text: object) -> dict | None:
         if not head and len(pars) > 1:
             head = [_plain(x) for x in pars[-2].splitlines() if _plain(x)]
         question = _last_sentence(head[-1]) if head else ""
-        if not question:
+        if not question or not _asks_human(question):
             return None
         ctx_src = " ".join(head[:-1])
     else:
@@ -137,9 +155,11 @@ def stop_question(text: object) -> dict | None:
         opts, head_line = _inline_options(line)
         if opts:
             question = _last_sentence(head_line) or head_line
+            if not _asks_human(question):
+                return None
         else:
             sent = _last_sentence(" ".join(_plain(x) for x in last))
-            if not (sent.rstrip(" )").endswith("?") or _ASK_START.match(sent)):
+            if not _asks_human(sent):
                 return None
             question = sent
         ctx_src = " ".join(_plain(x) for x in last[:-1])
@@ -156,6 +176,105 @@ def stop_question(text: object) -> dict | None:
         it["context"] = vnotify._cut("; ".join(x for x in (it.get("context"), vnotify.clean_text(prev, 600)) if x),
                                      vnotify.CONTEXT_MAX)
     return it
+
+
+def _tail_records(path: object) -> list[dict]:
+    """The JSON records of the last 256 KiB of a transcript (oldest first), [] on any error."""
+    if not isinstance(path, str) or not path:
+        return []
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 262_144))
+            lines = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return []
+    out = []
+    for ln in lines:
+        try:
+            o = json.loads(ln)
+        except ValueError:
+            continue
+        if isinstance(o, dict):
+            out.append(o)
+    return out
+
+
+def _turn_prompt(records: list[dict]) -> str | None:
+    """The text of the user record that started the current turn (the last user record that
+    is no tool result / meta / sidechain), None when there is none."""
+    for o in reversed(records):
+        if o.get("type") != "user" or o.get("isMeta") or o.get("isSidechain"):
+            continue
+        m = o.get("message")
+        content = m.get("content") if isinstance(m, dict) else None
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            if any(isinstance(c, dict) and c.get("type") == "tool_result" for c in content):
+                continue
+            return "\n".join(c.get("text") for c in content if isinstance(c, dict)
+                             and c.get("type") == "text" and isinstance(c.get("text"), str))
+    return None
+
+
+_CROSS = "<cross-session-message"
+
+
+def agent_turn(event: dict) -> bool:
+    """0.35.8 (Nora #13/#26, Bruno #23, 09.11.): the turn was started by another agent's
+    message (`<cross-session-message ...>`): the reply answers that agent, never the human."""
+    p = event.get("prompt")
+    if isinstance(p, str) and p.lstrip().startswith(_CROSS):
+        return True
+    prompt = _turn_prompt(_tail_records(event.get("transcript_path")))
+    return isinstance(prompt, str) and prompt.lstrip().startswith(_CROSS)
+
+
+def _to_agent(question: str, names: list[str]) -> bool:
+    """The question names a known agent of the call as its addressee ("Nora, soll ich ...?",
+    "@Theo ...", "Frage an Bruno: ...")."""
+    q = question.strip()
+    for n in names:
+        if not n or len(n) < 2:
+            continue
+        e = re.escape(n)
+        if re.match(rf"(?i)^@?{e}\b\s*[,:]", q) or re.search(rf"(?i)@{e}\b", q) \
+                or re.search(rf"(?i)\b(?:an|to|für|for)\s+@?{e}\s*[:,]", q):
+            return True
+    return False
+
+
+def _tokens(text: str) -> set[str]:
+    return {t.lower() for t in _TOKEN.findall(text or "")}
+
+
+def similar(a: str, b: str) -> bool:
+    """0.35.8: two questions are the same one (token overlap, or one inside the other)."""
+    ta, tb = _tokens(a), _tokens(b)
+    if not ta or not tb:
+        return False
+    inter = len(ta & tb)
+    return inter / len(ta | tb) >= SIMILAR_MIN or inter / min(len(ta), len(tb)) >= 0.85
+
+
+def mirror_question(event: dict, skey: str = "", now: float | None = None) -> dict | None:
+    """0.35.8: stop_question, but only what is addressed to the human: never the answer of a
+    turn another agent started, never a question to an agent of the call, never one a session
+    of this room already asked with decide (open or answered within DECIDE_FRESH_S)."""
+    if agent_turn(event):
+        return None
+    item = stop_question(last_message(event))
+    if item is None:
+        return None
+    from . import board
+    names, asked = board.room_questions(skey, (time.time() if now is None else now) - DECIDE_FRESH_S)
+    if _to_agent(item["question"], names):
+        return None
+    if any(similar(item["question"], q) for q in asked):
+        return None
+    return item
 
 
 def last_message(event: dict) -> str:
@@ -340,8 +459,8 @@ def stop_ask(raw: str, wait: bool = True, now: float | None = None, post=None,
         if who is None:
             return 0, ""
         skey, rel, frm = who
-        item = stop_question(last_message(event))
         t = time.time() if now is None else now
+        item = mirror_question(event, skey, t)
         if item is None or not _first_time(skey, _hash(item), t):
             # 0.21.4: no new question at this Stop, but earlier ones (`vh-helper decide`,
             # `voicehook-agent decide`) still open: wait for their answers and wake the session
