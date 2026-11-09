@@ -3,6 +3,10 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.35.9
+
+- **Session Watcher: no "Soll <Name> in den Call?" for sessions already in the call (card T4wKfeaJ, 09.11.: Malik was asked three times).** A session with its own join in this room counts as a member of the call (decision scope; scope stays the call). No card when the session's name or first name (prefixes like `[R]` and emojis dropped, cut at ` · `: "[R] 🛡️ Bruno · Head of Infrastructure & Security · …" -> "Bruno") is in the participant list; an open card for such a session is withdrawn. The participant list is current: every join writes `<join dir>/peers.json` (identity, name, human; no token) on every join, leave and attribute change, the watcher reads the live joins of the room on every tick. Hooks and watcher are the default from the first join on: the join installs the Claude Code hooks itself when Claude Code is on the machine and none of ours are there yet, and says so once, visibly (stderr line `[hooks] Claude-Code-Einstellungen geändert …` naming `VOICEHOOK_AUTO_HOOKS=0`; `--json`: also the `_meta: hooks` event). Hooks of another version or only some of them are never touched, the join reports that and names `voicehook-agent hook install`. Off: `VOICEHOOK_AUTO_HOOKS=0`. The onboarding says so.
+
 ## 0.35.8
 
 - **Board mirror follow-up (Ravi's review of #178).** The duplicate check against `decide` questions has no time limit any more (AGT-F8): a reply stays unmirrored as long as a similar `decide` question of the call's room is open or was answered in this call (the session entries of a room start empty in a new call). The question_check hint no longer says the server puts the line on the board itself in 90 s: it never does (Oliver 26.10.); the hint now says to ask it with decide if it is a question, else nothing to do. docs/CLI.md likewise.

@@ -48,6 +48,7 @@ stdlib only.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -664,12 +665,18 @@ def same_call(entry: dict, rel: dict) -> bool:
     return bool(t1) and t1 == t2
 
 
-def call_members(rel: dict, now: float) -> tuple[set[str], set[str]]:
+def call_members(rel: dict, now: float, joins: bool = False) -> tuple[set[str], set[str]]:
     """(session hashes, helper names) explicitly registered for THIS call: the usable helper
     entries (helper-import, or a relay-route entry of an own session) with the call's room.
-    A session that merely falls back to relay.json of someone else's join is NOT a member."""
+    A session that merely falls back to relay.json of someone else's join is NOT a member.
+    0.35.9 `joins`: also every session of this machine with its OWN join in THIS room
+    (watchjoin.room_joins); scope stays the call. discover() leaves them out (such a session
+    reports into the call itself), the decision scope and the proposals count them."""
     keys: set[str] = set()
     names: set[str] = set()
+    if joins:
+        with contextlib.suppress(Exception):
+            keys |= {vmulti.session_hash(x) for x in J.room_joins(rel)[0]}
     for p, e in vmulti._helper_entries():
         if vmulti._usable(e, p, now) is None or not same_call(e, rel):
             continue
@@ -1535,8 +1542,14 @@ class Watcher:
                 projects.add(self.project(owner))
             labels = {str(x["label"]) for x in sessions}
             on = {k for k, v in picks.items() if v}
+            # 0.35.9: the participant list of the room, read again every tick: a session whose
+            # name or first name is in it already is in the call (own join, also from another
+            # machine) and never gets a card; an open card for it is withdrawn
+            in_call = J.participant_names(J.room_participants(rel))
+            self.withdraw_in_call(rel, prop, in_call, now)
             cands = [c for c in cands if picks.get(c["key"]) is not False
-                     and not J.is_never(c["label"], c["tp"]) and self.related(c, projects, labels, on)]
+                     and not J.is_never(c["label"], c["tp"]) and not J.named_in_call(c["label"], in_call)
+                     and self.related(c, projects, labels, on)]
             fresh = [c for c in cands if c["key"] not in prop]
             self.derive_names([{"key": c["key"], "label": c["label"], "tp": c["tp"], "agent": "claude"}
                                for c in fresh[:J.MAX_OPEN]], now)
@@ -1561,6 +1574,8 @@ class Watcher:
                     label = vrelayops.check_from(fresh_lbl if fresh_lbl and fresh_lbl != "Session" else c["label"])
                 except vrelayops.RelayError:
                     continue
+                if J.named_in_call(label, in_call):
+                    continue        # its current name is in the call already
                 topic = WS.topic_for(c["key"], c["tp"], label, str(c.get("folder") or ""))
                 res = post_proposal(rel, J.proposal_body(label, host, c["active_at"], now, topic, self.lang))
                 if not res.get("ok") or not res.get("id"):
@@ -1573,6 +1588,22 @@ class Watcher:
             J.save(st)
         except Exception as e:  # noqa: BLE001
             log("error", where="join", type=type(e).__name__)
+
+    def withdraw_in_call(self, rel: dict, prop: dict, in_call: set[str], now: float) -> None:
+        """0.35.9: an open card "Soll <Name> in den Call?" whose session sits in the call by now
+        (its name in the participant list) is deleted on the board and marked answered
+        ("im_call"), so it is never asked again in this call. Never raises."""
+        if not in_call:
+            return
+        for e in prop.values():
+            if not isinstance(e, dict) or e.get("answer") or not e.get("id"):
+                continue
+            if now - float(e.get("at") or 0) >= J.TTL_S or not J.named_in_call(str(e.get("label") or ""), in_call):
+                continue
+            with contextlib.suppress(Exception):
+                delete_decision(rel, J.NAME, str(e["id"]))
+            e["answer"] = "im_call"
+            log("join", label=e.get("label"), why="in-call")
 
     def duty_deliver(self, rel: dict, s: dict, label: str, last: float, m: dict, now: float) -> None:
         """Answers to the cards of a resting session (see DELIVER_IDLE_S) into its local inbox.
@@ -1919,7 +1950,7 @@ class Watcher:
         self.duty_fetch(rel, now)
         self.duty_cleanup(rel, live)
         scope = None if scope_machine() else (
-            {x["key"] for x in sessions} | call_members(rel, now)[0] | {str(rel.get("owner_session") or "")}) - {""}
+            {x["key"] for x in sessions} | call_members(rel, now, joins=True)[0] | {str(rel.get("owner_session") or "")}) - {""}
         if self.duty_decisions(rel, views, now, scope) == END:
             return END
         self.fails = self.fails + 1 if bad else 0
