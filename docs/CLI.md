@@ -590,6 +590,11 @@ Transport (data channel, reliable): `delta.tell` to the worker only
 `delta.tell_status` `{"id", "state": "queued" | "spoken" | "covered" | "rejected", "reason"?}`
 (`reason: "not_owner_agent"` gets the hint about the key).
 
+`rejected` reasons of the worker (voicehook-v4 #897), each with a German `hint`; `--wait` ends at
+once with exit 1: `not_owner_agent` (not the owner's main agent), `interrupted` (Delta was cut off
+mid-announcement), `not_spoken` (never started: sound off or an error), `call_ended` (the call is
+over, never said).
+
 ## Activity feed (operator.activity, 0.10.0)
 
 Delta knows what the coding agent is doing in the background, without asking. Claude

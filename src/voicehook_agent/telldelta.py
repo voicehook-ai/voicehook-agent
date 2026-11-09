@@ -108,10 +108,22 @@ def failed(error: str, hint: str | None = None, tid: str | None = None) -> dict:
     return out
 
 
+HINT_INTERRUPTED = ("Delta wurde mitten in der Ansage unterbrochen (jemand hat gesprochen): "
+                    "die Anweisung ist nicht ganz angekommen; bei Bedarf noch einmal schicken")
+HINT_NOT_SPOKEN = ("Delta hat die Ansage nicht gestartet (Ton aus oder Fehler): sie ist nicht "
+                   "gesagt worden; später noch einmal schicken")
+HINT_CALL_ENDED = "der Call ist vorbei: die Anweisung wurde nicht mehr gesagt"
+REJECT_HINTS = {
+    "not_owner_agent": HINT_NOT_OWNER,
+    "interrupted": HINT_INTERRUPTED,
+    "not_spoken": HINT_NOT_SPOKEN,
+    "call_ended": HINT_CALL_ENDED,
+}
+
+
 def reject_hint(reason: str) -> str | None:
-    if reason == "not_owner_agent":
-        return HINT_NOT_OWNER
-    return None
+    """German hint for a `rejected` reason of the worker (voicehook-v4 #897)."""
+    return REJECT_HINTS.get(reason)
 
 
 def answer(tid: str, rec: dict | None, waited: bool) -> dict:

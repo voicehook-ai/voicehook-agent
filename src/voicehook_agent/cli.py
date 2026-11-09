@@ -4497,6 +4497,12 @@ Nur der eigene Haupt-Agent: ein Join MIT VOICEHOOK_AGENT_KEY, dessen Schlüssel 
 Konto des Raums gehört (owner-agent: granted). Helfer-Sessions, Joins ohne Schlüssel
 und Gäste bekommen eine Fehlermeldung, es wird nichts gesendet.
 
+Abgelehnt (state rejected, Exit 1, --wait endet sofort), Grund im Feld reason:
+  not_owner_agent  nicht der eigene Haupt-Agent des Inhabers (Schlüssel fehlt/falsch)
+  interrupted      Delta wurde mitten in der Ansage unterbrochen
+  not_spoken       Delta hat die Ansage nicht gestartet (Ton aus oder Fehler)
+  call_ended       der Call ist vorbei, die Anweisung wurde nicht mehr gesagt
+
 Ausgabe: eine JSON-Zeile {ok, type: "delta_tell", id, state, note?, reason?, hint?}
 (state sent | queued | spoken | covered | rejected; mit --wait und ohne Endstand
 zusätzlich "timeout": true). Ein späteres rejected kommt als `next`-Ereignis

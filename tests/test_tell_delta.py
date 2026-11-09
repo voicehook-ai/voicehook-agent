@@ -273,3 +273,52 @@ def test_help_explains_purpose_and_flags(capsys):
     out = capsys.readouterr().out
     assert "ohne selbst zu sprechen" in out and "--wörtlich" in out and "--vorrang" in out
     assert "unverändert" in out and "vor die übrigen Ansagen" in out
+
+
+# ----- rejected reasons of the worker (voicehook-v4 #897) -----
+REASONS = [("interrupted", telldelta.HINT_INTERRUPTED), ("not_spoken", telldelta.HINT_NOT_SPOKEN),
+           ("call_ended", telldelta.HINT_CALL_ENDED), ("not_owner_agent", telldelta.HINT_NOT_OWNER)]
+
+
+@pytest.mark.parametrize("reason,hint", REASONS)
+def test_rejected_reason_has_german_hint(reason, hint):
+    out = telldelta.answer("dt-r", {"state": "rejected", "reason": reason}, waited=True)
+    assert out["ok"] is False and out["error"] == reason and out["reason"] == reason
+    assert out["hint"] == hint and "timeout" not in out
+
+
+@pytest.mark.parametrize("reason,hint", REASONS)
+def test_cli_wait_ends_at_once_with_exit_1(monkeypatch, capsys, reason, hint):
+    import time
+    ctl = _ctl(True, None)
+    orig_publish = ctl.room.local_participant.publish_data
+
+    async def publish(data, reliable=True, topic="", destination_identities=None):
+        await orig_publish(data, reliable, topic, destination_identities)
+        tid = json.loads(data)["id"]
+
+        async def feed():
+            await asyncio.sleep(0.01)
+            ctl.tell.update({"id": tid, "state": "rejected", "reason": reason})
+        asyncio.ensure_future(feed())
+
+    ctl.room.local_participant.publish_data = publish
+    _sock(monkeypatch, ctl)
+    t0 = time.monotonic()
+    assert _main(["tell-delta", "x", "--wait", "20"]) == 1
+    assert time.monotonic() - t0 < 5   # never the full --wait
+    got = json.loads(capsys.readouterr().out)
+    assert got["state"] == "rejected" and got["reason"] == reason and got["hint"] == hint
+
+
+def test_late_rejected_event_has_reason_hint():
+    for reason, hint in REASONS:
+        ev = telldelta.status_event({"id": "dt-x", "state": "rejected", "reason": reason})
+        assert ev["reason"] == reason and ev["hint"] == hint
+
+
+def test_help_lists_reject_reasons(capsys):
+    assert _main(["tell-delta", "--help"]) == 0
+    out = capsys.readouterr().out
+    for reason, _h in REASONS:
+        assert reason in out

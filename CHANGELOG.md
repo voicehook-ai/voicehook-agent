@@ -6,6 +6,7 @@ voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the vers
 ## 0.35.9
 
 - **`voicehook-agent tell-delta "<Anweisung>" [--wörtlich] [--vorrang] [--wait SEC]`: give Delta an instruction without speaking (owner's main agent only).** The running join sends `delta.tell` `{id, text, verbatim, priority: "normal"|"vorrang"}` to the worker only and tracks `delta.tell_status` `{id, state: queued|spoken|covered|rejected, reason?}`; `--wait` waits for spoken/covered/rejected. A join without `VOICEHOOK_AGENT_KEY` (or `owner-agent: not granted`), a helper session or a guest gets a clear error and nothing is sent; `rejected`/`not_owner_agent` comes with a hint. One JSON line with the id; exit 0 ok, 1 refused, 2 bad input, 3 no join.
+- **`tell-delta`: rejected reasons of the worker (voicehook-v4 #897).** `rejected` with `reason` `interrupted` (cut off mid-announcement), `not_spoken` (never started: sound off or error) or `call_ended` (call over) gets a clear German `hint` like `not_owner_agent`; `--wait` ends at once with exit 1. Help text and docs/CLI.md list the four reasons.
 
 ## 0.35.8
 
