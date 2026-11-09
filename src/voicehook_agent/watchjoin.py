@@ -21,7 +21,9 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import socket
+import time
 from pathlib import Path
 
 from . import activity as vact
@@ -220,6 +222,93 @@ def room_joins(rel: dict, *, proc_root: Path = Path("/proc"), sess_root: Path | 
             if _sock_alive(sub / vsession.SOCKET_NAME):
                 names.add(name_of_identity(sub.name))
     return stems, names
+
+
+# --------------------------------------------------------------------------- #
+# 0.35.9 participants of the room (Karte T4wKfeaJ, Oliver 09.11.: Malik wurde dreimal gefragt,
+# obwohl er mit eigenem Join im Call war): every join of this machine keeps the participant
+# list of its room in <join dir>/peers.json, rewritten on every join / leave / attribute
+# change; the watcher reads it every tick (the current state, not a snapshot of its start).
+# --------------------------------------------------------------------------- #
+PEERS_NAME = "peers.json"
+_BRACKETS = re.compile(r"[\[(<{][^\])>}]{0,12}[\])>}]")
+_CUT = re.compile(r"\s+[-\u2013\u2014]\s+|[\u00b7\u2022:|,/(]")
+
+
+def core_name(label: str) -> str:
+    """The name part of a session / participant label, lower case: prefixes like "[R]" and
+    emojis dropped, cut at the first separator (" · ", " - ", ":", "|", ","):
+    "[R] \U0001f6e1\ufe0f Bruno · Head of Infrastructure & Security · crown" -> "bruno",
+    "Malik · Head of Data Pipeline" -> "malik". '' when nothing is left."""
+    s = _BRACKETS.sub(" ", str(label or ""))
+    s = "".join(ch if (ch.isalnum() or ch.isspace() or ch in "-\u2013\u2014\u00b7\u2022:|,/(._'") else " "
+                for ch in s)
+    s = _CUT.split(s.strip(), maxsplit=1)[0]
+    return " ".join(s.split()).strip(" .-_'").lower()
+
+
+def first_name(label: str) -> str:
+    """First word of core_name ("bruno"), '' when shorter than 2 characters."""
+    parts = core_name(label).split()
+    w = parts[0] if parts else ""
+    return w if len(w) >= 2 else ""
+
+
+def write_peers(path: Path, identity: str, peers: list[dict], now: float | None = None) -> None:
+    """The join's view of its room: {at, identity, peers: [{identity, name, human}]}. Names
+    only, no tokens, no content. Never raises."""
+    with contextlib.suppress(Exception):
+        body = {"at": time.time() if now is None else now, "identity": str(identity or ""),
+                "peers": [{"identity": str(p.get("identity") or ""), "name": str(p.get("name") or "")[:120],
+                           "human": bool(p.get("human"))} for p in peers][:64]}
+        vact._write_private(path, json.dumps(body, ensure_ascii=False))
+
+
+def room_participants(rel: dict, *, sess_root: Path | None = None) -> list[dict]:
+    """Participants of THIS room as the live joins of this machine see them right now:
+    [{identity, name, human}], each join itself included. Only joins whose control socket
+    still answers (a crashed join leaves a stale list). Never raises."""
+    room = str((rel or {}).get("room") or "")
+    out: list[dict] = []
+    if not room:
+        return out
+    with contextlib.suppress(Exception):
+        rd = (sess_root / room) if sess_root is not None else vsession.room_dir(room)
+        for sub in sorted(rd.iterdir()) if rd.is_dir() else []:
+            if not _sock_alive(sub / vsession.SOCKET_NAME):
+                continue
+            try:
+                d = json.loads((sub / PEERS_NAME).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                d = {}
+            d = d if isinstance(d, dict) else {}
+            out.append({"identity": str(d.get("identity") or sub.name), "name": "", "human": False})
+            for p in d.get("peers") or []:
+                if isinstance(p, dict):
+                    out.append({"identity": str(p.get("identity") or ""), "name": str(p.get("name") or ""),
+                                "human": bool(p.get("human"))})
+    return out
+
+
+def participant_names(parts: list[dict]) -> set[str]:
+    """Names (core name and first name) of the agent participants; humans and the voicebot
+    (identity "delta-..." / name "Delta") are no session and never count."""
+    names: set[str] = set()
+    for p in parts:
+        if p.get("human"):
+            continue
+        for raw in (p.get("name"), name_of_identity(str(p.get("identity") or ""))):
+            core, first = core_name(str(raw or "")), first_name(str(raw or ""))
+            names |= {x for x in (core, first) if x and x != "delta"}
+    return names
+
+
+def named_in_call(label: str, names: set[str]) -> bool:
+    """The session's name or first name is in the participant list already."""
+    if not names:
+        return False
+    core, first = core_name(label), first_name(label)
+    return bool((core and core in names) or (first and first in names))
 
 
 def _label_names(label: str) -> set[str]:
