@@ -116,7 +116,6 @@ def _last_sentence(par: str) -> str:
 _WORD = re.compile(r"[^\W\d_]{2,}")      # a word of at least two letters
 _TOKEN = re.compile(r"[#\w]{3,}")
 SIMILAR_MIN = 0.6           # token overlap (Jaccard) of two questions that are the same one
-DECIDE_FRESH_S = 1800.0     # a decide question this young (open or answered) blocks its mirror
 
 
 def _asks_human(sent: str) -> bool:
@@ -259,17 +258,18 @@ def similar(a: str, b: str) -> bool:
     return inter / len(ta | tb) >= SIMILAR_MIN or inter / min(len(ta), len(tb)) >= 0.85
 
 
-def mirror_question(event: dict, skey: str = "", now: float | None = None) -> dict | None:
+def mirror_question(event: dict, skey: str = "", room: str = "") -> dict | None:
     """0.35.8: stop_question, but only what is addressed to the human: never the answer of a
     turn another agent started, never a question to an agent of the call, never one a session
-    of this room already asked with decide (open or answered within DECIDE_FRESH_S)."""
+    of this call's room already asked with decide (open or answered, until the call ends; no
+    time limit, AGT-F8)."""
     if agent_turn(event):
         return None
     item = stop_question(last_message(event))
     if item is None:
         return None
     from . import board
-    names, asked = board.room_questions(skey, (time.time() if now is None else now) - DECIDE_FRESH_S)
+    names, asked = board.room_questions(skey, room)
     if _to_agent(item["question"], names):
         return None
     if any(similar(item["question"], q) for q in asked):
@@ -460,7 +460,7 @@ def stop_ask(raw: str, wait: bool = True, now: float | None = None, post=None,
             return 0, ""
         skey, rel, frm = who
         t = time.time() if now is None else now
-        item = mirror_question(event, skey, t)
+        item = mirror_question(event, skey, str(rel.get("room") or ""))
         if item is None or not _first_time(skey, _hash(item), t):
             # 0.21.4: no new question at this Stop, but earlier ones (`vh-helper decide`,
             # `voicehook-agent decide`) still open: wait for their answers and wake the session

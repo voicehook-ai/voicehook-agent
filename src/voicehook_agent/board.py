@@ -612,7 +612,7 @@ def handle(raw: str, now: float | None = None, spawn=None, post=None, fetch=None
             or not _known_name(skey)
         label = _label(event, skey) if need else ""
         # 0.21.4: a Stop with an open question (own decide, or the reply asks) is `wartet`
-        waits = name_ev == "Stop" and _stop_waits(event, skey, t)
+        waits = name_ev == "Stop" and _stop_waits(event, skey, t, room)
         spid = 0 if _known_pid(skey) else session_pid()
 
         def step(st: dict):
@@ -964,19 +964,17 @@ def answer_text(ev: dict, info: dict | None = None) -> str:
 
 def question_check_text(ev: dict) -> str:
     """0.22.1: the server's question_check for this session (its board/feed line sounds like a
-    question to the human): ask it with decide, or the server puts it on the board itself."""
+    question to the human): ask it with decide if it is one. 0.35.8: the server never makes a
+    card of it itself (Oliver 26.10.), only an explicit decide (or the CLI's own mirror of a
+    reply) puts a question on the board."""
     quote = vact.scrub(str(ev.get("quote") or "")).strip()[:160]
-    try:
-        wait = int(ev.get("wait_s") or 90)
-    except (TypeError, ValueError):
-        wait = 90
     qid = re.sub(r"[^0-9a-z]", "", str(ev.get("id") or ""))[:16]
     return (f"voicehook-Call: Deine Meldung {_q(quote)} klingt nach einer Frage an den Menschen. "
-            f"Stelle sie jetzt per decide (vh-helper decide \"<dein Name>\" \"<Frage>\") oder "
-            f"nimm sie vom Board, wenn es keine Frage ist; sonst legt der Server sie in {wait} s "
-            f"selbst als automatisch erkannte Frage an (question_check {qid}). / voicehook call: "
-            f"your line {_q(quote)} sounds like a question to the human. Ask it with decide now, "
-            f"or the server puts it on the board itself in {wait} s.")
+            f"Falls es eine ist, stelle sie per decide (vh-helper decide \"<dein Name>\" \"<Frage>\"); "
+            f"auf das Board kommt sie nur so (oder wenn die CLI sie in deiner Antwort als Frage "
+            f"erkennt). Keine Frage: nichts zu tun (question_check {qid}). / voicehook call: your "
+            f"line {_q(quote)} sounds like a question to the human. If it is one, ask it with "
+            f"decide; only then does it reach the board. Not a question: nothing to do.")
 
 
 def record_question(skey: str, dec_id: str, question: str, number: object = None,
@@ -991,7 +989,7 @@ def record_question(skey: str, dec_id: str, question: str, number: object = None
             me = st["sessions"].setdefault(skey, {})
             qs = me.get("qs") if isinstance(me.get("qs"), dict) else {}
             qs.pop(dec_id, None)
-            qs[dec_id] = {"question": str(question or "")[:200], "src": src, "at": time.time(),
+            qs[dec_id] = {"question": str(question or "")[:200], "src": src,
                           **({"number": number} if isinstance(number, int) else {}),
                           **({"options": [str(o)[:60] for o in options][:4]} if options else {})}
             while len(qs) > QUESTIONS_KEEP:
@@ -1016,17 +1014,18 @@ def mirror_note(question: str, number: object, src: str) -> str:
             "the answer comes here and quotes it.")
 
 
-def room_questions(skey: str, since: float) -> tuple[list[str], list[str]]:
-    """0.35.8 (asks.mirror_question): (the board names of the other sessions in this
-    session's room, the decide questions any session of the room asked since `since`, open
-    or answered). ([], []) without state. Never raises."""
+def room_questions(skey: str, room: str = "") -> tuple[list[str], list[str]]:
+    """0.35.8 (asks.mirror_question): (the board names of the other sessions in the call's
+    room, the decide questions any session of that room asked in this call, open or answered:
+    a session entry starts empty in a new room, see _me). `room` = the call's room (relay),
+    '' = this session's recorded room. ([], []) without state. Never raises."""
     try:
         st = json.loads((vact.state_root() / STATE_NAME).read_text(encoding="utf-8"))
         sessions = st.get("sessions") if isinstance(st.get("sessions"), dict) else {}
     except (OSError, ValueError, AttributeError):
         return [], []
     me = sessions.get(skey) if isinstance(sessions.get(skey), dict) else {}
-    room = me.get("room")
+    room = room or str(me.get("room") or "")
     names: list[str] = []
     asked: list[str] = []
     for k, s in sessions.items():
@@ -1036,7 +1035,7 @@ def room_questions(skey: str, since: float) -> tuple[list[str], list[str]]:
             names += [str(s.get(f)) for f in ("from", "name") if s.get(f)]
         qs = s.get("qs") if isinstance(s.get("qs"), dict) else {}
         asked += [str(q.get("question")) for q in qs.values() if isinstance(q, dict)
-                  and q.get("src") == "decide" and q.get("question") and _float(q.get("at")) >= since]
+                  and q.get("src") == "decide" and q.get("question")]
     return names, asked
 
 
@@ -1273,14 +1272,14 @@ def agent_pid(start: int | None = None, proc=_proc) -> int:
     return 0
 
 
-def _stop_waits(event: dict, skey: str, t: float) -> bool:
+def _stop_waits(event: dict, skey: str, t: float, room: str = "") -> bool:
     """Stop of a session that waits for the human: an own question is still open, or the
-    reply ends with a question (asks.stop_question)."""
+    reply ends with a question to the human (asks.mirror_question)."""
     try:
         if open_names(skey, t):
             return True
         from . import asks
-        return asks.mirror_question(event, skey, t) is not None
+        return asks.mirror_question(event, skey, room) is not None
     except Exception:  # noqa: BLE001
         return False
 
