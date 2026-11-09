@@ -179,9 +179,10 @@ everything works as before 0.24.0.
 
 The server checks board and feed lines for hidden questions (`question_check`). `next` brings
 your own as `{"type":"question_check","id","quote","kind","wait_s","text"}`; a helper's goes to
-that helper (`relay-next`, hook context). Ask it with `decide` within `wait_s` (90 s), else the
-server puts it on the board itself; that answer comes with `"auto": true` and the `question`
-(also in the `helper_decision` copy), so nobody mistakes it for a question the helper asked.
+that helper (`relay-next`, hook context). If it is a question, ask it with `decide`; the server
+never puts it on the board itself (Oliver 26.10.), only `decide` (or the CLI's own mirror of a
+reply, 0.35.8) does. An older auto answer comes with `"auto": true` and the `question` (also in
+the `helper_decision` copy), so nobody mistakes it for a question the helper asked.
 
 ### Helpers: one routing rule, one credential per session (0.22.2)
 

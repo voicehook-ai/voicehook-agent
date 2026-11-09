@@ -98,30 +98,40 @@ def test_wahl_header_with_list_is_no_question():                                
     assert asks.stop_question(text) is None
 
 
-def test_decide_duplicate_in_the_room_is_never_mirrored(relay, tmp_path, monkeypatch):  # Ines Nr. 27
-    fb = Board()
-    sk = ms.session_hash("other-1")
-    theo = ms.session_hash("theo-1")
-    monkeypatch.setattr(board.time, "time", lambda: 900.0)
-    st = {"sessions": {
-        sk: {"room": "room-a", "from": "Ines"},
-        theo: {"room": "room-a", "from": "Theo",
-               "qs": {"dTheo": {"question": "Welche Variante nehmen wir zuerst, Server oder CLI?",
-                                "src": "decide", "at": 900.0}}}}}
+def _state(st: dict) -> None:
     activity._private_dir(activity.state_root())
     (activity.state_root() / board.STATE_NAME).write_text(json.dumps(st))
+
+
+THEO_Q = {"dTheo": {"question": "Welche Variante nehmen wir zuerst, Server oder CLI?", "src": "decide"}}
+
+
+def test_decide_duplicate_in_the_room_is_never_mirrored(relay, tmp_path):         # Ines Nr. 27
+    fb = Board()
+    sk = ms.session_hash("other-1")
+    _state({"sessions": {sk: {"room": "room-a", "from": "Ines"},
+                         ms.session_hash("theo-1"): {"room": "room-a", "from": "Theo", "qs": THEO_Q}}})
     reply = "Welche Variante nehmen wir zuerst?\nA) Server\nB) CLI"
     assert asks.stop_question(reply) is not None
-    assert _stop(_ev(last_assistant_message=reply), fb, now=1000.0) == (0, "") and fb.created == []
-    # much later (no fresh decide question any more): mirrored again
-    assert _stop(_ev(last_assistant_message=reply), fb, now=900.0 + asks.DECIDE_FRESH_S + 60) == (0, "")
+    # no time limit (AGT-F8): hours later in the same call, still a duplicate
+    for now in (1000.0, 1000.0 + 6 * 3600):
+        assert _stop(_ev(last_assistant_message=reply), fb, now=now) == (0, "")
+    assert fb.created == []
+
+
+def test_decide_question_of_an_earlier_call_blocks_nothing(relay, tmp_path):
+    fb = Board()
+    sk = ms.session_hash("other-1")
+    _state({"sessions": {sk: {"room": "room-a", "from": "Ines"},
+                         ms.session_hash("theo-1"): {"room": "room-old", "from": "Theo", "qs": THEO_Q}}})
+    _stop(_ev(last_assistant_message="Welche Variante nehmen wir zuerst?\nA) Server\nB) CLI"), fb)
     assert len(fb.created) == 1
 
 
 def test_own_decide_question_recorded_with_time_blocks_its_mirror(relay):
     sk = ms.session_hash("other-1")
     board.record_question(sk, "d1", "Soll ich #889 mergen?", 4, src="decide")
-    _names, asked = board.room_questions(sk, 0.0)
+    _names, asked = board.room_questions(sk)
     assert asked == ["Soll ich #889 mergen?"]
     assert asks.mirror_question(_ev(last_assistant_message="Soll ich PR #889 jetzt mergen?"), sk) is None
 
@@ -144,20 +154,19 @@ def test_options_need_a_question_line():                                        
 
 def test_question_to_an_agent_of_the_call_is_never_mirrored(relay):
     sk = ms.session_hash("other-1")
-    st = {"sessions": {sk: {"room": "room-a", "from": "Ines"},
-                       ms.session_hash("n"): {"room": "room-a", "from": "Nora"}}}
-    activity._private_dir(activity.state_root())
-    (activity.state_root() / board.STATE_NAME).write_text(json.dumps(st))
+    _state({"sessions": {sk: {"room": "room-a", "from": "Ines"},
+                         ms.session_hash("n"): {"room": "room-a", "from": "Nora"}}})
     for reply in ("Nora, soll ich den Befund an Theo geben?", "@Nora passt das so?",
                   "Frage an Nora: übernimmst du den Server-Teil?"):
         assert asks.mirror_question(_ev(last_assistant_message=reply), sk) is None, reply
     assert asks.mirror_question(_ev(last_assistant_message="Soll ich Nora den Befund geben?"), sk) is not None
 
 
-def test_question_check_hint_untouched():
-    """Problem 5 (server side, not here): the hint still names the server's 90 s auto question."""
-    txt = board.question_check_text({"type": "question_check", "quote": "x", "id": "q1"})
-    assert "90 s" in txt
+def test_question_check_hint_names_no_server_card():
+    """The server never makes a card of a question_check (Oliver 26.10.): no 90 s threat."""
+    txt = board.question_check_text({"type": "question_check", "quote": "x", "id": "q1", "wait_s": 90})
+    assert "decide" in txt and "question_check q1" in txt
+    assert "90" not in txt and "selbst" not in txt and "board itself" not in txt
 
 
 # ----- positive controls ----------------------------------------------------------------------

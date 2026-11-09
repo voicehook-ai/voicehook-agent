@@ -117,7 +117,7 @@ def test_answer_text_says_auto_detected_with_question():
 
 def test_question_check_text_for_hook():
     txt = board.answer_text(QC, None)
-    assert "wartet auf Freigabe" in txt and "decide" in txt and "90" in txt
+    assert "wartet auf Freigabe" in txt and "decide" in txt and "90" not in txt
 
 
 def test_helper_decision_copy_marks_auto_and_question():
