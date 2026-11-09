@@ -36,7 +36,12 @@ LINK_TRIES = 3
 
 _REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
 _SKIP_PREFIX = ("<command-", "<local-command", "<user-prompt-submit-hook", "<task-notification",
-                "<bash-", "<ide_", "Caveat:", "[Request interrupted", "<system-reminder")
+                "<bash-", "<ide_", "Caveat:", "[Request interrupted", "<system-reminder",
+                # 0.35.8: no orders of the human (Kanban 09.11.: 45 message cards for one head)
+                "<cross-session-message",                      # another session's message
+                "This session is being continued from a previous conversation",  # compaction summary
+                "[Fälligkeits-Wächter]", "[Fragen-Wächter]", "[Takt]", "Session-Watcher:",  # automats
+                "[SYSTEM NOTIFICATION")
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 
 
