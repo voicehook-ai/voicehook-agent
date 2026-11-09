@@ -6,6 +6,7 @@ voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the vers
 ## 0.35.8
 
 - **`voicehook-agent task assign <nr> <head> [--session SLUG]`: hand a Kanban card to another head (owner op).** The running join sends `POST /api/cli/tasks/{nr}/assign {assignee: <head>}` itself, with its own LiveKit token (control socket, cmd `task_assign`); the token never leaves the join process, is never printed, logged or written to disk. The server allows it only for a join WITH `VOICEHOOK_AGENT_KEY` while the owner is alone with own agents in the call. One JSON line `{ok, op, nr, status, error?, hint?, assignee?}`; no join -> hint "mit VOICEHOOK_AGENT_KEY beitreten", 403 owner_only -> hint "Join ohne Schlüssel oder Inhaber nicht allein mit eigenen Agenten", 429 is passed on (callers throttle). Exit 0 ok, 1 refused, 2 bad input, 3 no join.
+- **`voicehook-agent task discard <nr> [--session SLUG]`: mark a Kanban card as discarded (owner op, never a deletion).** Same path as `task assign`: the running join sends `POST /api/cli/tasks/{nr}/discard {}` with its own LiveKit token; the control command is now `task_op` with field `op` (assign | discard), `task_assign` stays accepted. One JSON line `{ok, op: "discard", nr, status, error?, hint?}`, same hints and exit codes as assign; a join older than this CLI answers `join_too_old`. No DELETE route.
 
 ## 0.35.7
 

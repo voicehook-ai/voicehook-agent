@@ -1818,14 +1818,15 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
     if cmd == "data":  # 0.21.4 `voicehook-agent send-data` (datachan.py)
         ctl.watchdog.touch()
         return await _send_data(ctl, req)
-    if cmd == vownerops.CMD:  # 0.35.8 `voicehook-agent task assign` (ownerops.py)
+    if cmd in vownerops.CMDS:  # 0.35.8 `voicehook-agent task assign|discard` (ownerops.py)
         ctl.watchdog.touch()
         try:
-            req_ok = vownerops.request(req.get("nr"), str(req.get("head") or ""))
+            req_ok = vownerops.from_control(req)
         except vownerops.AssignError as e:
-            return vownerops.failed(req.get("nr"), str(e))
-        return await vownerops.post(ctl.api_base or "", ctl.lk_jwt, req_ok["nr"], req_ok["head"],
-                                    {"user-agent": _USER_AGENT, "x-vh-cli": _VERSION})
+            op = req.get("op") if req.get("op") in vownerops.OPS else "assign"
+            return vownerops.failed(req.get("nr"), str(e), op=op)
+        return await vownerops.post_op(ctl.api_base or "", ctl.lk_jwt, req_ok,
+                                       {"user-agent": _USER_AGENT, "x-vh-cli": _VERSION})
     if cmd == "transcript":  # `voicehook-agent transcript` (calltranscript.py)
         ctl.watchdog.touch()
         return await _transcript_request(ctl, req)
@@ -4424,24 +4425,26 @@ def _run_client(args) -> int:
 
 
 def _run_task(args) -> int:
-    """0.35.8 `task assign <nr> <head>`: the running join sends the owner op with its own
-    LiveKit token (ownerops.py). One JSON line; exit 0 ok, 1 refused/failed, 2 bad input,
-    3 no join."""
+    """0.35.8 `task assign <nr> <head>` / `task discard <nr>`: the running join sends the owner
+    op with its own LiveKit token (ownerops.py). One JSON line; exit 0 ok, 1 refused/failed,
+    2 bad input, 3 no join."""
+    op = args.task_op
     try:
-        req = vownerops.request(args.nr, args.head)
+        req = vownerops.op_request(op, args.nr, getattr(args, "head", None))
     except vownerops.AssignError as e:
-        print(json.dumps(vownerops.failed(args.nr, str(e)), ensure_ascii=False), flush=True)
+        print(json.dumps(vownerops.failed(args.nr, str(e), op=op), ensure_ascii=False), flush=True)
         return 2
     try:
         sock = vsession.resolve_socket(args.session, wait=args.wait)
         reply = vsession.request(sock, req, timeout=vownerops.HTTP_TIMEOUT_S + 15.0)
     except (vsession.ForeignJoin, vsession.SessionError, OSError):
-        print(json.dumps(vownerops.failed(args.nr, "no_join", vownerops.HINT_JOIN),
+        print(json.dumps(vownerops.failed(args.nr, "no_join", vownerops.HINT_JOIN, op=op),
                          ensure_ascii=False), flush=True)
         return 3
-    if not isinstance(reply, dict) or "op" not in reply:   # join older than 0.35.8
+    if not isinstance(reply, dict) or reply.get("op") != op:   # join older than this CLI
         reply = vownerops.failed(args.nr, "join_too_old",
-                                 "der laufende Join kennt task assign nicht: voicehook-agent rejoin")
+                                 f"der laufende Join kennt task {op} nicht: voicehook-agent rejoin",
+                                 op=op)
     print(json.dumps(reply, ensure_ascii=False), flush=True)
     return 0 if reply.get("ok") else 1
 
@@ -5363,7 +5366,8 @@ def main(argv: list[str] | None = None) -> None:
         "or --to-me the ones addressed to you still waiting to be consumed")
     p_task = sub.add_parser(
         "task", help="0.35.8: owner op on the account's Kanban, sent by the running join with "
-        "its own call token: `task assign <nr> <head>` hands card <nr> to the head (chip label). "
+        "its own call token: `task assign <nr> <head>` hands card <nr> to the head (chip label), "
+        "`task discard <nr>` marks it as discarded (never a deletion). "
         "Only a join WITH VOICEHOOK_AGENT_KEY, while the owner is alone with own agents in the "
         "call; one JSON line {ok, nr, status, error?, hint?}",
         description="Exit 0 = ok, 1 = refused / failed (incl. 429), 2 = bad input, 3 = no join.")
@@ -5372,6 +5376,10 @@ def main(argv: list[str] | None = None) -> None:
     p_ta.add_argument("nr", type=int, metavar="NR", help="card number")
     p_ta.add_argument("head", metavar="HEAD", help="chip label of the new head (agent session)")
     _add_session(p_ta)
+    p_td = task_sub.add_parser("discard", help="mark card <nr> as discarded (not a deletion, "
+                               "the owner can bring it back)")
+    p_td.add_argument("nr", type=int, metavar="NR", help="card number")
+    _add_session(p_td)
     p_tasks.add_argument("--to-me", action="store_true", default=False,
                          help="list the tasks addressed TO this session (incoming), not the ones it sent")
     for dcmd, what in (("delta-rule", "a standing conversation rule (how Delta talks or behaves)"),
