@@ -614,3 +614,15 @@ def test_fetch_answers_remote_keeps_stale_for_relay_next(monkeypatch):
     assert [e.get("id") for e in got] == [ANS["id"]]
     kept = relayops.take_jsonl(relayops.inbox_path("A"), relayops._is_stale)
     assert [k["items"][0]["text"] for k in kept] == ["alt"]
+
+
+def test_helper_hint_never_asks_for_flags_vh_helper_lacks(monkeypatch):
+    # 0.35.8 (Kanban 09.11.): "--context"/"--faq" an vh-helper wurden offene Punkte und damit Karten
+    monkeypatch.setattr(board.shutil, "which", lambda name: "/usr/local/bin/" + name)
+    text = board.reminder_text("SE Gate", None)
+    assert 'vh-helper status "SE Gate"' in text
+    assert '--context "<was, warum, Stand>" + 3 --faq' not in text
+    assert "nie --context/--faq" in text
+    monkeypatch.setattr(board.shutil, "which", lambda name: None)
+    cli = board.reminder_text("SE Gate", None)
+    assert 'voicehook-agent status "<Schritt + ETA>"' in cli and '--context "<was, warum, Stand>" + 3 --faq' in cli
