@@ -239,6 +239,7 @@ from . import helperaccess as vhelp
 from . import localsessions as vlocal
 from . import midturn as vmidturn
 from . import multisession as vmulti
+from . import ownerops as vownerops
 from . import plaintext as vplain
 from . import relayops as vrelayops
 from . import selfupdate as vselfupdate
@@ -1817,6 +1818,14 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
     if cmd == "data":  # 0.21.4 `voicehook-agent send-data` (datachan.py)
         ctl.watchdog.touch()
         return await _send_data(ctl, req)
+    if cmd == vownerops.CMD:  # 0.35.8 `voicehook-agent task assign` (ownerops.py)
+        ctl.watchdog.touch()
+        try:
+            req_ok = vownerops.request(req.get("nr"), str(req.get("head") or ""))
+        except vownerops.AssignError as e:
+            return vownerops.failed(req.get("nr"), str(e))
+        return await vownerops.post(ctl.api_base or "", ctl.lk_jwt, req_ok["nr"], req_ok["head"],
+                                    {"user-agent": _USER_AGENT, "x-vh-cli": _VERSION})
     if cmd == "transcript":  # `voicehook-agent transcript` (calltranscript.py)
         ctl.watchdog.touch()
         return await _transcript_request(ctl, req)
@@ -4414,6 +4423,29 @@ def _run_client(args) -> int:
     return 0 if reply.get("ok") else 1
 
 
+def _run_task(args) -> int:
+    """0.35.8 `task assign <nr> <head>`: the running join sends the owner op with its own
+    LiveKit token (ownerops.py). One JSON line; exit 0 ok, 1 refused/failed, 2 bad input,
+    3 no join."""
+    try:
+        req = vownerops.request(args.nr, args.head)
+    except vownerops.AssignError as e:
+        print(json.dumps(vownerops.failed(args.nr, str(e)), ensure_ascii=False), flush=True)
+        return 2
+    try:
+        sock = vsession.resolve_socket(args.session, wait=args.wait)
+        reply = vsession.request(sock, req, timeout=vownerops.HTTP_TIMEOUT_S + 15.0)
+    except (vsession.ForeignJoin, vsession.SessionError, OSError):
+        print(json.dumps(vownerops.failed(args.nr, "no_join", vownerops.HINT_JOIN),
+                         ensure_ascii=False), flush=True)
+        return 3
+    if not isinstance(reply, dict) or "op" not in reply:   # join older than 0.35.8
+        reply = vownerops.failed(args.nr, "join_too_old",
+                                 "der laufende Join kennt task assign nicht: voicehook-agent rejoin")
+    print(json.dumps(reply, ensure_ascii=False), flush=True)
+    return 0 if reply.get("ok") else 1
+
+
 def _print_transcript(reply: dict) -> int:
     """`transcript` without --json: 'HH:MM Sprecher: Text' per line to stdout (the calling
     agent only, never a file); errors as one clear line."""
@@ -5329,6 +5361,17 @@ def main(argv: list[str] | None = None) -> None:
         "tasks", help="0.24.0: the agent-to-agent tasks of THIS session, reconstructed from the "
         "inbox on disk: the ones you sent that are still open ('Auftrag offen bei X seit MM:SS'), "
         "or --to-me the ones addressed to you still waiting to be consumed")
+    p_task = sub.add_parser(
+        "task", help="0.35.8: owner op on the account's Kanban, sent by the running join with "
+        "its own call token: `task assign <nr> <head>` hands card <nr> to the head (chip label). "
+        "Only a join WITH VOICEHOOK_AGENT_KEY, while the owner is alone with own agents in the "
+        "call; one JSON line {ok, nr, status, error?, hint?}",
+        description="Exit 0 = ok, 1 = refused / failed (incl. 429), 2 = bad input, 3 = no join.")
+    task_sub = p_task.add_subparsers(dest="task_op", required=True)
+    p_ta = task_sub.add_parser("assign", help="hand card <nr> to <head>")
+    p_ta.add_argument("nr", type=int, metavar="NR", help="card number")
+    p_ta.add_argument("head", metavar="HEAD", help="chip label of the new head (agent session)")
+    _add_session(p_ta)
     p_tasks.add_argument("--to-me", action="store_true", default=False,
                          help="list the tasks addressed TO this session (incoming), not the ones it sent")
     for dcmd, what in (("delta-rule", "a standing conversation rule (how Delta talks or behaves)"),
@@ -5536,6 +5579,8 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(_run_send(args))
     if args.cmd == "tasks":
         sys.exit(_run_tasks(args))
+    if args.cmd == "task":
+        sys.exit(_run_task(args))
     if args.cmd == "listen":
         sys.exit(_run_listen(args))
     if args.cmd == "log-summary":

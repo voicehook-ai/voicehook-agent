@@ -3,6 +3,10 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.35.8
+
+- **`voicehook-agent task assign <nr> <head> [--session SLUG]`: hand a Kanban card to another head (owner op).** The running join sends `POST /api/cli/tasks/{nr}/assign {assignee: <head>}` itself, with its own LiveKit token (control socket, cmd `task_assign`); the token never leaves the join process, is never printed, logged or written to disk. The server allows it only for a join WITH `VOICEHOOK_AGENT_KEY` while the owner is alone with own agents in the call. One JSON line `{ok, op, nr, status, error?, hint?, assignee?}`; no join -> hint "mit VOICEHOOK_AGENT_KEY beitreten", 403 owner_only -> hint "Join ohne Schlüssel oder Inhaber nicht allein mit eigenen Agenten", 429 is passed on (callers throttle). Exit 0 ok, 1 refused, 2 bad input, 3 no join.
+
 ## 0.35.7
 
 - **Only main sessions, no subagents (Oliver 06.11.: "nur die Hauptsessions, die der User auch selbst in seiner Oberfläche sehen würde").** Hook events of a subagent (Agent tool, `agent_id`) no longer make a board, state, reminder or answer delivery of their own (0.21.1 gave each subagent its own helper board: extra heads such as `general-purpose 7c9e`). A subagent's `voicehook-agent status` runs with the parent's session id and lands on the parent's board. The session list of the Session Watcher lists main sessions only (no subagents, a name once: the one in the call, else the newest); a subagent switched on in an older list is no longer covered.
