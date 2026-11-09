@@ -73,7 +73,8 @@ def _handle(ctl, req):
 
 
 def test_request_shape():
-    assert ownerops.request(7, "  Kai   Zwei ") == {"cmd": "task_assign", "nr": 7, "head": "Kai Zwei"}
+    assert ownerops.request(7, "  Kai   Zwei ") == {"cmd": "task_op", "op": "assign", "nr": 7,
+                                                   "head": "Kai Zwei"}
     for nr, head in ((0, "Kai"), (-1, "Kai"), (True, "Kai"), ("7", "Kai"), (7, "  "), (7, "x" * 81)):
         with pytest.raises(ownerops.AssignError):
             ownerops.request(nr, head)
@@ -88,6 +89,11 @@ def test_join_posts_assign_with_its_livekit_token():
     assert headers == {"authorization": f"Bearer {JWT}"}
     assert client_headers["x-vh-cli"] == cli._VERSION
     assert len(FakeClient.calls) == 1   # never retried with the pump token
+
+
+def test_task_op_form_on_socket():
+    out = _handle(_ctl(), {"cmd": "task_op", "op": "assign", "nr": 7, "head": "Kai"})
+    assert out["ok"] and FakeClient.calls[0][1] == {"assignee": "Kai"}
 
 
 def test_no_livekit_token_sends_nothing():
@@ -176,7 +182,7 @@ def test_cli_one_json_line_ok(monkeypatch, capsys, caplog):
     lines = out.out.strip().splitlines()
     assert len(lines) == 1 and json.loads(lines[0]) == {
         "ok": True, "op": "assign", "nr": 7, "status": 200, "assignee": "Kai"}
-    assert sock.reqs == [{"cmd": "task_assign", "nr": 7, "head": "Kai"}]
+    assert sock.reqs == [{"cmd": "task_op", "op": "assign", "nr": 7, "head": "Kai"}]
     assert JWT not in out.out + out.err + caplog.text
 
 
