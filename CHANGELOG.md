@@ -3,6 +3,10 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.35.9
+
+- **A growing utterance spools only its new part (call ember-orbit 09.11.: Malik's spool held 7 versions of one utterance, 1340 to 3017 chars).** In hold mode the worker sends the same long utterance again as a new final user turn with the whole text so far. The join (`relay.UserContinuation`, applied where user turns enter the `next` spool) keeps the last full text per speaker: a server that marks the turn (`seg`, `fresh`, `continued: true`; field names as constants in relay.py) -> `fresh` is the event text, with `continued: true`, `full_len`, `seg`; an old server -> a text that starts with the complete last text of the same speaker (at a word boundary) gives only the rest, with `continued: true` and `full_len`. An empty new part spools nothing. A rewritten sentence stays a normal event. No time window.
+
 ## 0.35.8
 
 - **Board mirror follow-up (Ravi's review of #178).** The duplicate check against `decide` questions has no time limit any more (AGT-F8): a reply stays unmirrored as long as a similar `decide` question of the call's room is open or was answered in this call (the session entries of a room start empty in a new call). The question_check hint no longer says the server puts the line on the board itself in 90 s: it never does (Oliver 26.10.); the hint now says to ask it with decide if it is a question, else nothing to do. docs/CLI.md likewise.

@@ -1065,6 +1065,7 @@ class _Control:
         # 0.7.0: latency_warning + status_stale; 0.9.0: status_due + hint for `next`
         self.clock = relay.TurnClock(due_s=relay.status_due_seconds())
         self.agent_said = relay.AgentSaid()  # 0.7.0: Delta's own lines for `next`
+        self.continuation = relay.UserContinuation()  # 0.35.9: only the new part of a grown turn
         self.say_status = relay.SayStatus()  # 0.9.0: operator.say_status per own say
         # 0.16.0: helper sessions (local relay): sender -> from, for decision events
         self.relay_senders: dict[str, str] = {}
@@ -2962,6 +2963,8 @@ async def _connect_and_listen(
                 ctl.agent_said.add(text)  # Delta's own answer (not an echo of our say)
             if ctl is not None:
                 ev = relay.user_turn_event(role, text, payload)
+                if ev is not None:  # 0.35.9: a grown utterance spools only its new part
+                    ev = ctl.continuation.apply(ev, payload)
                 if ev is not None:
                     hf = relay.helper_turn_fields(payload)
                     if hf:  # 0.22.0: the human spoke to a helper by name: info copy for us
