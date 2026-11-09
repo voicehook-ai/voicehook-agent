@@ -441,8 +441,20 @@ def command_hint(name: str, local: bool = False) -> tuple[str, str]:
     return ('voicehook-agent status "<Schritt + ETA>"', 'voicehook-agent status ""')
 
 
+RULE_CLI = ('Pflicht je Eintrag und Entscheidung: --context "<was, warum, Stand>" + 3 --faq "Frage::Antwort" '
+            '(noch offen: "In Arbeit bei <Name>, ca. 10 Min"). / Always: context + 3 follow-up Q&A.')
+# 0.35.8: vh-helper has no --context/--faq and posts every extra argument as an open item; the
+# server mirrors open items as Kanban cards ("--context", "--faq", "Frage::Antwort" as titles,
+# 09.11.). With vh-helper the reminder therefore asks for plain arguments only.
+RULE_HELPER = ("vh-helper kennt keine Flags: nur Name, Schritt und offene Punkte als einfache Texte, nie "
+               "--context/--faq anhängen (jedes Argument wird ein offener Punkt). Kontext + 3 FAQ geht nur mit "
+               "`voicehook-agent status --doing ... --context ... --faq ...`. / vh-helper takes no flags: "
+               "never append --context/--faq.")
+
+
 def reminder_text(name: str, age_s: float | None, local: bool = False) -> str:
     set_cmd, clear_cmd = command_hint(name, local)
+    rule = RULE_HELPER if set_cmd.startswith("vh-helper") else RULE_CLI
     if age_s is None:
         de = f"voicehook-Call: Du hast kein Board (Name {_q(name)})."
         en = "voicehook call: you have no status board yet."
@@ -452,9 +464,7 @@ def reminder_text(name: str, age_s: float | None, local: bool = False) -> str:
         en = f"voicehook call: your status board is {mins} min old."
     return (f"{de} Jetzt `{set_cmd}` setzen (oder leeren mit `{clear_cmd}`, wenn du nichts "
             f"tust). / {en} Set it now with your current step + ETA (or clear it when idle). "
-            "Keine Pfade, Secrets oder Kundendaten. Pflicht je Eintrag und Entscheidung: "
-            '--context "<was, warum, Stand>" + 3 --faq "Frage::Antwort" (noch offen: '
-            '"In Arbeit bei <Name>, ca. 10 Min"). / Always: context + 3 follow-up Q&A.')
+            f"Keine Pfade, Secrets oder Kundendaten. {rule}")
 
 
 def output(event_name: str, text: str) -> dict:
