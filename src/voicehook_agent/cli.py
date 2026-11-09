@@ -251,6 +251,7 @@ from . import ui as vui
 from . import visual as vvisual
 from . import waitcheck as vwait
 from . import watch as vwatch
+from . import watchjoin as vwatchjoin
 
 _SLUG_RX = re.compile(r"^[a-z]+-[a-z]+-[a-z]+-[A-Z0-9]{4,8}$")
 _VERSION = __version__
@@ -466,6 +467,92 @@ async def _emit_sessions_hint(json_mode: bool, detect=None) -> dict | None:
     return got
 
 
+# 0.35.9 (Karte T4wKfeaJ): hooks and Session Watcher are the default from the first join on.
+# The watcher already starts with the join (0.32.0, off: VOICEHOOK_WATCH=0); the Claude Code
+# hooks needed a separate `hook install` until now. Now the join installs them itself, once,
+# when Claude Code is on this machine (~/.claude exists) and they are missing. Off:
+# VOICEHOOK_AUTO_HOOKS=0 (then the onboarding still names `hook install`).
+AUTO_HOOKS_ENV = "VOICEHOOK_AUTO_HOOKS"
+
+
+def hooks_state(path: Path) -> str:
+    """'none' (no hook of ours in settings.json, or no file), 'current' (every hook of ours,
+    with this CLI's command) or 'other' (hooks of ours of another version / path, only some of
+    them, or a settings.json that is no JSON object)."""
+    try:
+        raw = path.read_text(encoding="utf-8") if path.exists() else ""
+        data = json.loads(raw or "{}")
+    except (OSError, ValueError):
+        return "other"
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    if not isinstance(data, dict) or (hooks is not None and not isinstance(hooks, dict)):
+        return "other"
+    hooks = hooks or {}
+    exe = vactivity.hook_bin()
+    found = current = 0
+    want_n = len(vactivity.HOOK_COMMANDS) + len(vactivity.EXTRA_HOOKS)
+    for ev, template in vactivity.HOOK_COMMANDS.items():
+        entries = hooks.get(ev) if isinstance(hooks.get(ev), list) else []
+        mine = vactivity._our_hooks(entries, ev)
+        found += bool(mine)
+        current += bool(mine) and all(h.get("command") == vactivity._with_bin(template, exe) for h in mine)
+    for ev, (template, _outer, _inner) in vactivity.EXTRA_HOOKS.items():
+        entries = hooks.get(ev) if isinstance(hooks.get(ev), list) else []
+        mine = vactivity._our_extra(entries, ev)
+        found += bool(mine)
+        current += bool(mine) and all(h.get("command") == vactivity._with_bin(template, exe) for h in mine)
+    if not found:
+        return "none"
+    return "current" if current == want_n else "other"
+
+
+def ensure_hooks(env=None, settings: Path | None = None) -> dict | None:
+    """Install the Claude Code hooks when NONE of ours are there yet: a `_meta: hooks` event
+    {installed, state, text}. Hooks of another version (or only some of them) are never
+    touched, the event says so and names `voicehook-agent hook install`. None: off, no Claude
+    Code here, or already current. Never raises."""
+    env = os.environ if env is None else env
+    if (env.get(AUTO_HOOKS_ENV) or "").strip().lower() in ("0", "false", "no", "off"):
+        return None
+    try:
+        path = settings or vactivity.default_settings_path()
+        if not path.parent.is_dir():
+            return None
+        state = hooks_state(path)
+        if state == "current":
+            return None
+        if state == "other":
+            return {"role": "system", "topic": "_meta", "_meta": "hooks", "installed": False,
+                    "state": "other",
+                    "text": (f"Claude-Code-Hooks einer anderen Version (oder unvollständig) in {path} gefunden: nicht "
+                             "geändert. Aktualisieren: voicehook-agent hook install. "
+                             "Diesen Hinweis abschalten: VOICEHOOK_AUTO_HOOKS=0.")}
+        rc, msg = vactivity.install(path)
+    except Exception as e:  # noqa: BLE001
+        rc, msg, path = 1, type(e).__name__, settings or Path("~/.claude/settings.json")
+    if rc == 0:
+        text = (f"Claude-Code-Einstellungen geändert: voicehook-Hooks in {path} eingetragen "
+                "(Standard ab dem ersten Join). Weitere Sessions dieses Rechners melden "
+                "Aktivität, Status und Fragen in den Call, schon laufende nach /hooks oder "
+                "einem Neustart. Nicht gewollt: VOICEHOOK_AUTO_HOOKS=0 setzen und die Einträge "
+                "entfernen.")
+    else:
+        text = f"Claude-Code-Hooks nicht installiert ({msg[:200]}); von Hand: voicehook-agent hook install"
+    return {"role": "system", "topic": "_meta", "_meta": "hooks", "installed": rc == 0,
+            "state": "none", "text": text}
+
+
+def _emit_hooks(json_mode: bool, env=None) -> dict | None:
+    """Always one visible line on stderr (the user's settings change); --json: the event too."""
+    got = ensure_hooks(env)
+    if got is None:
+        return None
+    print(f"[hooks] {got['text']}", file=sys.stderr, flush=True)
+    if json_mode:
+        print(json.dumps(got, ensure_ascii=False), flush=True)
+    return got
+
+
 # 0.21.5 onboarding: right after the join the agent learns how to bring more agents into the
 # call (multi-agent). Never spoken, no credential (placeholders only). Off: VOICEHOOK_ONBOARDING_HINT=0.
 ONBOARDING_ENV = "VOICEHOOK_ONBOARDING_HINT"
@@ -483,8 +570,10 @@ ONBOARDING_SHARE = [
 ]
 _ONBOARDING_TEXT = {
     "de": ("Multi-Agent: du kannst weitere Agenten in diesen Call holen. Frag den Menschen, ob du "
-           "das einrichten sollst. (1) Einladen: jede weitere Claude-Code-Session dieses Rechners "
-           "meldet sich nach einmal `{i0}` (Codex: `{i1}`, opencode: `{i2}`) als Helfer im Call; "
+           "das einrichten sollst. (1) Einladen: Hooks und Session Watcher sind ab dem ersten Join "
+           "Standard (der Join installiert die Claude-Code-Hooks selbst, sonst `{i0}`; Codex: `{i1}`, "
+           "opencode: `{i2}`): jede weitere Claude-Code-Session dieses Rechners meldet sich als "
+           "Helfer im Call, eine schon laufende nach /hooks oder einem Neustart; "
            "soll sie mit eigener Stimme sprechen (jeder Agent eigene Stimme), tritt sie selbst bei: "
            "`{i3}` (derselbe Einladungslink). Anderer Rechner: `{i4}` (nie in einen Chat kopieren). "
            "(2) Einblenden und teilen: Helfer zeigen ihr Status-Board mit `{s0}` und offene "
@@ -495,8 +584,10 @@ _ONBOARDING_TEXT = {
            "Abkürzungen, Entscheidungen mit ? und --context; schlecht: \"{bad}\", gut: "
            "\"{good}\". (4) {wait_de} (5) {midturn_de}"),
     "en": ("Multi-agent: you can bring more agents into this call. Ask the human whether to set "
-           "it up. (1) Invite: every other Claude Code session on this machine reports as a "
-           "helper in the call after running `{i0}` once (Codex: `{i1}`, opencode: `{i2}`); "
+           "it up. (1) Invite: hooks and the Session Watcher are the default from the first join "
+           "on (the join installs the Claude Code hooks itself, else `{i0}`; Codex: `{i1}`, "
+           "opencode: `{i2}`): every other Claude Code session on this machine reports as a "
+           "helper in the call, one already running after /hooks or a restart; "
            "to speak with its own voice (every agent has its own voice), it joins itself: `{i3}` "
            "(the same invite link). Another machine: `{i4}` (never paste it into a chat). "
            "(2) Show and share: helpers put their status board into the call with `{s0}` and open "
@@ -1066,6 +1157,7 @@ class _Control:
         # 0.7.0: latency_warning + status_stale; 0.9.0: status_due + hint for `next`
         self.clock = relay.TurnClock(due_s=relay.status_due_seconds())
         self.agent_said = relay.AgentSaid()  # 0.7.0: Delta's own lines for `next`
+        self.continuation = relay.UserContinuation()  # 0.35.9: only the new part of a grown turn
         self.say_status = relay.SayStatus()  # 0.9.0: operator.say_status per own say
         # 0.16.0: helper sessions (local relay): sender -> from, for decision events
         self.relay_senders: dict[str, str] = {}
@@ -1099,6 +1191,7 @@ class _Control:
         self.listen_end: float | None = None
         self.last_say_at: float | None = None  # 0.21.7 (midturn.py): wall clock of the last say
         self.onboarding: dict | None = None  # 0.21.8: queued once, with the first say/next
+        self.peers_path: Path | None = None  # 0.35.9: <join dir>/peers.json for the watcher
         # `transcript` / Delta's send_transcript (calltranscript.py): parts put together in
         # memory only; request id -> the waiting `transcript` command
         self.transcripts = vtranscript.Assembler()
@@ -1126,6 +1219,20 @@ class _Control:
         if st != self.human_state:
             self.human_state = st
             self.events.put_nowait(relay.human_state_event(st))
+        self.write_peers(room)
+
+    def write_peers(self, room) -> None:
+        """0.35.9: the participant list of the room for the Session Watcher (watchjoin.PEERS_NAME
+        in the join dir), rewritten on every join / leave / attribute change. Names only."""
+        if self.peers_path is None:
+            return
+        out = []
+        for p in room.remote_participants.values():
+            attrs = dict(getattr(p, "attributes", None) or {})
+            out.append({"identity": str(getattr(p, "identity", "") or ""),
+                        "name": attrs.get("vh.name") or getattr(p, "name", "") or "",
+                        "human": relay.is_human_peer(_kind_label(p), attrs)})
+        vwatchjoin.write_peers(self.peers_path, self.ident, out)
 
     async def wait_room(self, timeout: float) -> rtc.Room | None:
         if self.room is not None:
@@ -3006,6 +3113,8 @@ async def _connect_and_listen(
                 ctl.agent_said.add(text)  # Delta's own answer (not an echo of our say)
             if ctl is not None:
                 ev = relay.user_turn_event(role, text, payload)
+                if ev is not None:  # 0.35.9: a grown utterance spools only its new part
+                    ev = ctl.continuation.apply(ev, payload)
                 if ev is not None:
                     hf = relay.helper_turn_fields(payload)
                     if hf:  # 0.22.0: the human spoke to a helper by name: info copy for us
@@ -3291,6 +3400,9 @@ async def _connect_and_listen(
     if share_hint is not None and not share_hint.get("shown"):
         share_hint["shown"] = True  # once per join: never again on a reconnect cycle
         _emit_share_hint(json_mode)
+    if share_hint is not None and not share_hint.get("hooks"):
+        share_hint["hooks"] = True  # 0.35.9: hooks are the default from the first join on
+        _emit_hooks(json_mode)
     if share_hint is not None and not share_hint.get("onboarding"):
         share_hint["onboarding"] = True  # 0.21.5: multi-agent onboarding, once per join
         _emit_onboarding_hint(json_mode)
@@ -3594,6 +3706,7 @@ async def _join(
         _emit_stale_join_notice(json_mode, stale_running_joins())
     if control and hasattr(asyncio, "start_unix_server"):
         sess_dir.mkdir(parents=True, exist_ok=True)
+        ctl.peers_path = sess_dir / vwatchjoin.PEERS_NAME
         server = vsession.ControlServer(vsession.socket_path(sess_dir),
                                         lambda req: _control_handler(ctl, req))
         try:

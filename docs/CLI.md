@@ -696,8 +696,12 @@ log, never published).
 
 One session joins, all other Claude Code sessions on the same machine (Mac, crown, ...)
 show up in the call's activity feed, each under its own name. Delta tells it as
-"mein Helfer ...". Needs `voicehook-agent hook install` once per machine (the hooks
-live in `~/.claude/settings.json`, so every session has them) and a server with the
+"mein Helfer ...". Needs the Claude Code hooks once per machine (they live in
+`~/.claude/settings.json`, so every session has them; 0.35.9: the first `join` installs them
+itself when Claude Code is on the machine and none of ours are there yet, with one visible
+`[hooks]` line on stderr (and the `_meta: hooks` event with `--json`); hooks of another version
+are never touched, only reported; off:
+`VOICEHOOK_AUTO_HOOKS=0`, then `voicehook-agent hook install` by hand) and a server with the
 activity relay (`POST /api/bridge/activity/relay-token`) for bridge joins; a WebRTC join
 needs nothing on the server.
 
@@ -801,7 +805,7 @@ after every local session (Claude Code, Codex):
 
 **Scope (`VOICEHOOK_WATCH_SCOPE`, default `call`):** only the joining session and sessions with their own helper entry for THIS call (same room) are covered; a local session that merely reports through the `relay.json` of someone else's join is not, and its decisions are not touched. `VOICEHOOK_WATCH_SCOPE=machine` brings back the old behaviour (every local session). `VOICEHOOK_WATCH_ALL=1` stays inside the scope.
 
-**Privacy:** the watcher covers only sessions that belong to this call: registry entries of such sessions (hooks) and sessions with a helper credential (`helpers/<label>.json`; without transcript or hook events their state is unknown and the sentence says so). Other sessions of the machine (private or customer work on a shared box) are never posted. Opt in with `VOICEHOOK_WATCH_ALL=1` to also cover sessions found only by a recent transcript. Since 0.33.0 an active session outside the call is proposed once on the Decision Board (sender `Session Watcher`, name, topic and host only) and covered after a Ja; `VOICEHOOK_WATCH_NEVER=a,b` (case-insensitive substrings of the label or project folder) are never proposed.
+**Privacy:** the watcher covers only sessions that belong to this call: registry entries of such sessions (hooks) and sessions with a helper credential (`helpers/<label>.json`; without transcript or hook events their state is unknown and the sentence says so). Other sessions of the machine (private or customer work on a shared box) are never posted. Opt in with `VOICEHOOK_WATCH_ALL=1` to also cover sessions found only by a recent transcript. Since 0.33.0 an active session outside the call is proposed once on the Decision Board (sender `Session Watcher`, name, topic and host only) and covered after a Ja; `VOICEHOOK_WATCH_NEVER=a,b` (case-insensitive substrings of the label or project folder) are never proposed. 0.35.9: a session with its own join in this room counts as a member of the call, and no card "Soll <Name> in den Call?" is posted for a session whose name or first name is in the participant list already (prefixes like `[R]` and emojis dropped, cut at ` · `, ` - `, `:`: "[R] 🛡️ Bruno · Head of …" -> "Bruno"; humans and Delta do not count). Every join keeps the participant list of its room in `<join dir>/peers.json` (identity, name, human; rewritten on every join, leave and attribute change), the watcher reads the lists of the live joins of the room on every tick; an open card for a session that is in the call by now is withdrawn.
 
 State per session: `arbeitet` (hook event or transcript change in the last 2 min, no Stop
 since), `still` (Stop, or nothing for a while), `frage` (last event waits for input,
@@ -810,8 +814,8 @@ permission or an AskUserQuestion), plus "zuletzt aktiv". Sessions come from the 
 `sessions/**/rollout-*.jsonl`).
 
 * **Start:** `join` and `helper-import` spawn it detached (own session via setsid, stdio to
-  /dev/null: not a child of the agent session, it survives it). `VOICEHOOK_WATCH=0` turns
-  that off. By hand: `voicehook-agent watch [--interval 1|5|10|15] [--tokens-per-hour N]
+  /dev/null: not a child of the agent session, it survives it), so hooks and watcher are the
+  default from the first join on. `VOICEHOOK_WATCH=0` turns that off. By hand: `voicehook-agent watch [--interval 1|5|10|15] [--tokens-per-hour N]
   [--foreground]`. Exactly one per machine (`~/.voicehook/watch.lock`, flock); a second start
   exits 0 quietly.
 * **Stop:** it ends itself when the call is over: no usable `relay.json`/helper credential

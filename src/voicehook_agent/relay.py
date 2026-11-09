@@ -420,6 +420,66 @@ def user_turn_event(role: str, text: str, payload: dict | None = None,
     return ev
 
 
+# 0.35.9 (call ember-orbit 09.11.: Malik's spool held 7 versions of one long utterance,
+# 1340 to 3017 chars): in hold mode the worker sends a growing utterance again and again as a
+# new final user turn with the WHOLE text so far. Field names of the server's own marking
+# (voicehook-v4, Ravi; may still change, so only here): `seg` = id of the utterance line,
+# `fresh` = only the new part, `continued` = true on a continuation; `text` stays the full text.
+SEG_FIELD = "seg"
+FRESH_FIELD = "fresh"
+CONTINUED_FIELD = "continued"
+FULL_LEN_FIELD = "full_len"
+
+
+class UserContinuation:
+    """Spool only the new part of a user turn that continues the last one of the same speaker.
+    (a) Server marks it (`seg` + `fresh`): a continuation (`continued` true, or `fresh` !=
+        `text`) has `fresh` as the event text, `continued: true`, `full_len`, `seg`. An empty
+        `fresh` with the SAME `seg` as the last turn of this speaker = nothing to spool (the
+        same version to several receivers); the same text with a NEW `seg` = a new event.
+    (b) Old server (no `seg` / `fresh`): a continuation only when the new text is really
+        LONGER and starts with the complete last text of this speaker at a word boundary ->
+        only the rest (leading blanks trimmed), `continued: true`, `full_len`. The same text
+        again is NEVER swallowed: a new normal event with the full text and `continued: false`.
+        A sentence that starts the same but is rewritten stays a normal event. No time window.
+    Both paths keep the last FULL text (and `seg`) per speaker. `apply` returns the event or
+    None (drop)."""
+
+    def __init__(self) -> None:
+        self.last: dict[str, str] = {}
+        self.seg: dict[str, object] = {}
+
+    @staticmethod
+    def _boundary(last: str, rest: str) -> bool:
+        return not rest[0].isalnum() or not last[-1].isalnum()
+
+    def apply(self, ev: dict, payload: dict | None = None) -> dict | None:
+        p = payload or {}
+        text = str(ev.get("text") or "")
+        spk = str(ev.get("speaker") or p.get("speaker") or "")
+        prev, prev_seg = self.last.get(spk, ""), self.seg.get(spk)
+        self.last[spk] = text
+        seg, fresh = p.get(SEG_FIELD), p.get(FRESH_FIELD)
+        if seg is not None and fresh is not None:
+            self.seg[spk] = seg
+            fresh = str(fresh).strip()
+            out = {**ev, SEG_FIELD: seg}
+            if not fresh:
+                if seg == prev_seg:
+                    return None
+                out[CONTINUED_FIELD] = False      # a new line with nothing new marked: all of it
+                return out
+            if p.get(CONTINUED_FIELD) is True or fresh != text:
+                out.update({"text": fresh, CONTINUED_FIELD: True, FULL_LEN_FIELD: len(text)})
+            return out
+        self.seg.pop(spk, None)
+        if prev and len(text) > len(prev) and text.startswith(prev) and self._boundary(prev, text[len(prev):]):
+            return {**ev, "text": text[len(prev):].lstrip(), CONTINUED_FIELD: True, FULL_LEN_FIELD: len(text)}
+        if prev and text == prev:
+            return {**ev, CONTINUED_FIELD: False}
+        return ev
+
+
 USER_TURN_MAX = 2000   # same cap as the server (bridge.USER_TURN_MAX)
 
 
