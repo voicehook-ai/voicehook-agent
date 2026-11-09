@@ -1505,3 +1505,28 @@ def test_room_joins_names_only_without_proc(tmp_path):
         assert J.room_joins({"room": "room-z"}, proc_root=tmp_path / "keinproc", sess_root=sess)[1] == {"theo"}
     finally:
         srv.close()
+
+
+# --- 0.35.8: Nachrichten und Automaten-Meldungen sind keine Aufträge (Kanban 09.11.) ---
+def _user_rec(text):
+    return {"type": "user", "message": {"role": "user", "content": text}}
+
+
+@pytest.mark.parametrize("text", [
+    '<cross-session-message from="uds:/tmp/x.sock" from-name="Nika">\nNika an Ines: Danke.\n</cross-session-message>',
+    "This session is being continued from a previous conversation that ran out of context. Summary: ...",
+    '[Fälligkeits-Wächter] Deine Trello-Karte "X" war fällig am 07.11. 17:00',
+    "[Fragen-Wächter] In deiner Statusdatei stehen 1 offene Fragen",
+    "[Takt] Stand automatisch (alle 5 Minuten)",
+    "Session-Watcher: Du wartest auf Oliver (PR 811 ist gemergt)",
+    "[SYSTEM NOTIFICATION - NOT USER INPUT] background task finished",
+])
+def test_order_text_skips_messages_and_automats(text):
+    assert K.order_text(_user_rec(text)) == ""
+
+
+def test_order_text_keeps_real_orders():
+    assert K.order_text(_user_rec("bau bitte den Login-Knopf neu")) == "bau bitte den Login-Knopf neu"
+    # Eine echte Bitte mit eingefügtem Text bleibt ein Auftrag (offen: reine Pastes, siehe PR)
+    t = "schau dir das an\n<pasted_content id=\"a\">Fehler 500</pasted_content id=\"a\">"
+    assert K.order_text(_user_rec(t)) == t
