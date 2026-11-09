@@ -3,6 +3,10 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.35.9
+
+- **`voicehook-agent tell-delta "<Anweisung>" [--wörtlich] [--vorrang] [--wait SEC]`: give Delta an instruction without speaking (owner's main agent only).** The running join sends `delta.tell` `{id, text, verbatim, priority: "normal"|"vorrang"}` to the worker only and tracks `delta.tell_status` `{id, state: queued|spoken|covered|rejected, reason?}`; `--wait` waits for spoken/covered/rejected. A join without `VOICEHOOK_AGENT_KEY` (or `owner-agent: not granted`), a helper session or a guest gets a clear error and nothing is sent; `rejected`/`not_owner_agent` comes with a hint. One JSON line with the id; exit 0 ok, 1 refused, 2 bad input, 3 no join.
+
 ## 0.35.8
 
 - **Board mirror follow-up (Ravi's review of #178).** The duplicate check against `decide` questions has no time limit any more (AGT-F8): a reply stays unmirrored as long as a similar `decide` question of the call's room is open or was answered in this call (the session entries of a room start empty in a new call). The question_check hint no longer says the server puts the line on the board itself in 90 s: it never does (Oliver 26.10.); the hint now says to ask it with decide if it is a question, else nothing to do. docs/CLI.md likewise.

@@ -568,6 +568,28 @@ natural sentences with articles and verbs, like a good radio host or hotline age
 
 Newer voicehook servers (v4, Oct 2026) also strip leftover markdown, backticks, emoji and link prefixes and read arrows as "then", but never reword you.
 
+### Instructions for Delta without speaking: `tell-delta` (0.35.9)
+
+`voicehook-agent tell-delta "<Anweisung>" [--wörtlich] [--vorrang] [--wait SEC]` gives Delta an
+instruction instead of speaking it yourself: it goes into Delta's announcement list, the worker
+bundles it with his other announcements, orders it and says it in his own words when it fits.
+`--wörtlich` (`--woertlich`, `--verbatim`): Delta speaks the text unchanged. `--vorrang`
+(`--priority`): it goes before the other announcements. `--wait SEC`: wait until Delta said it
+(`spoken`), found it covered already (`covered`) or refused it (`rejected`); default 0 = return
+the id at once.
+
+Only the owner's main agent: a join WITH `VOICEHOOK_AGENT_KEY` (see "Owner agent key";
+`owner-agent: not granted` is refused before sending). A join without the key, a helper session
+(relay credential) or a guest gets `{"ok": false, "error": "not_owner_agent" | "helper_session",
+"hint": ...}` and nothing is sent. One JSON line `{ok, type: "delta_tell", id, state, note?,
+reason?, hint?, timeout?}`; a `rejected` that arrives after the command returned comes as `next`
+event `delta_tell_status`. Exit 0 sent/said, 1 refused or failed, 2 bad input, 3 no join.
+
+Transport (data channel, reliable): `delta.tell` to the worker only
+`{"id", "text", "verbatim": bool, "priority": "normal" | "vorrang"}`; answer to the sender on
+`delta.tell_status` `{"id", "state": "queued" | "spoken" | "covered" | "rejected", "reason"?}`
+(`reason: "not_owner_agent"` gets the hint about the key).
+
 ## Activity feed (operator.activity, 0.10.0)
 
 Delta knows what the coding agent is doing in the background, without asking. Claude
