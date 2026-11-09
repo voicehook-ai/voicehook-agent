@@ -5,6 +5,8 @@ voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the vers
 
 ## 0.35.8
 
+- **Watcher: messages and automats are no Kanban orders (#173).** `watchkanban.order_text` skips cross-session messages, the compaction summary and `[Fälligkeits-Wächter]`/`[Fragen-Wächter]`/`[Takt]`/`Session-Watcher:`/`[SYSTEM NOTIFICATION` lines (09.11.: 45 message cards for one head). Pure pastes stay orders.
+- **Board reminder no longer asks vh-helper for flags it lacks (#173).** With `vh-helper` the hint says: no `--context`/`--faq` (every extra argument became an open item and a Kanban card "--context"); context + 3 FAQ only via `voicehook-agent status`.
 - **`voicehook-agent task assign <nr> <head> [--session SLUG]`: hand a Kanban card to another head (owner op).** The running join sends `POST /api/cli/tasks/{nr}/assign {assignee: <head>}` itself, with its own LiveKit token (control socket, cmd `task_assign`); the token never leaves the join process, is never printed, logged or written to disk. The server allows it only for a join WITH `VOICEHOOK_AGENT_KEY` while the owner is alone with own agents in the call. One JSON line `{ok, op, nr, status, error?, hint?, assignee?}`; no join -> hint "mit VOICEHOOK_AGENT_KEY beitreten", 403 owner_only -> hint "Join ohne Schlüssel oder Inhaber nicht allein mit eigenen Agenten", 429 is passed on (callers throttle). Exit 0 ok, 1 refused, 2 bad input, 3 no join.
 
 ## 0.35.7
