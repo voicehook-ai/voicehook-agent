@@ -108,7 +108,7 @@ class Clock:
     ("Zwei Wege:\n\nWelche Variante nehmen wir?\nA) Raster 3 Spalten\nB) 2 Spalten\nC) so lassen",
      "Welche Variante nehmen wir?", ["Raster 3 Spalten", "2 Spalten", "so lassen"]),
     ("Welcher Fix zuerst?\n\n1. Pill-Farbe\n2. Abstand", "Welcher Fix zuerst?", ["Pill-Farbe", "Abstand"]),
-    ("Optionen: A) **Server zuerst** / B) CLI zuerst", "Optionen", ["Server zuerst", "CLI zuerst"]),
+    ("Was zuerst? A) **Server zuerst** / B) CLI zuerst", "Was zuerst?", ["Server zuerst", "CLI zuerst"]),
     ("- A: deploy now\n- B: wait for review\n\nWhich one?", "Which one?", []),
 ])
 def test_stop_question_detects(text, question, options):
@@ -120,6 +120,7 @@ def test_stop_question_detects(text, question, options):
     "", "Fertig. PR #92 ist gemerged.", "Warum schlug das fehl? Weil der Token abgelaufen war. Behoben.",
     "Hier der Code:\n\n```python\nx = input('ok?')\n```", None,
     "Soll ich den Key token=hunter2hunter2 eintragen?",
+    "Optionen: A) **Server zuerst** / B) CLI zuerst",   # 0.35.8: no question line, no mirror
 ])
 def test_stop_question_ignores(text):
     assert asks.stop_question(text) is None
