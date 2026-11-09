@@ -433,41 +433,50 @@ FULL_LEN_FIELD = "full_len"
 
 class UserContinuation:
     """Spool only the new part of a user turn that continues the last one of the same speaker.
-    (a) Server marks it (`seg` + `fresh`): `fresh` is the event text, `continued: true`,
-        `full_len`, `seg` passed on; an empty `fresh` = nothing to spool.
-    (b) Old server (no `seg` / `fresh`): the text starts with the COMPLETE last text of this
-        speaker (at a word boundary) -> only the rest (leading blanks trimmed), `continued`,
-        `full_len`; an empty rest (the same text again) = nothing to spool. A sentence that starts
-        the same but is rewritten stays a normal event. No time window.
-    Both paths keep the last FULL text per speaker. `apply` returns the event or None (drop)."""
+    (a) Server marks it (`seg` + `fresh`): a continuation (`continued` true, or `fresh` !=
+        `text`) has `fresh` as the event text, `continued: true`, `full_len`, `seg`. An empty
+        `fresh` with the SAME `seg` as the last turn of this speaker = nothing to spool (the
+        same version to several receivers); the same text with a NEW `seg` = a new event.
+    (b) Old server (no `seg` / `fresh`): a continuation only when the new text is really
+        LONGER and starts with the complete last text of this speaker at a word boundary ->
+        only the rest (leading blanks trimmed), `continued: true`, `full_len`. The same text
+        again is NEVER swallowed: a new normal event with the full text and `continued: false`.
+        A sentence that starts the same but is rewritten stays a normal event. No time window.
+    Both paths keep the last FULL text (and `seg`) per speaker. `apply` returns the event or
+    None (drop)."""
 
     def __init__(self) -> None:
         self.last: dict[str, str] = {}
+        self.seg: dict[str, object] = {}
 
     @staticmethod
     def _boundary(last: str, rest: str) -> bool:
-        return not rest or not rest[0].isalnum() or not last[-1].isalnum()
+        return not rest[0].isalnum() or not last[-1].isalnum()
 
     def apply(self, ev: dict, payload: dict | None = None) -> dict | None:
         p = payload or {}
         text = str(ev.get("text") or "")
         spk = str(ev.get("speaker") or p.get("speaker") or "")
-        prev = self.last.get(spk, "")
+        prev, prev_seg = self.last.get(spk, ""), self.seg.get(spk)
         self.last[spk] = text
         seg, fresh = p.get(SEG_FIELD), p.get(FRESH_FIELD)
         if seg is not None and fresh is not None:
+            self.seg[spk] = seg
             fresh = str(fresh).strip()
             out = {**ev, SEG_FIELD: seg}
-            if p.get(CONTINUED_FIELD) is True or fresh != text:
-                if not fresh:
+            if not fresh:
+                if seg == prev_seg:
                     return None
+                out[CONTINUED_FIELD] = False      # a new line with nothing new marked: all of it
+                return out
+            if p.get(CONTINUED_FIELD) is True or fresh != text:
                 out.update({"text": fresh, CONTINUED_FIELD: True, FULL_LEN_FIELD: len(text)})
             return out
-        if prev and text.startswith(prev) and self._boundary(prev, text[len(prev):]):
-            rest = text[len(prev):].lstrip()
-            if not rest:
-                return None
-            return {**ev, "text": rest, CONTINUED_FIELD: True, FULL_LEN_FIELD: len(text)}
+        self.seg.pop(spk, None)
+        if prev and len(text) > len(prev) and text.startswith(prev) and self._boundary(prev, text[len(prev):]):
+            return {**ev, "text": text[len(prev):].lstrip(), CONTINUED_FIELD: True, FULL_LEN_FIELD: len(text)}
+        if prev and text == prev:
+            return {**ev, CONTINUED_FIELD: False}
         return ev
 
 
