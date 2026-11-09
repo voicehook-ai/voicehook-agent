@@ -474,36 +474,81 @@ async def _emit_sessions_hint(json_mode: bool, detect=None) -> dict | None:
 AUTO_HOOKS_ENV = "VOICEHOOK_AUTO_HOOKS"
 
 
+def hooks_state(path: Path) -> str:
+    """'none' (no hook of ours in settings.json, or no file), 'current' (every hook of ours,
+    with this CLI's command) or 'other' (hooks of ours of another version / path, only some of
+    them, or a settings.json that is no JSON object)."""
+    try:
+        raw = path.read_text(encoding="utf-8") if path.exists() else ""
+        data = json.loads(raw or "{}")
+    except (OSError, ValueError):
+        return "other"
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    if not isinstance(data, dict) or (hooks is not None and not isinstance(hooks, dict)):
+        return "other"
+    hooks = hooks or {}
+    exe = vactivity.hook_bin()
+    found = current = 0
+    want_n = len(vactivity.HOOK_COMMANDS) + len(vactivity.EXTRA_HOOKS)
+    for ev, template in vactivity.HOOK_COMMANDS.items():
+        entries = hooks.get(ev) if isinstance(hooks.get(ev), list) else []
+        mine = vactivity._our_hooks(entries, ev)
+        found += bool(mine)
+        current += bool(mine) and all(h.get("command") == vactivity._with_bin(template, exe) for h in mine)
+    for ev, (template, _outer, _inner) in vactivity.EXTRA_HOOKS.items():
+        entries = hooks.get(ev) if isinstance(hooks.get(ev), list) else []
+        mine = vactivity._our_extra(entries, ev)
+        found += bool(mine)
+        current += bool(mine) and all(h.get("command") == vactivity._with_bin(template, exe) for h in mine)
+    if not found:
+        return "none"
+    return "current" if current == want_n else "other"
+
+
 def ensure_hooks(env=None, settings: Path | None = None) -> dict | None:
-    """Install the Claude Code hooks when missing: a `_meta: hooks` event {installed, text}
-    (None: off, no Claude Code here, or already installed). Never raises."""
+    """Install the Claude Code hooks when NONE of ours are there yet: a `_meta: hooks` event
+    {installed, state, text}. Hooks of another version (or only some of them) are never
+    touched, the event says so and names `voicehook-agent hook install`. None: off, no Claude
+    Code here, or already current. Never raises."""
     env = os.environ if env is None else env
     if (env.get(AUTO_HOOKS_ENV) or "").strip().lower() in ("0", "false", "no", "off"):
         return None
     try:
         path = settings or vactivity.default_settings_path()
-        if not path.parent.is_dir() or vlocal.claude_hooks_installed(path):
+        if not path.parent.is_dir():
             return None
+        state = hooks_state(path)
+        if state == "current":
+            return None
+        if state == "other":
+            return {"role": "system", "topic": "_meta", "_meta": "hooks", "installed": False,
+                    "state": "other",
+                    "text": (f"Claude-Code-Hooks einer anderen Version (oder unvollständig) in {path} gefunden: nicht "
+                             "geändert. Aktualisieren: voicehook-agent hook install. "
+                             "Diesen Hinweis abschalten: VOICEHOOK_AUTO_HOOKS=0.")}
         rc, msg = vactivity.install(path)
     except Exception as e:  # noqa: BLE001
-        rc, msg = 1, type(e).__name__
+        rc, msg, path = 1, type(e).__name__, settings or Path("~/.claude/settings.json")
     if rc == 0:
-        text = ("Claude-Code-Hooks installiert (Standard ab dem ersten Join): weitere Sessions "
-                "dieses Rechners melden Aktivität, Status und Fragen in den Call; schon laufende "
-                "nach /hooks oder einem Neustart. Aus: VOICEHOOK_AUTO_HOOKS=0.")
+        text = (f"Claude-Code-Einstellungen geändert: voicehook-Hooks in {path} eingetragen "
+                "(Standard ab dem ersten Join). Weitere Sessions dieses Rechners melden "
+                "Aktivität, Status und Fragen in den Call, schon laufende nach /hooks oder "
+                "einem Neustart. Nicht gewollt: VOICEHOOK_AUTO_HOOKS=0 setzen und die Einträge "
+                "entfernen.")
     else:
         text = f"Claude-Code-Hooks nicht installiert ({msg[:200]}); von Hand: voicehook-agent hook install"
-    return {"role": "system", "topic": "_meta", "_meta": "hooks", "installed": rc == 0, "text": text}
+    return {"role": "system", "topic": "_meta", "_meta": "hooks", "installed": rc == 0,
+            "state": "none", "text": text}
 
 
 def _emit_hooks(json_mode: bool, env=None) -> dict | None:
+    """Always one visible line on stderr (the user's settings change); --json: the event too."""
     got = ensure_hooks(env)
     if got is None:
         return None
+    print(f"[hooks] {got['text']}", file=sys.stderr, flush=True)
     if json_mode:
         print(json.dumps(got, ensure_ascii=False), flush=True)
-    else:
-        print(f"[hooks] {got['text']}", file=sys.stderr, flush=True)
     return got
 
 

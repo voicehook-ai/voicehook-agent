@@ -162,3 +162,36 @@ def test_hooks_installed_at_first_join(tmp_path):
     other.parent.mkdir(parents=True)
     assert cli.ensure_hooks(env={"VOICEHOOK_AUTO_HOOKS": "0"}, settings=other) is None
     assert not other.exists()
+
+
+def test_hooks_of_other_version_never_touched_but_reported(tmp_path):
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir()
+    assert cli.vactivity.install(settings, exe="/alt/bin/voicehook-agent-hook")[0] == 0   # andere Version / Pfad
+    before = settings.read_text()
+    got = cli.ensure_hooks(env={}, settings=settings)
+    assert got["installed"] is False and got["state"] == "other"
+    assert "hook install" in got["text"] and "VOICEHOOK_AUTO_HOOKS=0" in got["text"]
+    assert settings.read_text() == before                               # nichts geaendert
+    # nur ein Teil unserer Hooks: ebenfalls nicht anfassen
+    d = json.loads(before)
+    d["hooks"] = {"PreToolUse": d["hooks"]["PreToolUse"]}
+    settings.write_text(json.dumps(d))
+    assert cli.ensure_hooks(env={}, settings=settings)["state"] == "other"
+    # fremde Hooks (nicht unsere) zaehlen nicht: dann wird installiert, fremde bleiben
+    settings.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [{"type": "command", "command": "mein-tool"}]}]}}))
+    got = cli.ensure_hooks(env={}, settings=settings)
+    assert got["installed"] is True and "mein-tool" in settings.read_text()
+
+
+def test_first_install_is_visible_on_stderr_in_json_mode(tmp_path, monkeypatch, capsys):
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir()
+    monkeypatch.setattr(cli.vactivity, "default_settings_path", lambda: settings)
+    got = cli._emit_hooks(True, env={})
+    out, err = capsys.readouterr()
+    assert got["installed"] is True
+    assert "Claude-Code-Einstellungen geändert" in err and "VOICEHOOK_AUTO_HOOKS=0" in err
+    assert json.loads(out.strip())["_meta"] == "hooks"
+    assert cli._emit_hooks(True, env={}) is None                       # zweiter Join: still
+    assert capsys.readouterr() == ("", "")

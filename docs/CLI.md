@@ -671,7 +671,9 @@ One session joins, all other Claude Code sessions on the same machine (Mac, crow
 show up in the call's activity feed, each under its own name. Delta tells it as
 "mein Helfer ...". Needs the Claude Code hooks once per machine (they live in
 `~/.claude/settings.json`, so every session has them; 0.35.9: the first `join` installs them
-itself when Claude Code is on the machine and they are missing, `_meta: hooks` event; off:
+itself when Claude Code is on the machine and none of ours are there yet, with one visible
+`[hooks]` line on stderr (and the `_meta: hooks` event with `--json`); hooks of another version
+are never touched, only reported; off:
 `VOICEHOOK_AUTO_HOOKS=0`, then `voicehook-agent hook install` by hand) and a server with the
 activity relay (`POST /api/bridge/activity/relay-token`) for bridge joins; a WebRTC join
 needs nothing on the server.
