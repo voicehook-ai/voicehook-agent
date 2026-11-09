@@ -245,6 +245,7 @@ from . import relayops as vrelayops
 from . import selfupdate as vselfupdate
 from . import session as vsession
 from . import spool as vspool
+from . import telldelta as vtell
 from . import transport as vtransport
 from . import ui as vui
 from . import visual as vvisual
@@ -1178,6 +1179,11 @@ class _Control:
         self.card_acks = vcards.Acks()  # 0.23.1: vh.card_ack of the call pages
         self.api_base = ""
         self.lk_jwt = ""
+        # 0.35.9 `tell-delta` (telldelta.py): own delta.tell ids, and whether this join is the
+        # owner's main agent (VOICEHOOK_AGENT_KEY set; token vh.owner_agent, None = unknown)
+        self.tell = vtell.Tracker()
+        self.agent_key_set = False
+        self.owner_agent: bool | None = None
         # 0.21.0 Silent Mode: aggregate of the humans' vh.mic_muted/vh.speaker_muted/vh.away
         self.human_state = relay.human_state([])
         # 0.21.4 listen guard: waiting `next` requests, monotonic end of the last one
@@ -1816,6 +1822,37 @@ async def _transcript_request(ctl: _Control, req: dict) -> dict:
             "parts": res.get("parts", 1), "lines": lines}
 
 
+async def _tell_delta(ctl: _Control, req: dict) -> dict:
+    """0.35.9: one `delta.tell` to the worker (Delta's announcement list), only for the
+    owner's main agent; with `wait` > 0 the answer waits for spoken / covered / rejected."""
+    try:
+        body = vtell.request(req.get("text"), bool(req.get("verbatim")),
+                             req.get("priority") == "vorrang", req.get("wait") or 0)
+    except vtell.TellError as e:
+        return {"ok": False, "type": "invalid", "error": str(e)}
+    bad = vtell.owner_problem(ctl.agent_key_set, ctl.owner_agent)
+    if bad is not None:
+        return vtell.failed(bad["error"], bad["hint"])
+    room = await ctl.wait_room(10.0)
+    if room is None:
+        return vtell.failed("not connected to the room (yet)")
+    worker = next((p.identity for p in room.remote_participants.values()
+                   if _kind_label(p) == "agent"), None)
+    if worker is None:
+        return vtell.failed("no_delta", vtell.HINT_NO_DELTA)
+    tid = vtell.new_id()
+    data = json.dumps(vtell.payload(tid, body), ensure_ascii=False).encode("utf-8")
+    try:
+        await room.local_participant.publish_data(data, reliable=True, topic=vtell.TOPIC,
+                                                  destination_identities=[worker])
+    except Exception as e:  # noqa: BLE001  publish error: only the class
+        return vtell.failed(f"publish failed ({type(e).__name__})", tid=tid)
+    ctl.tell.sent(tid, body["text"])
+    wait = float(body["wait"])
+    rec = await ctl.tell.wait(tid, wait) if wait > 0 else ctl.tell.get(tid)
+    return vtell.answer(tid, rec, waited=wait > 0)
+
+
 async def _control_handler(ctl: _Control, req: dict) -> dict:
     """One request from `voicehook-agent say|next|leave|status|activity`."""
     cmd = req.get("cmd")
@@ -1925,6 +1962,9 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
     if cmd == "data":  # 0.21.4 `voicehook-agent send-data` (datachan.py)
         ctl.watchdog.touch()
         return await _send_data(ctl, req)
+    if cmd == vtell.CMD:  # 0.35.9 `voicehook-agent tell-delta` (telldelta.py)
+        ctl.watchdog.touch()
+        return await _tell_delta(ctl, req)
     if cmd in vownerops.CMDS:  # 0.35.8 `voicehook-agent task assign|discard` (ownerops.py)
         ctl.watchdog.touch()
         try:
@@ -2982,6 +3022,8 @@ async def _connect_and_listen(
     LK reason that ended the cycle (used by the reconnect loop in #6)."""
     tok: dict | None = None
     agent_key = vagentkey.for_base(vagentkey.get(), api_base)   # 0.33.1: env only, None when unset / malformed
+    if ctl is not None:
+        ctl.agent_key_set = bool(agent_key)   # 0.35.9 tell-delta: only the owner's main agent
     if transport == "bridge":
         # Server joins for us over HTTPS (same token/attributes as /api/token?invite=1).
         room = vtransport.BridgeRoom(api_base, slug, ident, name=agent_name or "agent",
@@ -3026,6 +3068,8 @@ async def _connect_and_listen(
             ctl.api_base, ctl.lk_jwt = api_base, str(tok.get("token") or "")
     if agent_key and tok is not None:   # WebRTC: the signed token tells (bridge answer does not)
         granted = vagentkey.owner_granted(tok.get("token"))
+        if ctl is not None:
+            ctl.owner_agent = granted
         if granted is not None:
             _print_event(json_mode, "system",
                          "owner-agent: " + ("granted" if granted else "not granted (key unknown "
@@ -3124,6 +3168,15 @@ async def _connect_and_listen(
                 if ev is not None:
                     ctl.events.put_nowait(ev)
                     _print_event(json_mode, "system", f"({topic}) id={ev['id']}", topic=topic)
+        elif topic == vtell.STATUS_TOPIC:
+            # 0.35.9: the worker's answer to an own `delta.tell` (only the worker, own ids)
+            if ctl is not None and getattr(pkt.participant, "kind", None) == 4:
+                change = ctl.tell.update(payload)
+                if change is not None:
+                    if change["state"] == "rejected" and not ctl.tell.waiting(change["id"]):
+                        ctl.events.put_nowait(vtell.status_event(change))
+                    _print_event(json_mode, "system",
+                                 f"({topic}) id={change['id']} state={change['state']}", topic=topic)
         elif topic == vdata.TOPIC:
             # 0.21.4 agent-to-agent data: a `next` event (never printed with its content)
             ev = vdata.receive_event(ctl.ident if ctl is not None else "", pkt.participant, payload)
@@ -4537,6 +4590,74 @@ def _run_client(args) -> int:
     return 0 if reply.get("ok") else 1
 
 
+TELL_DELTA_HELP = """\
+Delta eine Anweisung geben, ohne selbst zu sprechen.
+
+Wofür: Du bist der Haupt-Agent im Call und willst, dass Delta (der Voicebot) etwas
+ansagt oder anders macht, ohne dass du selbst mit `say` sprichst. Die Anweisung geht
+in Deltas Ansage-Liste; Delta bündelt sie mit seinen anderen Ansagen, ordnet sie ein
+und sagt sie in seinen eigenen Worten, wenn es passt (z. B. "Sag Oliver, dass der
+Build grün ist" oder "Frag nach, ob das Angebot raus darf").
+
+  --wörtlich  Delta spricht den Text unverändert, Wort für Wort (verbatim). Ohne:
+              Delta nimmt den Text als Anweisung und formuliert selbst.
+  --vorrang   Die Anweisung kommt vor die übrigen Ansagen in Deltas Liste
+              (priority vorrang). Ohne: normal, in Deltas Reihenfolge.
+  --wait SEC  Bis zu SEC Sekunden warten, bis Delta es gesagt hat (spoken), es schon
+              abgedeckt war (covered) oder abgelehnt wurde (rejected).
+
+Nur der eigene Haupt-Agent: ein Join MIT VOICEHOOK_AGENT_KEY, dessen Schlüssel zum
+Konto des Raums gehört (owner-agent: granted). Helfer-Sessions, Joins ohne Schlüssel
+und Gäste bekommen eine Fehlermeldung, es wird nichts gesendet.
+
+Abgelehnt (state rejected, Exit 1, --wait endet sofort), Grund im Feld reason:
+  not_owner_agent  nicht der eigene Haupt-Agent des Inhabers (Schlüssel fehlt/falsch)
+  interrupted      Delta wurde mitten in der Ansage unterbrochen
+  not_spoken       Delta hat die Ansage nicht gestartet (Ton aus oder Fehler)
+  call_ended       der Call ist vorbei, die Anweisung wurde nicht mehr gesagt
+
+Ausgabe: eine JSON-Zeile {ok, type: "delta_tell", id, state, note?, reason?, hint?}
+(state sent | queued | spoken | covered | rejected; mit --wait und ohne Endstand
+zusätzlich "timeout": true). Ein späteres rejected kommt als `next`-Ereignis
+delta_tell_status. Exit 0 = gesendet / gesagt, 1 = abgelehnt oder fehlgeschlagen,
+2 = falsche Eingabe, 3 = kein Join.
+
+Transport: Daten-Kanal, Topic delta.tell an den Worker
+{"id", "text", "verbatim": bool, "priority": "normal"|"vorrang"}; Antwort auf
+delta.tell_status {"id", "state", "reason"?}.
+"""
+
+
+def _run_tell_delta(args) -> int:
+    """0.35.9 `tell-delta`: the running join of the owner's main agent sends `delta.tell` to
+    the worker (telldelta.py). One JSON line; exit 0 ok, 1 refused/failed, 2 bad input, 3 no join."""
+    raw = " ".join(args.text)
+    if raw.strip() == "-":
+        raw = sys.stdin.read()
+    try:
+        req = vtell.request(raw, args.verbatim, args.vorrang, args.wait)
+    except vtell.TellError as e:
+        print(json.dumps({"ok": False, "type": "invalid", "error": str(e)}, ensure_ascii=False),
+              flush=True)
+        return 2
+    try:
+        sock = vsession.resolve_socket(args.session, wait=30.0)
+        reply = vsession.request(sock, req, timeout=req["wait"] + vtell.SOCK_EXTRA_S)
+    except (vsession.ForeignJoin, vsession.SessionError, OSError):
+        if vrelayops.client_relay(args.session) is not None:   # a helper session: never sent
+            print(json.dumps(vtell.failed("helper_session", vtell.HINT_HELPER), ensure_ascii=False),
+                  flush=True)
+            return 1
+        print(json.dumps(vtell.failed("no_join", vtell.HINT_JOIN), ensure_ascii=False), flush=True)
+        return 3
+    if not isinstance(reply, dict) or reply.get("type") not in ("delta_tell", "invalid"):
+        reply = vtell.failed("join_too_old", vtell.HINT_OLD_JOIN)   # join older than this CLI
+    print(json.dumps(reply, ensure_ascii=False), flush=True)
+    if reply.get("type") == "invalid":
+        return 2
+    return 0 if reply.get("ok") else 1
+
+
 def _run_task(args) -> int:
     """0.35.8 `task assign <nr> <head>` / `task discard <nr>`: the running join sends the owner
     op with its own LiveKit token (ownerops.py). One JSON line; exit 0 ok, 1 refused/failed,
@@ -5192,6 +5313,29 @@ def main(argv: list[str] | None = None) -> None:
         "says", help="last state of your own says (operator.say_status from the voicebot: "
         "sent/queued/spoken/interrupted/requeued/replaced/covered) as JSON")
     _add_session(p_says)
+    p_tell = sub.add_parser(
+        "tell-delta", help="0.35.9: give Delta (the voicebot) an instruction without speaking "
+        "yourself; only the owner's main agent (join WITH VOICEHOOK_AGENT_KEY). One JSON line "
+        "{ok, id, state, note?, reason?, hint?}",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=TELL_DELTA_HELP)
+    p_tell.add_argument("text", nargs="+", metavar="ANWEISUNG",
+                        help="the instruction for Delta ('-' reads it from stdin), max "
+                             f"{vtell.TEXT_MAX} characters")
+    p_tell.add_argument("--wörtlich", "--woertlich", "--verbatim", dest="verbatim",
+                        action="store_true", default=False,
+                        help="Delta speaks the text unchanged, word for word (verbatim: true). "
+                             "Without: Delta takes it as an instruction and words it himself.")
+    p_tell.add_argument("--vorrang", "--priority", dest="vorrang", action="store_true",
+                        default=False,
+                        help="put it before Delta's other announcements (priority: vorrang); "
+                             "without: normal, in Delta's order")
+    p_tell.add_argument("--wait", type=float, default=0.0, metavar="SEC",
+                        help="wait up to SEC seconds until Delta has said it (spoken), found it "
+                             "covered already (covered) or refused it (rejected), like say; "
+                             "default 0 = return the id at once")
+    p_tell.add_argument("--session", default=None, metavar="SLUG",
+                        help="room slug of the join (default: the only / own running join)")
     p_leave = sub.add_parser("leave", help="end the running join cleanly")
     p_leave.add_argument("--say", default=None, metavar="TEXT", help="goodbye line spoken before leaving")
     _add_session(p_leave)
@@ -5702,6 +5846,8 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(_run_tasks(args))
     if args.cmd == "task":
         sys.exit(_run_task(args))
+    if args.cmd == "tell-delta":
+        sys.exit(_run_tell_delta(args))
     if args.cmd == "listen":
         sys.exit(_run_listen(args))
     if args.cmd == "log-summary":
