@@ -555,6 +555,7 @@ def status(*, home: Path | None = None, platform: str | None = None, out=None) -
     if out is not None:
         out(f"connected: {'yes (' + str(view['account']) + ')' if view['connected'] else 'no (run `voicehook-agent connect`)'}"
             f" | daemon: {'running' if view['daemon'] else 'stopped'}"
-            f" | autostart: {'installed' if view['autostart'] else 'not installed'}")
+            f" | autostart: {'installed' if view['autostart'] else 'not installed'}"
+            + (f" | account_email_sha256: {view.get('account_email_sha256') or '-'}" if view['connected'] else ""))
     return view
 
