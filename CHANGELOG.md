@@ -3,6 +3,16 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.36.0
+
+- **Leitsterne (goals) of the call (Oliver 10.11.: "goals ... die als leitsterne gelten ... würde agenten eine richtung geben"; server voicehook-v4 `goals.for_room`).** Up to 3 guiding stars per call: goals the owner bound to the call first, then goals he pinned for the account. Only own agents of the owner see them; a guest's agent gets nothing.
+  - `voicehook-agent goal list [--json]`: the guiding stars of this call (one line `Leitsterne: #2 Titel (fertig, wenn …); #5 …`, or JSON). The running join reads them with its own LiveKit token (`GET /api/bridge/goals`); the token never leaves the join.
+  - `voicehook-agent goal propose "Titel" [--done-when "…"]`: propose a guiding star. The join sends `operator.goal` `{op: "propose", title, done_when?, req}` to the worker only and waits up to 10 s for `operator.goal_status` `{req, ok, number?, error?}`: a card on the Decision Board that counts only after the owner's click (never by voice). Title max 80, done-criterion max 200 characters (the server limits). Exit 0 ok, 1 refused (`not_owner_agent` with hint) or timeout, 2 bad input, 3 no join.
+  - `status … --goal N` / `decide … --goal N`: this board / this question serves guiding star N (field `goal` on `operator.status` and the `vh.decide` RPC; 0 = none). Without `--goal` while the call has guiding stars only a soft `[hint]` on stderr (field `goal_hint` in the answer): never an error, never a decide duty ("micromanagement ist ein hänger").
+  - The guiding stars are the first line of the `_meta` hint after the join (with `--quiet` alone, without the share line). The `status_due` hint asks "Welchem Leitstern dient dein Schritt? (--goal N, wenn es passt)" while the call has some.
+  - A change (`vh.goals` ping in the room, no content) makes the join read them again; a real change is one `next` event `{type: "goals", goals, text}`.
+- No version bump in this PR: the release sets 0.36.0.
+
 ## 0.35.9
 
 - **`voicehook-agent tell-delta "<Anweisung>" [--wörtlich] [--vorrang] [--wait SEC]`: give Delta an instruction without speaking (owner's main agent only).** The running join sends `delta.tell` `{id, text, verbatim, priority: "normal"|"vorrang"}` to the worker only and tracks `delta.tell_status` `{id, state: queued|spoken|covered|rejected, reason?}`; `--wait` waits for spoken/covered/rejected. A join without `VOICEHOOK_AGENT_KEY` (or `owner-agent: not granted`), a helper session or a guest gets a clear error and nothing is sent; `rejected`/`not_owner_agent` comes with a hint. One JSON line with the id; exit 0 ok, 1 refused, 2 bad input, 3 no join.
