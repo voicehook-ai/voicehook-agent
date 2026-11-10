@@ -1756,6 +1756,7 @@ def _on_transcript(ctl: _Control | None, room, pkt, payload, json_mode: bool) ->
     Content only in memory; stdout gets one line with counts."""
     if ctl is None or not isinstance(payload, dict) or not _transcript_sender_ok(room, pkt):
         return
+    payload = vtranscript.with_speaker_owner(payload, relay.sender_is_agent_kind(pkt.participant))
     done = ctl.transcripts.add(payload)
     if done is None:
         return
@@ -2440,7 +2441,8 @@ def _route_helper_decision(ctl: _Control, payload: dict) -> bool:
     return True
 
 
-def _route_helper_user_turn(ctl: _Control, payload: dict, own: set[str]) -> bool:
+def _route_helper_user_turn(ctl: _Control, payload: dict, own: set[str],
+                            speaker_owner: bool = False) -> bool:
     """0.22.0 (server 21.10.2026): a user turn addressed to a helper session by name
     (to_kind helper, to_op = us). A helper of this machine (to_key = our sender for it) gets
     it in its answer file (local relay: its `relay-next`, MCP `next` and hooks bring it);
@@ -2473,7 +2475,8 @@ def _route_helper_user_turn(ctl: _Control, payload: dict, own: set[str]) -> bool
     if frm and ctl.activity_path is not None and key == vrelayops.sender_for(frm):
         try:
             vrelayops.append_jsonl(vrelayops.answer_path(ctl.activity_path.parent, frm),
-                                   relay.helper_user_turn_event(text, name, speaker))
+                                   relay.helper_user_turn_event(text, name, speaker,
+                                                                speaker_owner=speaker_owner))
             return True
         except (OSError, vrelayops.RelayError) as e:
             print(f"[warn] relay user turn not written ({type(e).__name__})", file=sys.stderr, flush=True)
@@ -3075,6 +3078,9 @@ async def _connect_and_listen(
                          "owner-agent: " + ("granted" if granted else "not granted (key unknown "
                                             "or not the key of this room's account)"),
                          topic="_meta", owner_agent=granted)
+    # account tag of our own join token, only when it is an owner-agent token (data events:
+    # from_owner_agent); bridge / not an owner agent -> "" -> from_owner_agent always false
+    own_acct = vagentkey.owner_acct_tag(tok.get("token")) if tok is not None else ""
     stop = asyncio.Event()
     turn_event = asyncio.Event()  # set on finalized user-turn → graph re-sync
     disconnect_reason: dict[str, str | None] = {"name": None}
@@ -3107,12 +3113,17 @@ async def _connect_and_listen(
             # 0.11.0: v4 stamps speaker (display name) + op (operator identity) on
             # transcript lines; old servers send neither -> output unchanged.
             who = {k: payload[k] for k in ("speaker", "op") if payload.get(k)}
+            # speaker_owner: Delta's worker stamps it; it counts only from a sender of kind
+            # AGENT (server-assigned), otherwise / missing / not a bool -> false (fail-closed)
+            spk_owner = relay.speaker_owner(payload, pkt.participant)
+            if role == "user":
+                who["speaker_owner"] = spk_owner
             _print_event(json_mode, role, text, topic=topic, **who)
             # `voicehook-agent next` — queue finalized user turns.
             if ctl is not None and role == "agent" and relay.TurnNotifier._is_final(payload):
                 ctl.agent_said.add(text)  # Delta's own answer (not an echo of our say)
             if ctl is not None:
-                ev = relay.user_turn_event(role, text, payload)
+                ev = relay.user_turn_event(role, text, payload, speaker_owner=spk_owner)
                 if ev is not None:  # 0.35.9: a grown utterance spools only its new part
                     ev = ctl.continuation.apply(ev, payload)
                 if ev is not None:
@@ -3120,7 +3131,7 @@ async def _connect_and_listen(
                     if hf:  # 0.22.0: the human spoke to a helper by name: info copy for us
                         ev.update(hf)
                     if hf or (relay.wake_info(payload) or {}).get("scope") == "helper":
-                        _route_helper_user_turn(ctl, payload, _own_ids())
+                        _route_helper_user_turn(ctl, payload, _own_ids(), speaker_owner=spk_owner)
                     # 0.24.0 (server #606): wake our LLM only if `wake` names us (scope !=
                     # helper); otherwise keep the turn for the next woken event (since_last).
                     # 0.24.1 data-channel mode: wake only on a turn explicitly addressed to us
@@ -3179,7 +3190,8 @@ async def _connect_and_listen(
                                  f"({topic}) id={change['id']} state={change['state']}", topic=topic)
         elif topic == vdata.TOPIC:
             # 0.21.4 agent-to-agent data: a `next` event (never printed with its content)
-            ev = vdata.receive_event(ctl.ident if ctl is not None else "", pkt.participant, payload)
+            ev = vdata.receive_event(ctl.ident if ctl is not None else "", pkt.participant, payload,
+                                     own_acct=own_acct)
             if ev is not None:
                 if ctl is not None:
                     ctl.events.put_nowait(ev)

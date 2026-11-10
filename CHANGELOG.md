@@ -3,6 +3,10 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## Unreleased
+
+- **Sender role on events: `speaker_owner`, `from_owner`, `from_owner_agent` (for third-party services that may only react to the owner and the owner's own agents; names like `speaker`/`from` prove nothing).** User turns (`next` `type: user`, the `--json` stdout line of a user `transcript` turn, `since_last` items, a helper's local `user_turn`) and the lines of `operator.transcript` carry `speaker_owner`: the worker's `speaker_owner: true`, passed on only when the packet came from a LiveKit participant of kind AGENT (server-assigned); another sender, the bridge transport, a missing field or a non-bool give `false`. Data events (`type: data`) carry `from_owner` (sender's signed `vh.owner` == `"1"`) and `from_owner_agent` (signed `vh.owner_agent` == `"1"` AND `vh.owner_acct` equal to the account tag in this join's own owner-agent token; the CLI has no room account of its own, so without an own owner-agent token, and on the bridge, it is always `false`). Only from signed participant data, never from the packet; fail-closed. docs/CLI.md: "Sender role on events".
+
 ## 0.35.9
 
 - **`voicehook-agent tell-delta "<Anweisung>" [--wörtlich] [--vorrang] [--wait SEC]`: give Delta an instruction without speaking (owner's main agent only).** The running join sends `delta.tell` `{id, text, verbatim, priority: "normal"|"vorrang"}` to the worker only and tracks `delta.tell_status` `{id, state: queued|spoken|covered|rejected, reason?}`; `--wait` waits for spoken/covered/rejected. A join without `VOICEHOOK_AGENT_KEY` (or `owner-agent: not granted`), a helper session or a guest gets a clear error and nothing is sent; `rejected`/`not_owner_agent` comes with a hint. One JSON line with the id; exit 0 ok, 1 refused, 2 bad input, 3 no join.

@@ -19,7 +19,9 @@ destination_identities (never broadcast, never spoken, never to Delta or the hum
 Incoming: a WebRTC packet counts only from an operator in the room and only when its
 to_identities name this join; the bridge delivers the server's ready event. Either way
 `next` gets {type: "data", from, from_identity, kind, id, name?, mime?, size?, payload | url,
-file_id, summary}; `listen` wakes on it. Content is never logged.
+file_id, summary, from_owner, from_owner_agent}; `listen` wakes on it. Content is never
+logged. from_owner / from_owner_agent: only from the sender's signed LiveKit attributes, false
+on the bridge and whenever unsure.
 """
 from __future__ import annotations
 
@@ -162,10 +164,33 @@ def summary(ev: dict) -> str:
     return f"Daten von {ev.get('from') or '?'}: {what} ({human_size(size)}){where}"
 
 
-def receive_event(own_identity: str, sender: Any, payload: Any) -> dict | None:
+def _signed_attrs(p: Any) -> dict:
+    """Attributes of a sender only when they really came from LiveKit (a dict on the
+    participant); the bridge names the sender by identity only -> {}."""
+    a = getattr(p, "attributes", None) if p is not None else None
+    return a if isinstance(a, dict) else {}
+
+
+def from_owner(sender: Any) -> bool:
+    """The sender is the room's owner (signed `vh.owner=1`). Fail-closed."""
+    return _signed_attrs(sender).get("vh.owner") == "1"
+
+
+def from_owner_agent(sender: Any, own_acct: str) -> bool:
+    """The sender is an own agent of the room's account: signed `vh.owner_agent=1` AND its
+    `vh.owner_acct` equals the account tag of our own (owner-agent) join token. Without our
+    own tag (not an owner agent, bridge) nothing matches. Fail-closed."""
+    a = _signed_attrs(sender)
+    tag = a.get("vh.owner_acct")
+    return (a.get("vh.owner_agent") == "1" and bool(own_acct) and isinstance(tag, str)
+            and tag == own_acct)
+
+
+def receive_event(own_identity: str, sender: Any, payload: Any, own_acct: str = "") -> dict | None:
     """An incoming operator.data packet -> the `next` event, or None (dropped). `sender`: the
     participant (WebRTC) or None. A bridge transport delivers the server's ready event
-    (type data) as payload."""
+    (type data) as payload. `from_owner` / `from_owner_agent` come only from the sender's
+    signed LiveKit attributes (never from the packet): bridge / unknown sender -> false."""
     if not isinstance(payload, dict):
         return None
     if payload.get("type") == "data":  # bridge: the server checked and built it already
@@ -195,5 +220,7 @@ def receive_event(own_identity: str, sender: Any, payload: Any) -> dict | None:
         if isinstance(payload.get("size"), int):
             ev["size"] = payload["size"]
         ev["ts"] = time.time()
+    ev["from_owner"] = from_owner(sender)
+    ev["from_owner_agent"] = from_owner_agent(sender, own_acct)
     ev["summary"] = summary(ev)
     return ev
