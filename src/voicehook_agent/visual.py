@@ -6,12 +6,12 @@ bridge `POST /api/bridge/visual`), coordinates 0..1 (0,0 = top left):
     shape = {"type":"preset","name":<PRESETS>,"hold_ms":800..8000}
           | {"type":"polygon","points":[[x,y],...],"closed":bool,"hold_ms":..}
           | {"type":"path","d":"<SVG path, only M L Q C Z>","hold_ms":..}
-          | {"type":"multi","items":[<preset|polygon|path>, ... max 4]}
+          | {"type":"multi","items":[<preset|polygon|path>, ... max 12]}
           ; every shape may carry "label" (<= 24 chars)
     emotion = {"label":<EMOTIONS>,"valence":-1..1,"arousal":0..1}
 
-At most 200 points over the whole shape, a path string `d` at most 2 KB, the whole shape
-at most 8 KB as compact JSON. Label: at most 24 chars, no control characters, emoji or
+At most 400 points over the whole shape, a path string `d` at most 2 KB, the whole shape
+at most 12 KB as compact JSON. Label: at most 24 chars, no control characters, emoji or
 `<>`. The server draws at most one shape per 2 s per operator (bridge: 429; invalid: 400).
 The CLI validates like the server so a bad shape fails here with a clear message (exit 2)
 instead of silently not being drawn.
@@ -43,10 +43,10 @@ EMOTIONS: dict[str, tuple[float, float]] = {
 }
 HOLD_MS_MIN, HOLD_MS_MAX = 800, 8000
 LABEL_MAX = 24
-MULTI_MAX = 4
-POINTS_MAX = 200
+MULTI_MAX = 12              # e.g. a chart: axes + bars + trend line (server voicehook-v4 visual.py)
+POINTS_MAX = 400
 PATH_BYTES_MAX = 2048       # one path string d
-BYTES_MAX = 8192            # whole shape as compact JSON
+BYTES_MAX = 12288           # whole shape as compact JSON
 RATE_S = 2.0                # server: one shape per 2 s per operator
 # SVG path: only absolute M L Q C Z; numbers per segment
 PATH_ARGS = {"M": 2, "L": 2, "Q": 4, "C": 6, "Z": 0}
