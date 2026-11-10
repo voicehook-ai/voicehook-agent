@@ -3,6 +3,10 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## Unreleased
+
+- **Session Watcher: the detached watcher no longer inherits `VOICEHOOK_SESSION_LABEL` and `VOICEHOOK_AGENT_KEY` from the join that starts it (Trello ZeBWRYzR).** Before, every local session in the "Sessions" list of the call page was named like that head and the list collapsed to one entry. `spawn_detached` now drops both (besides the state dir) from the child's environment; the watcher reports via the relay credential and needs neither.
+
 ## 0.35.9
 
 - **`voicehook-agent tell-delta "<Anweisung>" [--wörtlich] [--vorrang] [--wait SEC]`: give Delta an instruction without speaking (owner's main agent only).** The running join sends `delta.tell` `{id, text, verbatim, priority: "normal"|"vorrang"}` to the worker only and tracks `delta.tell_status` `{id, state: queued|spoken|covered|rejected, reason?}`; `--wait` waits for spoken/covered/rejected. A join without `VOICEHOOK_AGENT_KEY` (or `owner-agent: not granted`), a helper session or a guest gets a clear error and nothing is sent; `rejected`/`not_owner_agent` comes with a hint. One JSON line with the id; exit 0 ok, 1 refused, 2 bad input, 3 no join.
