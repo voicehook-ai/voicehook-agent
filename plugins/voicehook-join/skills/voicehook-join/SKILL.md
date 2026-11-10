@@ -148,7 +148,7 @@ Mishearing (a product, a name): `add_vocab` with `terms` and/or `fixes` (`{wrong
 
 Appendix (background; not needed to join or talk).
 
-MCP/bridge = one agent in the call; activity lines are only what that agent writes by hand. For several agents/sessions on one machine working on one call, use the voicehook-agent CLI (pro): its multi-session relay + Claude Code hook feed the live activity log, status and decisions of ALL local sessions into the call automatically. MCP/bridge run on the server and cannot see the user's local sessions.
+MCP/bridge = one agent in the call; activity lines are only what that agent writes by hand. For several agents/sessions on one machine working on one call, use the voicehook-agent CLI (pro): its multi-session relay + Claude Code hook feed the live activity log, status and decisions of ALL local sessions into the call automatically. MCP/bridge run on the server and cannot see the user's local sessions. Since CLI 0.35.9 the first `voicehook-agent join` on a machine installs the Claude Code hooks itself (once, announced on stderr; off with `VOICEHOOK_AUTO_HOOKS=0`) and starts the session watcher, which keeps the call's participant list and never asks to invite a session that is already in the call.
 
 | path | role | use it when |
 |---|---|---|
