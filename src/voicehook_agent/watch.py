@@ -232,7 +232,7 @@ def child_argv(extra: list[str] | None = None) -> list[str]:
             "watch", "--foreground", *(extra or [])]
 
 
-_CHILD_ENV_DROP = frozenset({vact.STATE_ENV, vmulti.LABEL_ENV, "VOICEHOOK_AGENT_KEY"})
+_CHILD_ENV_DROP = frozenset({vact.STATE_ENV, vmulti.LABEL_ENV})
 
 
 def spawn_detached(extra: list[str] | None = None, *, popen=subprocess.Popen) -> bool:
@@ -243,8 +243,9 @@ def spawn_detached(extra: list[str] | None = None, *, popen=subprocess.Popen) ->
     try:
         if disabled() or credential() is None or running():
             return False
-        # machine state; plus the starting join's session label and agent key (Trello ZeBWRYzR):
-        # inherited, every local session was named like that head and the list collapsed to one
+        # machine state; plus the starting join's session label (Trello ZeBWRYzR): inherited, every
+        # local session was named like that head and the list collapsed to one. VOICEHOOK_AGENT_KEY
+        # stays: same machine, same owner (server #931 accepts the session list only from owner agents)
         env = {k: v for k, v in os.environ.items() if k not in _CHILD_ENV_DROP}
         from . import device as vdev
         if vdev.caretaker_active():

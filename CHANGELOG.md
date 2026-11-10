@@ -5,7 +5,7 @@ voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the vers
 
 ## Unreleased
 
-- **Session Watcher: the detached watcher no longer inherits `VOICEHOOK_SESSION_LABEL` and `VOICEHOOK_AGENT_KEY` from the join that starts it (Trello ZeBWRYzR).** Before, every local session in the "Sessions" list of the call page was named like that head and the list collapsed to one entry. `spawn_detached` now drops both (besides the state dir) from the child's environment; the watcher reports via the relay credential and needs neither.
+- **Session Watcher: the detached watcher no longer inherits `VOICEHOOK_SESSION_LABEL` from the join that starts it (Trello ZeBWRYzR).** Before, every local session in the "Sessions" list of the call page was named like that head and the list collapsed to one entry. `spawn_detached` now drops it (besides the state dir) from the child's environment. `VOICEHOOK_AGENT_KEY` is still passed on (same machine, same owner; the server accepts the session list only from owner agents, voicehook-v4 #931).
 
 ## 0.35.9
 
