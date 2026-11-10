@@ -316,3 +316,56 @@ def test_hook_main_stop_wait_and_ask_wait(relay, monkeypatch, capsys):
     monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
     assert activity.main(["ask-wait"]) == 0
     assert json.loads(capsys.readouterr().out) == {"hookSpecificOutput": {"x": 1}}
+
+
+# ----- permission-wait (Olivers #16, 10.11.): Klick des Besitzers gibt den Erlaubnis-Dialog frei -----------
+def _perm(sid="other-1", cmd="git push origin main"):
+    return _ev("PermissionRequest", sid=sid, tool_name="Bash", tool_input={"command": cmd, "description": "push"})
+
+
+def _owner(dec_id, verdict, via="click", by="owner"):
+    ev = _dec(dec_id, verdict=verdict)
+    ev.update({"answered_via": via, "answered_by": by, "answered_role": by})
+    return ev
+
+
+@pytest.mark.parametrize("verdict,behavior", [("yes", "allow"), ("no", "deny")])
+def test_permission_wait_klick_des_besitzers(relay, verdict, behavior):
+    fb, clock = FakeBoard(), Clock()
+    fb.queue = [_owner("d00000000", verdict)]
+    out = asks.permission_wait(_perm(), now=1000.0, next_events=fb.next_events, clock=clock, create=fb.create)
+    hs = out["hookSpecificOutput"]
+    assert hs["hookEventName"] == "PermissionRequest" and hs["decision"]["behavior"] == behavior
+    if behavior == "deny":
+        assert hs["decision"]["message"]
+    assert "git push" in fb.created[0]["question"]                 # konkreter Befehl auf der Karte
+
+
+@pytest.mark.parametrize("ev", [_owner("d00000000", "yes", via="voice"),     # Stimme zählt nicht (#16: nur Klick)
+                                _owner("d00000000", "yes", by="agent")])     # nie ein Agent
+def test_permission_wait_nur_klick_des_besitzers(relay, ev):
+    fb, clock = FakeBoard(), Clock()
+    fb.queue = [ev]
+    logs = []
+    assert asks.permission_wait(_perm(), next_events=fb.next_events, clock=clock, create=fb.create,
+                                log=logs.append) is None            # normaler Dialog in der Session
+    assert logs                                                     # sichtbar im Log, nie still
+
+
+def test_permission_wait_zeitablauf_normaler_dialog(relay):
+    fb, clock = FakeBoard(), Clock()
+    logs = []
+    assert asks.permission_wait(_perm(), next_events=fb.next_events, clock=clock, create=fb.create,
+                                log=logs.append) is None and logs
+    assert fb.created                                               # die Karte steht trotzdem auf dem Board
+
+
+def test_permission_wait_ohne_call_tut_nichts(monkeypatch):
+    fb = FakeBoard()
+    assert asks.permission_wait(_perm(), next_events=fb.next_events, create=fb.create) is None
+    assert fb.created == []
+
+
+def test_permission_wait_hook_ist_registriert():
+    cmd, _match, opts = activity.EXTRA_HOOKS["PermissionRequest"]
+    assert cmd == activity.HOOK_COMMAND_PERMISSION_WAIT and opts["timeout"] > asks.PERM_WAIT_S

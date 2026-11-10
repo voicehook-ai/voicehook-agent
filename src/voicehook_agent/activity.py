@@ -119,11 +119,16 @@ NO_MATCHER_EVENTS = ("UserPromptSubmit", "Stop", "SessionStart", "SessionEnd")  
 # older binary (usage error = exit 2) never wakes a session with its usage text.
 HOOK_COMMAND_ASK_WAIT = "voicehook-agent-hook ask-wait || true"
 HOOK_COMMAND_STOP_WAIT = "voicehook-agent-hook stop-wait; test $? -eq 3 && exit 2; exit 0"
+# 0.36 (asks.permission_wait, Olivers #16): Erlaubnis-Dialog per Klick des Besitzers im Call freigeben
+HOOK_COMMAND_PERMISSION_WAIT = "voicehook-agent-hook permission-wait || true"
 EXTRA_HOOKS = {
     "PreToolUse": (HOOK_COMMAND_ASK_WAIT, {"matcher": "AskUserQuestion"},
                    {"timeout": 100, "statusMessage": "Question is on the voicehook call board "
                                                      "(answer there, or here after 90 s)"}),
     "Stop": (HOOK_COMMAND_STOP_WAIT, {}, {"timeout": 1800, "async": True, "asyncRewake": True}),
+    "PermissionRequest": (HOOK_COMMAND_PERMISSION_WAIT, {"matcher": "*"},
+                          {"timeout": 100, "statusMessage": "Permission request is on the voicehook call board "
+                                                            "(owner clicks there, or answer here after 90 s)"}),
 }
 # Commands that count as "our hook is already installed" (idempotent install).
 _OUR_COMMANDS = (HOOK_COMMAND, "voicehook-agent hook post-tool-use")
@@ -1313,7 +1318,7 @@ class _deadline:
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     cmd = args[0] if args else ""
-    if cmd in ("ask-wait", "stop-wait"):  # 0.21.3 (asks.py): answers from the Decision Board
+    if cmd in ("ask-wait", "stop-wait", "permission-wait"):  # 0.21.3 (asks.py): answers from the Decision Board
         from . import asks
         return asks.main(cmd)
     if cmd == "session-end":  # 0.21.4 (board.py): the session's board leaves the call

@@ -447,6 +447,60 @@ def ask_wait(raw: str, now: float | None = None, next_events=None, clock=time.mo
         return None
 
 
+PERM_WAIT_S = 90.0   # wie ask-wait: danach erscheint der normale Dialog in der Session (sichtbar im Log)
+
+
+def _owner_click(ev: dict) -> bool:
+    """Olivers #16 (10.11.): nur ein KLICK des Besitzers gibt eine Erlaubnis frei, nie Stimme, nie ein Agent."""
+    return ev.get("answered_via") == "click" and "owner" in (ev.get("answered_by"), ev.get("answered_role"))
+
+
+def permission_wait(raw: str, now: float | None = None, next_events=None, clock=time.monotonic,
+                    sleep=time.sleep, create=None, log=None) -> dict | None:
+    """`voicehook-agent-hook permission-wait` (zweiter PermissionRequest-Hook, langer Timeout): wartet auf
+    den Klick des Besitzers auf der Board-Karte und gibt allow bzw. deny an Claude Code zurück. Ohne
+    Klick des Besitzers (Zeitablauf, Stimme, Agent, Call-Ende): None, der normale Dialog erscheint.
+    Nie automatisch freigeben, nie still ablehnen (Leitplanke Ines). Never raises."""
+    try:
+        event = json.loads(raw) if raw and raw.strip() else {}
+        if not isinstance(event, dict) or event.get("hook_event_name", "PermissionRequest") != "PermissionRequest":
+            return None
+        who = _helper(event) if PERM_WAIT_S > 0 else None
+        if who is None:
+            return None
+        skey, rel, frm = who
+        info = vnotify.classify(event, frm)
+        if not info or info.get("kind") != "ask" or info.get("tool") == vnotify.ASK_TOOL:
+            return None   # nichts Konkretes zu fragen bzw. AskUserQuestion (läuft über ask-wait)
+        t = time.time() if now is None else now
+        qk = vnotify.group_key(info)
+        start = clock()
+        adm = vnotify.admit_ask(skey, info, "relay", t, {"from": frm})
+        if adm is not None:
+            ids = (create or vnotify.create)(vnotify.ask_job("relay", skey, info, adm, {"from": frm}))
+        else:
+            ids = _ids_of(skey, qk, 1, ID_WAIT_S, sleep=sleep)
+        if not ids:
+            return None
+        got = _wait_answers(rel, frm, ids[:1], start + PERM_WAIT_S, skey, qk, next_events, clock)
+        ev = (got or {}).get(ids[0]) if got else None
+        if not ev or not _owner_click(ev) or ev.get("verdict") not in ("yes", "no"):
+            if log:
+                log("permission-wait: kein Klick des Besitzers, normaler Dialog")
+            return None
+        vnotify.forget(skey, qk)
+        from . import board
+        board.mark_delivered(skey, [ev])
+        if ev["verdict"] == "yes":
+            return {"hookSpecificOutput": {"hookEventName": "PermissionRequest",
+                                           "decision": {"behavior": "allow"}}}
+        return {"hookSpecificOutput": {"hookEventName": "PermissionRequest",
+                                       "decision": {"behavior": "deny",
+                                                    "message": "Im voicehook-Call vom Besitzer abgelehnt."}}}
+    except Exception:  # noqa: BLE001 - a hook must never disturb Claude Code
+        return None
+
+
 def stop_ask(raw: str, wait: bool = True, now: float | None = None, post=None,
              next_events=None, clock=time.monotonic, create=None) -> tuple[int, str]:
     """Stop: post the question the reply ends with (once), and with `wait` wait for its
@@ -540,6 +594,11 @@ def main(cmd: str) -> int:
         raw = ""
     if cmd == "ask-wait":
         out = ask_wait(raw)
+        if out:
+            print(json.dumps(out, ensure_ascii=False), flush=True)
+        return 0
+    if cmd == "permission-wait":
+        out = permission_wait(raw, log=lambda m: print(m, file=sys.stderr, flush=True))
         if out:
             print(json.dumps(out, ensure_ascii=False), flush=True)
         return 0
