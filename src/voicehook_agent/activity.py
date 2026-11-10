@@ -176,6 +176,12 @@ _SECRET_PATTERNS = [
     re.compile(r"[A-Za-z0-9+/=_\-]{32,}"),
 ]
 _KV = _SECRET_PATTERNS[1]
+# 0.36 (Review Ines): Secret als eigenes Argument: `--password hunter2`, `--token hunter2`, `-phunter2`
+_FLAG = re.compile(r"(?i)(?<!\S)(--?(?:api[_-]?key|access[_-]?key|token|password|passwd|pwd|pass|secret|auth|"
+                   r"key|client[_-]?secret))(?:\s+|=)(?!-)(\"[^\"]*\"|'[^']*'|\S+)")
+_SHORT_P = re.compile(r"(?<!\S)-p(?=[^\s/.-])\S+")   # mysql-Stil -p<Passwort>; `-p` allein bleibt
+_SECRET_PATTERNS.insert(0, _SHORT_P)
+_SECRET_PATTERNS.insert(0, _FLAG)
 _LINE_RX = re.compile(r"^(\d\d:\d\d:\d\d) ([A-Za-z0-9_.:\-]{1,40})(?:: (.*))?$")
 
 
@@ -192,6 +198,10 @@ def scrub(text: str) -> str:
     for rx in _SECRET_PATTERNS:
         if rx is _KV:
             s = rx.sub(lambda m: f"{m.group(1)}={REDACTED}", s)
+        elif rx is _FLAG:
+            s = rx.sub(lambda m: f"{m.group(1)} {REDACTED}", s)
+        elif rx is _SHORT_P:
+            s = rx.sub(f"-p{REDACTED}", s)
         else:
             s = rx.sub(REDACTED, s)
     return s
