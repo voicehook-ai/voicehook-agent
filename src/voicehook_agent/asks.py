@@ -29,6 +29,7 @@ sets the AskUserQuestion wait (0 = do not wait, only post). stdlib only.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -347,7 +348,7 @@ def tool_answer(item: dict, ev: dict) -> str:
 
 
 def _wait_answers(rel: dict, frm: str, ids: list[str], deadline: float, skey: str, qk: str,
-                  next_events=None, now=time.monotonic) -> dict | None:
+                  next_events=None, now=time.monotonic, check_slot: bool = True) -> dict | None:
     """{id: event} once every id has an answer; None on timeout or when the session went on
     (its slot was resolved)."""
     from . import relayops
@@ -366,6 +367,8 @@ def _wait_answers(rel: dict, frm: str, ids: list[str], deadline: float, skey: st
                 got[e["id"]] = e
         if len(got) == len(ids):
             return got
+        if not check_slot:
+            continue
         slot = vnotify.open_slot(skey)
         if slot is None or slot.get("q") != qk:
             return None
@@ -416,6 +419,11 @@ def ask_wait(raw: str, now: float | None = None, next_events=None, clock=time.mo
         if not info or info.get("tool") != vnotify.ASK_TOOL:
             return None
         items = info.get("items") or []
+        why = vnotify.permission_unsafe(event)
+        if why:   # nie freigeben, was die Karte nicht vollständig zeigt
+            if log:
+                log(f"permission-wait: keine Klick-Freigabe ({why}), normaler Dialog")
+            return None
         t = time.time() if now is None else now
         qk = vnotify.group_key(info)
         start = clock()
@@ -445,6 +453,126 @@ def ask_wait(raw: str, now: float | None = None, next_events=None, clock=time.mo
                                        "updatedInput": inp}}
     except Exception:  # noqa: BLE001 - a hook must never disturb Claude Code
         return None
+
+
+GENERIC_WAIT_S = 2.0   # so lange auf die Id der allgemeinen Erlaubnis-Karte warten (paralleler Hook)
+PERM_WAIT_S = 90.0   # wie ask-wait: danach erscheint der normale Dialog in der Session (sichtbar im Log)
+
+
+def _claim_path(skey: str, qk: str):
+    from . import session as vsession
+    d = vsession.home_dir() / "perm-wait"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / (hashlib.sha256(f"{skey}|{qk}".encode()).hexdigest()[:24] + ".lock")
+
+
+def _claim(skey: str, qk: str) -> bool:
+    """Review Ines: zwei gleiche Erlaubnis-Anfragen teilen sich nie eine Karte. Atomar per O_EXCL;
+    ein Rest älter als der Hook-Timeout zählt nicht."""
+    p = _claim_path(skey, qk)
+    with contextlib.suppress(OSError):
+        if time.time() - p.stat().st_mtime > PERM_WAIT_S + 30:
+            p.unlink()
+    try:
+        os.close(os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+        return True
+    except OSError:
+        return False
+
+
+def _release(skey: str, qk: str) -> None:
+    with contextlib.suppress(OSError):
+        _claim_path(skey, qk).unlink()
+
+
+def _owner_click(ev: dict) -> bool:
+    """Olivers #16 (10.11.): nur ein KLICK des Besitzers gibt eine Erlaubnis frei, nie Stimme, nie ein Agent."""
+    return ev.get("answered_via") == "click" and ev.get("answered_role") == "owner"
+
+
+def _withdraw(rel: dict, frm: str, dec_id: str) -> None:
+    from .watch import delete_decision
+    delete_decision(rel, frm, dec_id)
+
+
+def permission_wait(raw: str, now: float | None = None, next_events=None, clock=time.monotonic,
+                    sleep=time.sleep, decide=None, log=None, withdraw=None) -> dict | None:
+    """`voicehook-agent-hook permission-wait` (zweiter PermissionRequest-Hook, langer Timeout): wartet auf
+    den Klick des Besitzers auf der Board-Karte und gibt allow bzw. deny an Claude Code zurück. Ohne
+    Klick des Besitzers (Zeitablauf, Stimme, Agent, Call-Ende): None, der normale Dialog erscheint.
+    Nie automatisch freigeben, nie still ablehnen (Leitplanke Ines). Never raises."""
+    try:
+        event = json.loads(raw) if raw and raw.strip() else {}
+        if not isinstance(event, dict) or event.get("hook_event_name", "PermissionRequest") != "PermissionRequest":
+            return None
+        who = _helper(event) if PERM_WAIT_S > 0 else None
+        if who is None:
+            return None
+        skey, rel, frm = who
+        info = vnotify.classify(event, frm)
+        if not info or info.get("kind") != "ask" or info.get("tool") == vnotify.ASK_TOOL:
+            return None   # nichts Konkretes zu fragen bzw. AskUserQuestion (läuft über ask-wait)
+        why = vnotify.permission_unsafe(event)
+        if why:   # nie freigeben, was die Karte nicht vollständig zeigt
+            if log:
+                log(f"permission-wait: keine Klick-Freigabe ({why}), normaler Dialog")
+            return None
+        # Eigene Besitzer-Karte (Review Ines): voller Befehl und Ordner nur für den Konto-Inhaber, nur per
+        # Klick. Bestätigt der Server audience owner nicht (älterer Server), keine Klick-Freigabe.
+        qk = vnotify.group_key(info)
+        if not _claim(skey, qk):   # gleiche Anfrage läuft schon: ein Klick gibt nie zwei Aufrufe frei
+            if log:
+                log("permission-wait: gleiche Anfrage wartet schon, normaler Dialog")
+            return None
+        start = clock()
+        try:
+            return _perm_card(event, info, skey, rel, frm, qk, start, next_events, clock, sleep, decide, log,
+                              withdraw or _withdraw)
+        finally:
+            _release(skey, qk)
+    except Exception:  # noqa: BLE001 - a hook must never disturb Claude Code
+        return None
+
+
+def _perm_card(event, info, skey, rel, frm, qk, start, next_events, clock, sleep, decide, log, withdraw):
+    job = {"route": "relay", "skey": skey, "from": frm}
+    body = {"question": info["question"], "context": vnotify.permission_full(event)[:vnotify.CONTEXT_MAX],
+            "audience": "owner", "click_only": True}
+    res = (decide or vnotify._decide)(job, body)
+    dec_id = res.get("id") if isinstance(res, dict) and res.get("ok") else None
+    if not isinstance(dec_id, str) or not dec_id:
+        if log:
+            log("permission-wait: keine Besitzer-Karte angelegt, normaler Dialog")
+        return None
+    if res.get("audience") != "owner":
+        with contextlib.suppress(Exception):
+            withdraw(rel, frm, dec_id)
+        if log:
+            log("permission-wait: Server ohne Besitzer-Karte (audience owner), normaler Dialog")
+        return None
+    # die allgemeine Erlaubnis-Karte (permission-request, sieht jeder) ersetzt die Besitzer-Karte
+    for gid in _ids_of(skey, qk, 1, GENERIC_WAIT_S, sleep=sleep):
+        with contextlib.suppress(Exception):
+            withdraw(rel, frm, gid)
+    got = _wait_answers(rel, frm, [dec_id], start + PERM_WAIT_S, skey, qk, next_events, clock, check_slot=False)
+    ev = (got or {}).get(dec_id) if got else None
+    if not ev or not _owner_click(ev) or ev.get("verdict") not in ("yes", "no"):
+        # Karte zurückziehen: ein später Klick darf nichts mehr freigeben (Review Ines)
+        with contextlib.suppress(Exception):
+            withdraw(rel, frm, dec_id)
+        vnotify.forget(skey, qk)
+        if log:
+            log("permission-wait: kein Klick des Besitzers, Karte zurückgezogen, normaler Dialog")
+        return None
+    vnotify.forget(skey, qk)
+    from . import board
+    board.mark_delivered(skey, [ev])
+    if ev["verdict"] == "yes":
+        return {"hookSpecificOutput": {"hookEventName": "PermissionRequest",
+                                       "decision": {"behavior": "allow"}}}
+    return {"hookSpecificOutput": {"hookEventName": "PermissionRequest",
+                                   "decision": {"behavior": "deny",
+                                                "message": "Im voicehook-Call vom Besitzer abgelehnt."}}}
 
 
 def stop_ask(raw: str, wait: bool = True, now: float | None = None, post=None,
@@ -540,6 +668,11 @@ def main(cmd: str) -> int:
         raw = ""
     if cmd == "ask-wait":
         out = ask_wait(raw)
+        if out:
+            print(json.dumps(out, ensure_ascii=False), flush=True)
+        return 0
+    if cmd == "permission-wait":
+        out = permission_wait(raw, log=lambda m: print(m, file=sys.stderr, flush=True))
         if out:
             print(json.dumps(out, ensure_ascii=False), flush=True)
         return 0

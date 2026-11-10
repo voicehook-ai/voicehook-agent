@@ -119,11 +119,16 @@ NO_MATCHER_EVENTS = ("UserPromptSubmit", "Stop", "SessionStart", "SessionEnd")  
 # older binary (usage error = exit 2) never wakes a session with its usage text.
 HOOK_COMMAND_ASK_WAIT = "voicehook-agent-hook ask-wait || true"
 HOOK_COMMAND_STOP_WAIT = "voicehook-agent-hook stop-wait; test $? -eq 3 && exit 2; exit 0"
+# 0.36 (asks.permission_wait, Olivers #16): Erlaubnis-Dialog per Klick des Besitzers im Call freigeben
+HOOK_COMMAND_PERMISSION_WAIT = "voicehook-agent-hook permission-wait || true"
 EXTRA_HOOKS = {
     "PreToolUse": (HOOK_COMMAND_ASK_WAIT, {"matcher": "AskUserQuestion"},
                    {"timeout": 100, "statusMessage": "Question is on the voicehook call board "
                                                      "(answer there, or here after 90 s)"}),
     "Stop": (HOOK_COMMAND_STOP_WAIT, {}, {"timeout": 1800, "async": True, "asyncRewake": True}),
+    "PermissionRequest": (HOOK_COMMAND_PERMISSION_WAIT, {"matcher": "*"},
+                          {"timeout": 100, "statusMessage": "Permission request is on the voicehook call board "
+                                                            "(owner clicks there, or answer here after 90 s)"}),
 }
 # Commands that count as "our hook is already installed" (idempotent install).
 _OUR_COMMANDS = (HOOK_COMMAND, "voicehook-agent hook post-tool-use")
@@ -171,6 +176,12 @@ _SECRET_PATTERNS = [
     re.compile(r"[A-Za-z0-9+/=_\-]{32,}"),
 ]
 _KV = _SECRET_PATTERNS[1]
+# 0.36 (Review Ines): Secret als eigenes Argument: `--password hunter2`, `--token hunter2`, `-phunter2`
+_FLAG = re.compile(r"(?i)(?<!\S)(--?(?:api[_-]?key|access[_-]?key|token|password|passwd|pwd|pass|secret|auth|"
+                   r"key|client[_-]?secret))(?:\s+|=)(?!-)(\"[^\"]*\"|'[^']*'|\S+)")
+_SHORT_P = re.compile(r"(?<!\S)-p(?=[^\s/.-])\S+")   # mysql-Stil -p<Passwort>; `-p` allein bleibt
+_SECRET_PATTERNS.insert(0, _SHORT_P)
+_SECRET_PATTERNS.insert(0, _FLAG)
 _LINE_RX = re.compile(r"^(\d\d:\d\d:\d\d) ([A-Za-z0-9_.:\-]{1,40})(?:: (.*))?$")
 
 
@@ -187,6 +198,10 @@ def scrub(text: str) -> str:
     for rx in _SECRET_PATTERNS:
         if rx is _KV:
             s = rx.sub(lambda m: f"{m.group(1)}={REDACTED}", s)
+        elif rx is _FLAG:
+            s = rx.sub(lambda m: f"{m.group(1)} {REDACTED}", s)
+        elif rx is _SHORT_P:
+            s = rx.sub(f"-p{REDACTED}", s)
         else:
             s = rx.sub(REDACTED, s)
     return s
@@ -1313,7 +1328,7 @@ class _deadline:
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     cmd = args[0] if args else ""
-    if cmd in ("ask-wait", "stop-wait"):  # 0.21.3 (asks.py): answers from the Decision Board
+    if cmd in ("ask-wait", "stop-wait", "permission-wait"):  # 0.21.3 (asks.py): answers from the Decision Board
         from . import asks
         return asks.main(cmd)
     if cmd == "session-end":  # 0.21.4 (board.py): the session's board leaves the call

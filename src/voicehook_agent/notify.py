@@ -271,6 +271,52 @@ def permission_question(event: dict, label: str = "") -> tuple[str, str] | None:
     return q, ctx
 
 
+FULL_CMD_MAX = 600   # voller Befehl im Kontext der Besitzer-Karte (permission-wait)
+
+
+def _shown(text: str, n: int) -> str:
+    """Voller Text für die Besitzer-Karte: Secrets gescrubbt, Pfade/URLs voll, gekürzt nur mit Hinweis."""
+    t = vact.scrub(text)
+    return t if len(t) <= n else f"{t[:n]} [gekürzt ({len(t)} Zeichen)]"
+
+
+def permission_full(event: dict) -> str:
+    """0.36 (permission-wait, Review Ines): was genau freigegeben wird, für die Besitzer-Karte: Werkzeug,
+    voller Befehl über alle Zeilen (Umbrüche als sichtbares ⏎, nie als neue Zeile), volle Pfade und URLs
+    (Secrets gescrubbt), Datei-Werkzeuge mit vollem Pfad, MCP/sonstige Werkzeuge mit ihren Argumenten,
+    dazu der volle Ordner. '' = nichts Konkretes (dann keine Klick-Freigabe)."""
+    tool = vact.sanitize_tool(event.get("tool_name"))
+    inp = event.get("tool_input") if isinstance(event.get("tool_input"), dict) else {}
+    if tool == "Bash":
+        lines = [vact._clean(ln.strip()) for ln in str(inp.get("command") or "").splitlines() if ln.strip()]
+        what = f"Befehl: {_shown(' ⏎ '.join(lines), FULL_CMD_MAX)}" if lines else ""
+    elif tool in vact.FILE_TOOLS:
+        path = vact._clean(str(inp.get(vact.FILE_TOOLS[tool]) or "").strip())
+        what = f"Datei: {_shown(path, 300)}" if path else ""
+    else:
+        args = [f"{vact._clean(str(k))}={vact._clean(json.dumps(v, ensure_ascii=False))}"
+                for k, v in inp.items() if v not in (None, "", [], {})]
+        what = f"Argumente: {_shown(', '.join(args), FULL_CMD_MAX)}" if args else ""
+    if not what:
+        return ""
+    cwd = vact._clean(str(event.get("cwd") or "").strip())
+    out = f"Werkzeug: {tool}; {what}"
+    return f"{out}; Ordner: {_shown(cwd, 300)}" if cwd else out
+
+
+def permission_unsafe(event: dict) -> str:
+    """0.36: Grund, warum eine Erlaubnis NICHT per Klick freigegeben werden darf ('' = darf): nichts
+    Konkretes zu zeigen, ein Secret (die Karte zeigte nicht, was läuft) oder gekürzt."""
+    full = permission_full(event)
+    if not full:
+        return "unklar"
+    if vact.REDACTED in full:
+        return "secret"
+    if "[gekürzt (" in full:
+        return "too_long"
+    return ""
+
+
 def unattended(env=None) -> bool:
     """0.21.4: nobody sits at this session (`claude -p`, Agent SDK runs, timers): its
     questions never go to the board. VOICEHOOK_ATTENDED=1/0 overrides; Claude Code's
