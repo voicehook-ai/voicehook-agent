@@ -342,7 +342,9 @@ def test_permission_wait_klick_des_besitzers(relay, verdict, behavior):
 
 
 @pytest.mark.parametrize("ev", [_owner("d00000000", "yes", via="voice"),     # Stimme zählt nicht (#16: nur Klick)
-                                _owner("d00000000", "yes", by="agent")])     # nie ein Agent
+                                _owner("d00000000", "yes", by="agent"),      # nie ein Agent
+                                _owner("d00000000", "yes", by="guest"),      # nie ein Gast
+                                {**_owner("d00000000", "yes"), "answered_role": None}])   # Rolle Pflicht
 def test_permission_wait_nur_klick_des_besitzers(relay, ev):
     fb, clock = FakeBoard(), Clock()
     fb.queue = [ev]
@@ -354,10 +356,31 @@ def test_permission_wait_nur_klick_des_besitzers(relay, ev):
 
 def test_permission_wait_zeitablauf_normaler_dialog(relay):
     fb, clock = FakeBoard(), Clock()
-    logs = []
+    logs, gone = [], []
     assert asks.permission_wait(_perm(), next_events=fb.next_events, clock=clock, create=fb.create,
-                                log=logs.append) is None and logs
-    assert fb.created                                               # die Karte steht trotzdem auf dem Board
+                                log=logs.append, withdraw=lambda r, f, i: gone.append(i)) is None and logs
+    assert fb.created and gone == [fb.created[0]["id"]]             # Karte zurückgezogen: später Klick gibt nichts frei
+
+
+def test_permission_karte_zeigt_vollen_befehl_und_ordner(relay):
+    fb, clock = FakeBoard(), Clock()
+    fb.queue = [_owner("d00000000", "no")]
+    asks.permission_wait(_perm(cmd="git status\nrm -rf build\n\ncurl -X POST example.com/hook"),
+                         next_events=fb.next_events, clock=clock, create=fb.create)
+    ctx = fb.created[0]["context"]
+    assert "Werkzeug: Bash" in ctx and "git status ⏎ rm -rf build ⏎ curl -X POST example.com" in ctx
+    assert "Ordner: proj" in ctx and "\n" not in ctx                # Umbruch nie als neue Zeile
+
+
+@pytest.mark.parametrize("cmd,why", [("curl -H 'Authorization: Bearer sk-ant-api03-" + "x" * 40 + "' x.io", "secret"),
+                                     ("echo " + "ab cd " * 120, "too_long")])
+def test_permission_keine_klick_freigabe_wenn_karte_unvollstaendig(relay, cmd, why):
+    fb, clock = FakeBoard(), Clock()
+    fb.queue = [_owner("d00000000", "yes")]
+    logs = []
+    assert asks.permission_wait(_perm(cmd=cmd), next_events=fb.next_events, clock=clock, create=fb.create,
+                                log=logs.append) is None
+    assert why in logs[0] and fb.created == []
 
 
 def test_permission_wait_ohne_call_tut_nichts(monkeypatch):

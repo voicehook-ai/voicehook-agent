@@ -29,6 +29,7 @@ sets the AskUserQuestion wait (0 = do not wait, only post). stdlib only.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -416,6 +417,11 @@ def ask_wait(raw: str, now: float | None = None, next_events=None, clock=time.mo
         if not info or info.get("tool") != vnotify.ASK_TOOL:
             return None
         items = info.get("items") or []
+        why = vnotify.permission_unsafe(event)
+        if why:   # nie freigeben, was die Karte nicht vollständig zeigt
+            if log:
+                log(f"permission-wait: keine Klick-Freigabe ({why}), normaler Dialog")
+            return None
         t = time.time() if now is None else now
         qk = vnotify.group_key(info)
         start = clock()
@@ -452,11 +458,17 @@ PERM_WAIT_S = 90.0   # wie ask-wait: danach erscheint der normale Dialog in der 
 
 def _owner_click(ev: dict) -> bool:
     """Olivers #16 (10.11.): nur ein KLICK des Besitzers gibt eine Erlaubnis frei, nie Stimme, nie ein Agent."""
-    return ev.get("answered_via") == "click" and "owner" in (ev.get("answered_by"), ev.get("answered_role"))
+    return (ev.get("answered_via") == "click" and ev.get("answered_role") == "owner"
+            and ev.get("answered_by") == "owner")   # Server: Klick eines Menschen -> answered_by = Rolle
+
+
+def _withdraw(rel: dict, frm: str, dec_id: str) -> None:
+    from .watch import delete_decision
+    delete_decision(rel, frm, dec_id)
 
 
 def permission_wait(raw: str, now: float | None = None, next_events=None, clock=time.monotonic,
-                    sleep=time.sleep, create=None, log=None) -> dict | None:
+                    sleep=time.sleep, create=None, log=None, withdraw=None) -> dict | None:
     """`voicehook-agent-hook permission-wait` (zweiter PermissionRequest-Hook, langer Timeout): wartet auf
     den Klick des Besitzers auf der Board-Karte und gibt allow bzw. deny an Claude Code zurück. Ohne
     Klick des Besitzers (Zeitablauf, Stimme, Agent, Call-Ende): None, der normale Dialog erscheint.
@@ -472,6 +484,11 @@ def permission_wait(raw: str, now: float | None = None, next_events=None, clock=
         info = vnotify.classify(event, frm)
         if not info or info.get("kind") != "ask" or info.get("tool") == vnotify.ASK_TOOL:
             return None   # nichts Konkretes zu fragen bzw. AskUserQuestion (läuft über ask-wait)
+        why = vnotify.permission_unsafe(event)
+        if why:   # nie freigeben, was die Karte nicht vollständig zeigt
+            if log:
+                log(f"permission-wait: keine Klick-Freigabe ({why}), normaler Dialog")
+            return None
         t = time.time() if now is None else now
         qk = vnotify.group_key(info)
         start = clock()
@@ -485,8 +502,12 @@ def permission_wait(raw: str, now: float | None = None, next_events=None, clock=
         got = _wait_answers(rel, frm, ids[:1], start + PERM_WAIT_S, skey, qk, next_events, clock)
         ev = (got or {}).get(ids[0]) if got else None
         if not ev or not _owner_click(ev) or ev.get("verdict") not in ("yes", "no"):
+            # Karte zurückziehen: ein später Klick darf nichts mehr freigeben (Review Ines)
+            with contextlib.suppress(Exception):
+                (withdraw or _withdraw)(rel, frm, ids[0])
+            vnotify.forget(skey, qk)
             if log:
-                log("permission-wait: kein Klick des Besitzers, normaler Dialog")
+                log("permission-wait: kein Klick des Besitzers, Karte zurückgezogen, normaler Dialog")
             return None
         vnotify.forget(skey, qk)
         from . import board

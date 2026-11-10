@@ -268,7 +268,42 @@ def permission_question(event: dict, label: str = "") -> tuple[str, str] | None:
     else:
         q = f"{head}{tail}"
     ctx = f"Beschreibung: {desc}" if desc and desc != detail else ""
+    full = permission_full(event)
+    if full:   # 0.36: die Karte zeigt, was genau freigegeben wird (alle Zeilen, Ordner)
+        ctx = "; ".join(x for x in (full, ctx) if x)
     return q, ctx
+
+
+FULL_CMD_MAX = 600   # voller Befehl im Kontext der Erlaubnis-Karte
+
+
+def permission_full(event: dict) -> str:
+    """0.36 (permission-wait, Review Ines): Werkzeug, voller Befehl über alle Zeilen (Umbrüche als
+    sichtbares ⏎, nie als neue Zeile) und Ordner einer Erlaubnis-Frage, gesäubert wie jeder Call-Text.
+    '' wenn es keinen Befehl gibt."""
+    tool = vact.sanitize_tool(event.get("tool_name"))
+    inp = event.get("tool_input") if isinstance(event.get("tool_input"), dict) else {}
+    cmd = str(inp.get("command") or "") if tool == "Bash" else ""
+    if not cmd.strip():
+        return ""
+    lines = [ln.strip() for ln in cmd.splitlines() if ln.strip()]
+    one = " ⏎ ".join(vact._clean(ln) for ln in lines)
+    out = f"Werkzeug: {tool}; Befehl: {clean_text(one, FULL_CMD_MAX)}"
+    cwd = clean_text(event.get("cwd") or "", 60)
+    return f"{out}; Ordner: {cwd}" if cwd else out
+
+
+def permission_unsafe(event: dict) -> str:
+    """0.36: Grund, warum eine Erlaubnis NICHT per Klick freigegeben werden darf ('' = darf):
+    ein Secret im Befehl (die Karte zeigte nicht, was läuft) oder ein zu langer Befehl (gekürzt)."""
+    inp = event.get("tool_input") if isinstance(event.get("tool_input"), dict) else {}
+    cmd = str(inp.get("command") or "")
+    if _redacted(cmd):
+        return "secret"
+    lines = [ln.strip() for ln in cmd.splitlines() if ln.strip()]
+    if len(" ⏎ ".join(lines)) > FULL_CMD_MAX:
+        return "too_long"
+    return ""
 
 
 def unattended(env=None) -> bool:

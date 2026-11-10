@@ -18,6 +18,9 @@ from voicehook_agent import session as vsession
 
 URL = "https://voicehook.ai/api/activity/relay"
 TOKEN = "fake.relay.test.only"  # fake, low entropy (gitleaks)
+# 0.36: die Erlaubnis-Karte zeigt Werkzeug, vollen Befehl und Ordner vor der Beschreibung
+FULL_CTX = ("Werkzeug: Bash; Befehl: rm -rf node_modules; Ordner: voicehook-v4; "
+            "Beschreibung: Remove node_modules directory")
 
 
 @pytest.fixture(autouse=True)
@@ -118,7 +121,7 @@ def test_classify_notification_without_type_by_message():
 def test_classify_permission_request_names_session_and_action():
     c = notify.classify(json.loads(_perm_req()), "SE Refill")
     assert c["question"] == RM_Q
-    assert c["items"][0]["context"] == "Beschreibung: Remove node_modules directory"
+    assert c["items"][0]["context"] == FULL_CTX
     assert c["prio"] == notify.PRIO_SPECIFIC and c["tool"] == "Bash" and c["options"] == []
     c = notify.classify(json.loads(_ev("PermissionRequest", tool_name="Edit",
                                        tool_input={"file_path": "/Users/x/secret-proj/src/app.py"})),
@@ -158,7 +161,7 @@ def test_helper_permission_becomes_decision_and_feed_line(relay_lines, monkeypat
     assert {k: job[k] for k in ("op", "route", "skey", "question", "options", "replace", "from")} == \
         {"op": "create", "route": "relay", "skey": ms.session_hash("other-1"),
          "question": RM_Q, "options": [], "replace": None, "from": "SE Refill"}
-    assert job["items"][0]["context"] == "Beschreibung: Remove node_modules directory"
+    assert job["items"][0]["context"] == FULL_CTX
     assert relay_lines == ["SE Refill: wartet auf Freigabe: Bash"]
     state = (activity.state_root() / notify.STATE_NAME).read_text()
     assert "other-1" not in state and "node_modules" not in state   # hashes only
@@ -371,7 +374,7 @@ def test_real_hook_process_posts_helper_decision_to_relay(tmp_path):
         path, auth, body = dec[0]
         assert path == "/api/activity/relay/decide" and auth == f"Bearer {TOKEN}"
         assert body == {"from": "SE Refill", "question": RM_Q,
-                        "context": "Beschreibung: Remove node_modules directory"}
+                        "context": FULL_CTX}
         st = json.loads((activity.state_root() / notify.STATE_NAME).read_text())
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline and \
