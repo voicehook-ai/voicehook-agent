@@ -8,7 +8,7 @@ def test_lone_surrogate_on_stdout_becomes_replacement_char():
             "print(json.loads('\"a\\\\udcffb\"'), flush=True)")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, env={"PYTHONIOENCODING": "utf-8:surrogateescape", "PATH": ""}, check=True).stdout
     out.decode("utf-8")                       # strict reader: must not raise
-    assert out.strip() == "a?b".encode() or out.strip() == "a�b".encode()
+    assert out.strip() in (b"a?b", "a\ufffdb".encode())
 
 
 def test_without_safe_stdio_the_byte_leaks():
