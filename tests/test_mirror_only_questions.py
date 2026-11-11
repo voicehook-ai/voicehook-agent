@@ -186,3 +186,29 @@ def test_positive_controls(relay, tmp_path):
 def test_similar():
     assert asks.similar("Soll ich #889 mergen?", "Soll ich #889 jetzt mergen?")
     assert not asks.similar("Soll ich #889 mergen?", "Welche Farbe soll der Button haben?")
+
+
+# ----- Audit "Stille Caps" (10.11.): a question not mirrored is visible with its reason --------
+def test_not_mirrored_question_names_its_reason(relay, tmp_path):
+    from voicehook_agent import skiplog
+    fb = Board()
+    sk = ms.session_hash("other-1")
+    _state({"sessions": {sk: {"room": "room-a", "from": "Ines"},
+                         ms.session_hash("n"): {"room": "room-a", "from": "Nora"},
+                         ms.session_hash("theo-1"): {"room": "room-a", "from": "Theo", "qs": THEO_Q}}})
+    why: dict = {}
+    assert asks.mirror_question(_ev(last_assistant_message="Nora, soll ich das übernehmen?"), sk, why=why) is None
+    assert why == {"reason": asks.MIRROR_TO_AGENT}
+    reply = "Welche Variante nehmen wir zuerst?\nA) Server\nB) CLI"
+    assert _stop(_ev(last_assistant_message=reply), fb) == (0, "") and fb.created == []
+    ev = _ev(transcript_path=_transcript(tmp_path, CROSS, "Passt das so?"), last_assistant_message="Passt das so?")
+    assert _stop(ev, fb) == (0, "")
+    lines = skiplog.read_lines()
+    assert any("ask-mirror why=already_asked" in ln for ln in lines)
+    assert any("ask-mirror why=agent_turn" in ln for ln in lines)
+    assert not any("Variante" in ln or "Passt" in ln for ln in lines)      # never the text
+    # positive control: no question at the end is nothing sorted out, no line
+    n = len(lines)
+    why = {}
+    assert asks.mirror_question(_ev(last_assistant_message="Fertig, PR ist grün."), sk, why=why) is None
+    assert why == {} and len(skiplog.read_lines()) == n
