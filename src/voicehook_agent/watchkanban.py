@@ -43,6 +43,23 @@ _SKIP_PREFIX = ("<command-", "<local-command", "<user-prompt-submit-hook", "<tas
                 "[Fälligkeits-Wächter]", "[Fragen-Wächter]", "[Takt]", "Session-Watcher:",  # automats
                 "[SYSTEM NOTIFICATION")
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+# Audit "Stille Caps" (Oliver 10.11.): what is no order is counted with its reason and logged by the
+# watcher (watch.log `kanban ... skipped=N why=<reason>`, never the text). Reason per skip prefix:
+SKIP_REASON = {"<cross-session-message": "message",
+               "This session is being continued from a previous conversation": "compaction",
+               "[Fälligkeits-Wächter]": "automat", "[Fragen-Wächter]": "automat", "[Takt]": "automat",
+               "Session-Watcher:": "automat", "[SYSTEM NOTIFICATION": "automat",
+               "[Request interrupted": "interrupted"}
+WHY_SYSTEM = "system"         # command / hook / reminder output (all other skip prefixes)
+WHY_SHORT = "short"           # one word ("ja", "ok"): an answer, no order
+WHY_OLD = "old"               # older than the backfill window at first sight
+WHY_OVERSIZED = "oversized"   # one transcript line longer than READ_MAX: skipped, cursor moves on
+WORDING_CUT_MARK = " […]"     # end of a wording cut to WORDING_MAX (visible on the card)
+
+
+def _count(stats: dict | None, why: str, n: int = 1) -> None:
+    if stats is not None:
+        stats[why] = stats.get(why, 0) + n
 
 
 # --------------------------------------------------------------------------- #
@@ -105,9 +122,10 @@ def save_cursor(key: str, cur: dict, now: float) -> None:
 # --------------------------------------------------------------------------- #
 # transcript -> orders
 # --------------------------------------------------------------------------- #
-def order_text(d: object) -> str:
+def order_text(d: object, stats: dict | None = None) -> str:
     """The order text of one Claude Code transcript record, '' when it is not a user order
-    (assistant, tool result, meta / sidechain message, system or hook output)."""
+    (assistant, tool result, meta / sidechain message, system or hook output). `stats` counts
+    the text parts of a user message that are skipped, per reason (SKIP_REASON, WHY_*)."""
     if not isinstance(d, dict) or d.get("type") != "user" or d.get("isMeta") or d.get("isSidechain"):
         return ""
     msg = d.get("message")
@@ -124,10 +142,17 @@ def order_text(d: object) -> str:
     kept = []
     for p in parts:
         p = _REMINDER.sub("", p).strip()
-        if p and not p.startswith(_SKIP_PREFIX):
-            kept.append(p)
+        if not p:
+            continue
+        if p.startswith(_SKIP_PREFIX):
+            _count(stats, next((w for k, w in SKIP_REASON.items() if p.startswith(k)), WHY_SYSTEM))
+            continue
+        kept.append(p)
     text = "\n".join(kept).strip()
-    return text if len(text.split()) >= 2 else ""   # "ja" / "ok" is no order
+    if text and len(text.split()) < 2:   # "ja" / "ok" is no order
+        _count(stats, WHY_SHORT)
+        return ""
+    return text
 
 
 def _ts(d: dict) -> float | None:
@@ -141,11 +166,14 @@ def _ts(d: dict) -> float | None:
 
 
 def read_orders(tp: str, off: int, since: float, first: bool,
-                limit: int = MAX_ORDERS_PER_TICK) -> tuple[list[dict], int, int]:
+                limit: int = MAX_ORDERS_PER_TICK, stats: dict | None = None) -> tuple[list[dict], int, int]:
     """([{text, end}], new offset, pending) from byte `off`. At most `limit` orders; the
     cursor stops after the last one returned, the rest counts as pending (next tick).
     first=True (no cursor yet): start at the last READ_MAX bytes. Orders older than `since`
-    (first sight minus BACKFILL_S) are ignored. Only complete lines are consumed."""
+    (first sight minus BACKFILL_S) are ignored. Only complete lines are consumed; a single line
+    longer than READ_MAX is skipped (WHY_OVERSIZED) instead of stalling the cursor for good.
+    `stats` counts what is no order, per reason (lines after the first pending order are not
+    counted: they are read again next tick)."""
     try:
         size = os.stat(tp).st_size
         with open(tp, "rb") as f:
@@ -166,21 +194,29 @@ def read_orders(tp: str, off: int, since: float, first: bool,
     while pos < len(data):
         nl = data.find(b"\n", pos)
         if nl < 0:
+            if pos == 0 and len(data) >= READ_MAX and pending == 0:
+                new_off = start + len(data)     # one line over READ_MAX: never complete in a read
+                _count(stats, WHY_OVERSIZED)
             break                        # incomplete last line
         end = start + nl + 1
         line = data[pos:nl]
         pos = nl + 1
         text = ""
+        why: dict = {}
         if b'"user"' in line:
             try:
                 d = json.loads(line)
             except ValueError:
                 d = None
-            text = order_text(d)
+            text = order_text(d, why)
             if text:
                 t = _ts(d)
                 if t is not None and t < since:
                     text = ""
+                    _count(why, WHY_OLD)
+        if pending == 0:                 # behind the cursor: read again next tick, count then
+            for k, n in why.items():
+                _count(stats, k, n)
         if text:
             if len(orders) >= limit:
                 pending += 1
@@ -196,10 +232,16 @@ def read_orders(tp: str, off: int, since: float, first: bool,
 # --------------------------------------------------------------------------- #
 def fit_wording(text: str, limit: int = WORDING_MAX) -> tuple[str, bool]:
     """(wording, cut). Whole text when it fits, else the first complete sentences up to the
-    limit (or a word boundary when even the first sentence is too long)."""
+    limit (or a word boundary when even the first sentence is too long), ending in
+    WORDING_CUT_MARK so the card shows that the order was longer (never a silent cut)."""
     text = vact.scrub(text).strip()
     if len(text) <= limit:
         return text, False
+    out, cut = _fit(text, limit - len(WORDING_CUT_MARK))
+    return out + WORDING_CUT_MARK, cut
+
+
+def _fit(text: str, limit: int) -> tuple[str, bool]:
     out = ""
     for sent in _SENTENCE_END.split(text):
         cand = f"{out} {sent}".strip() if out else sent
@@ -232,25 +274,42 @@ CLASSIFY_SYSTEM = ("Du ordnest einen Auftrag in ein Kanban ein. Antworte NUR mit
 
 
 def _points_titles(card: dict) -> list[str]:
+    """Up to POINTS_SHOWN point titles (token cap of the model prompt); more = "+N weitere"."""
     pts = card.get("points")
     out = []
     if isinstance(pts, list):
-        for p in pts[:POINTS_SHOWN]:
-            t = p if isinstance(p, str) else (p.get("text") or p.get("title") or "") if isinstance(p, dict) else ""
-            if t:
-                out.append(str(t)[:60])
+        texts = [p if isinstance(p, str) else (p.get("text") or p.get("title") or "") if isinstance(p, dict) else ""
+                 for p in pts]
+        texts = [str(t) for t in texts if t]
+        out = [_short(t, 60) for t in texts[:POINTS_SHOWN]]
+        if len(texts) > POINTS_SHOWN:
+            out.append(f"+{len(texts) - POINTS_SHOWN} weitere")
     return out
 
 
+def _short(s: str, n: int) -> str:
+    s = " ".join(s.split())
+    return s if len(s) <= n else s[:n - 1].rstrip() + "…"
+
+
 def open_cards(cards: list[dict]) -> list[dict]:
+    """The newest OPEN_CARDS_MAX open cards (token cap of the model prompt, visible: hidden_open)."""
     return [c for c in cards if is_open(c)][-OPEN_CARDS_MAX:]
+
+
+def hidden_open(cards: list[dict]) -> int:
+    """Open cards the model prompt leaves out (older than the newest OPEN_CARDS_MAX)."""
+    return max(0, sum(1 for c in cards if is_open(c)) - OPEN_CARDS_MAX)
 
 
 def build_classify_prompt(order: str, cards: list[dict]) -> str:
     lines = []
     for c in open_cards(cards):
         pts = _points_titles(c)
-        lines.append(f"{c['nr']}: {str(c.get('title') or '')[:80]}" + (f" [Punkte: {'; '.join(pts)}]" if pts else ""))
+        lines.append(f"{c['nr']}: {_short(str(c.get('title') or ''), 80)}" + (f" [Punkte: {'; '.join(pts)}]" if pts else ""))
+    hidden = hidden_open(cards)
+    if hidden:   # the model knows the list is not complete
+        lines.append(f"(+{hidden} ältere offene Karten nicht gezeigt; passt keine der gezeigten klar, nimm new)")
     return (f"{CLASSIFY_SYSTEM}\n\nOffene Karten:\n{chr(10).join(lines) or '(keine)'}\n\n"
             f"Auftrag:\n{vact.scrub(order)[:WORDING_MAX]}\n\nAntworte jetzt nur mit dem JSON.")
 
