@@ -232,6 +232,9 @@ def child_argv(extra: list[str] | None = None) -> list[str]:
             "watch", "--foreground", *(extra or [])]
 
 
+_CHILD_ENV_DROP = frozenset({vact.STATE_ENV, vmulti.LABEL_ENV})
+
+
 def spawn_detached(extra: list[str] | None = None, *, popen=subprocess.Popen) -> bool:
     """Start the watcher detached (own session via setsid: not a child of the calling agent
     session, survives it; stdio to /dev/null; cwd = state dir). Only with a valid credential,
@@ -240,7 +243,10 @@ def spawn_detached(extra: list[str] | None = None, *, popen=subprocess.Popen) ->
     try:
         if disabled() or credential() is None or running():
             return False
-        env = {k: v for k, v in os.environ.items() if k != vact.STATE_ENV}   # machine state
+        # machine state; plus the starting join's session label (Trello ZeBWRYzR): inherited, every
+        # local session was named like that head and the list collapsed to one. VOICEHOOK_AGENT_KEY
+        # stays: same machine, same owner (server #931 accepts the session list only from owner agents)
+        env = {k: v for k, v in os.environ.items() if k not in _CHILD_ENV_DROP}
         from . import device as vdev
         if vdev.caretaker_active():
             return False    # 0.34.0: the connected caretaker daemon covers the call

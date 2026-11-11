@@ -188,6 +188,23 @@ def test_spawn_detached_needs_call_and_not_running(monkeypatch):
     assert len(spawned) == 1
 
 
+def test_spawn_detached_drops_label_keeps_agent_key(monkeypatch):
+    """Trello ZeBWRYzR: the watcher child never inherits the starting join's session label (else
+    every local session is named like that head); the agent key and other vars stay."""
+    spawned = []
+    monkeypatch.setenv("VOICEHOOK_WATCH", "1")
+    monkeypatch.setenv("VOICEHOOK_SESSION_LABEL", "Head Nora")
+    monkeypatch.setenv("VOICEHOOK_AGENT_KEY", "vhak_test_not_real")
+    monkeypatch.setenv("VOICEHOOK_WATCH_NEVER", "keep-me")
+    vmulti.write_relay(URL, TOK, "room", 3600)
+    assert W.spawn_detached(popen=lambda argv, **kw: spawned.append(kw)) is True
+    env = spawned[0]["env"]
+    assert "VOICEHOOK_SESSION_LABEL" not in env
+    assert env["VOICEHOOK_AGENT_KEY"] == "vhak_test_not_real"       # same machine, same owner
+    assert env["VOICEHOOK_WATCH_NEVER"] == "keep-me"
+    assert os.environ["VOICEHOOK_SESSION_LABEL"] == "Head Nora"     # caller's env untouched
+
+
 def test_join_and_helper_import_spawn(monkeypatch):
     calls = []
     monkeypatch.setattr(cli.vwatch, "spawn_detached", lambda *a, **k: calls.append(1))
