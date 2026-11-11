@@ -3,6 +3,10 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## Unreleased
+
+- **`connect` keeps `account_email_sha256`, `connect --status` shows it.** The device poll (voicehook-v4) now also returns the SHA-256 hex of the trimmed, lowercased account email, so another service can check which account a connected machine belongs to (the mask `o***@n***.ai` collides). Stored in `device.json` only as 64 hex characters (anything else, or an old server without the field: `""`, shown as `-`). Never the email itself.
+
 ## 0.35.9
 
 - **`voicehook-agent tell-delta "<Anweisung>" [--wörtlich] [--vorrang] [--wait SEC]`: give Delta an instruction without speaking (owner's main agent only).** The running join sends `delta.tell` `{id, text, verbatim, priority: "normal"|"vorrang"}` to the worker only and tracks `delta.tell_status` `{id, state: queued|spoken|covered|rejected, reason?}`; `--wait` waits for spoken/covered/rejected. A join without `VOICEHOOK_AGENT_KEY` (or `owner-agent: not granted`), a helper session or a guest gets a clear error and nothing is sent; `rejected`/`not_owner_agent` comes with a hint. One JSON line with the id; exit 0 ok, 1 refused, 2 bad input, 3 no join.
