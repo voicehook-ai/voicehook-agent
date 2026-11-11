@@ -887,6 +887,23 @@ async def _goals_refresh(ctl: _Control, json_mode: bool = False, *, event: bool 
     return rows
 
 
+GOALS_PING_S = 1.0
+
+
+async def _goals_hint(ctl: _Control, json_mode: bool = False) -> None:
+    line = vgoals.line(await _goals_refresh(ctl, json_mode, event=False) or [])
+    if line:
+        _emit_share_hint(json_mode, line, share=False)
+
+
+async def _goals_ping_refresh(ctl: _Control, json_mode: bool = False) -> None:
+    try:
+        await asyncio.sleep(GOALS_PING_S)
+    finally:
+        ctl.goals_ping_pending = False
+    await _goals_refresh(ctl, json_mode)
+
+
 async def _publish_relay(room, tok: dict | None, slug: str, json_mode: bool,
                          local_dir: Path | None = None, *, api_base: str = "",
                          ctl: _Control | None = None, stop: asyncio.Event | None = None) -> None:
@@ -1222,6 +1239,7 @@ class _Control:
         self.goals: list[dict] | None = None
         self.goal_acks = vgoals.Acks()
         self.goals_hinted = False
+        self.goals_ping_pending = False   # coalesces vh.goals pings: at most one read per GOALS_PING_S
         self.agent_key_set = False
         self.owner_agent: bool | None = None
         # 0.21.0 Silent Mode: aggregate of the humans' vh.mic_muted/vh.speaker_muted/vh.away
@@ -3280,8 +3298,11 @@ async def _connect_and_listen(
                 ctl.goal_acks.note(payload)
         elif topic == vgoals.PING_TOPIC:
             # 0.36.0: guiding stars changed (no content): read them again with the own token
-            if ctl is not None:
-                _spawn_bg(_goals_refresh(ctl, json_mode))
+            if ctl is not None and not ctl.goals_ping_pending:
+                # a flood of pings (anyone in the room may send one) becomes one read per
+                # GOALS_PING_S; a ping while one is pending is covered by that read
+                ctl.goals_ping_pending = True
+                _spawn_bg(_goals_ping_refresh(ctl, json_mode))
         elif topic == vdata.TOPIC:
             # 0.21.4 agent-to-agent data: a `next` event (never printed with its content)
             ev = vdata.receive_event(ctl.ident if ctl is not None else "", pkt.participant, payload,
@@ -3503,15 +3524,14 @@ async def _connect_and_listen(
         _BG_TASKS.add(relay_task)
         relay_task.add_done_callback(_BG_TASKS.discard)
         cycle_tasks.append(relay_task)
-    goal_line = ""
-    if ctl is not None and not ctl.goals_hinted:   # 0.36.0 Leitsterne: first line of the `_meta` hint
-        ctl.goals_hinted = True
-        goal_line = vgoals.line(await _goals_refresh(ctl, json_mode, event=False) or [])
     if share_hint is not None and not share_hint.get("shown"):
         share_hint["shown"] = True  # once per join: never again on a reconnect cycle
-        _emit_share_hint(json_mode, goal_line)
-    elif goal_line:   # --quiet: no share line, the guiding stars still
-        _emit_share_hint(json_mode, goal_line, share=False)
+        _emit_share_hint(json_mode)
+    if ctl is not None and not ctl.goals_hinted:   # 0.36.0 Leitsterne: own `_meta` hint line
+        # never waits: the share hint is out first, the stars follow as their own hint once
+        # read (old server, slow net or no stars: nothing more)
+        ctl.goals_hinted = True
+        _spawn_bg(_goals_hint(ctl, json_mode))
     if share_hint is not None and not share_hint.get("hooks"):
         share_hint["hooks"] = True  # 0.35.9: hooks are the default from the first join on
         _emit_hooks(json_mode)
@@ -4434,6 +4454,8 @@ def _client_request(args) -> dict:
         if args.delete or args.id:
             if not args.id:
                 raise ValueError("decide --delete needs --id")
+            if getattr(args, "goal", None) is not None:   # 0.36.0: never drop the flag silently
+                raise ValueError("decide --goal works only for a new decision, not with --id/--delete")
             req = {"cmd": "decide", "id": args.id}
             if args.delete:
                 req["delete"] = True

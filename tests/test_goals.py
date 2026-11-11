@@ -249,3 +249,32 @@ def test_meta_hint_first_line_goals(capsys):
     cli._emit_share_hint(False, "Leitsterne: #2 X")
     err = capsys.readouterr().err.splitlines()
     assert err[0] == "Leitsterne: #2 X" and err[1].startswith(cli.SHARE_TEXT)
+
+
+# ----- Review 11.11.: --goal mit --id, Ping-Flut, Hinweis wartet nicht -----
+def test_decide_goal_with_id_is_refused_not_dropped():
+    a = _args(cmd="decide", id="d-1", delete=False, question="Neu?", option=None, recommend=None,
+              context=None, recent=None, faq=[], goal="2", list=False)
+    with pytest.raises(ValueError, match="--goal"):
+        cli._client_request(a)
+
+
+def test_goals_ping_flood_is_one_read(monkeypatch):
+    ctl = _ctl()
+    calls = []
+
+    async def fake_refresh(c, json_mode=False, **kw):
+        calls.append(1)
+
+    monkeypatch.setattr(cli, "_goals_refresh", fake_refresh)
+    monkeypatch.setattr(cli, "GOALS_PING_S", 0.01)
+
+    async def run():
+        for _ in range(50):
+            if not ctl.goals_ping_pending:
+                ctl.goals_ping_pending = True
+                cli._spawn_bg(cli._goals_ping_refresh(ctl))
+        await asyncio.sleep(0.05)
+
+    asyncio.run(run())
+    assert calls == [1] and ctl.goals_ping_pending is False
