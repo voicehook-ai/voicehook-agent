@@ -235,6 +235,7 @@ from . import boardlist as vboardlist
 from . import calltranscript as vtranscript
 from . import cards as vcards
 from . import datachan as vdata
+from . import goals as vgoals
 from . import helperaccess as vhelp
 from . import localsessions as vlocal
 from . import midturn as vmidturn
@@ -439,15 +440,23 @@ def _quiet_from_env(env=None) -> bool:
     return val.strip().lower() in ("1", "true", "yes", "on")
 
 
-def _emit_share_hint(json_mode: bool) -> None:
+def _emit_share_hint(json_mode: bool, goal_line: str = "", *, share: bool = True) -> None:
     """Plain: one line on stderr (stdout stays the transcript). --json: one `_meta`
-    event with `_meta: "hint"` on stdout, so JSON parsers never see free text."""
+    event with `_meta: "hint"` on stdout, so JSON parsers never see free text.
+    0.36.0: the call's guiding stars (goals.line) come first, as the first line of the text."""
+    lines = [x for x in (goal_line, SHARE_TEXT if share else "") if x]
+    if not lines:
+        return
     if json_mode:
-        obj = {"role": "system", "topic": "_meta", "_meta": "hint",
-               "text": SHARE_TEXT, "url": SHARE_URL}
+        obj = {"role": "system", "topic": "_meta", "_meta": "hint", "text": "\n".join(lines)}
+        if share:
+            obj["url"] = SHARE_URL
         print(json.dumps(obj, ensure_ascii=False), flush=True)
     else:
-        print(f"{SHARE_TEXT} · {SHARE_URL}", file=sys.stderr, flush=True)
+        if goal_line:
+            print(goal_line, file=sys.stderr, flush=True)
+        if share:
+            print(f"{SHARE_TEXT} · {SHARE_URL}", file=sys.stderr, flush=True)
 
 
 async def _emit_sessions_hint(json_mode: bool, detect=None) -> dict | None:
@@ -852,6 +861,49 @@ NO_HUMAN_GIVE_UP_MSG = ("[error] still no human in the room after {max:.0f}s (HT
 _BG_TASKS: set = set()
 
 
+def _spawn_bg(coro) -> None:
+    try:
+        t = asyncio.get_running_loop().create_task(coro)
+    except RuntimeError:
+        coro.close()
+        return
+    _BG_TASKS.add(t)
+    t.add_done_callback(_BG_TASKS.discard)
+
+
+async def _goals_refresh(ctl: _Control, json_mode: bool = False, *, event: bool = True) -> list[dict] | None:
+    """0.36.0 Leitsterne: read the call's guiding stars with the own LiveKit token; a change after
+    the first read becomes one `next` event {type: goals} (goals.py). None = not available."""
+    rows = await vgoals.fetch(ctl.api_base, ctl.lk_jwt)
+    if rows is None:
+        return ctl.goals
+    first = ctl.goals is None
+    if rows != ctl.goals:
+        ctl.goals = rows
+        if event and not first:
+            ctl.events.put_nowait(vgoals.event(rows))
+            _print_event(json_mode, "system", f"(goals) {len(rows)} Leitsterne", topic="_meta")
+    ctl.clock.goal_rows = rows
+    return rows
+
+
+GOALS_PING_S = 1.0
+
+
+async def _goals_hint(ctl: _Control, json_mode: bool = False) -> None:
+    line = vgoals.line(await _goals_refresh(ctl, json_mode, event=False) or [])
+    if line:
+        _emit_share_hint(json_mode, line, share=False)
+
+
+async def _goals_ping_refresh(ctl: _Control, json_mode: bool = False) -> None:
+    try:
+        await asyncio.sleep(GOALS_PING_S)
+    finally:
+        ctl.goals_ping_pending = False
+    await _goals_refresh(ctl, json_mode)
+
+
 async def _publish_relay(room, tok: dict | None, slug: str, json_mode: bool,
                          local_dir: Path | None = None, *, api_base: str = "",
                          ctl: _Control | None = None, stop: asyncio.Event | None = None) -> None:
@@ -1182,6 +1234,12 @@ class _Control:
         # 0.35.9 `tell-delta` (telldelta.py): own delta.tell ids, and whether this join is the
         # owner's main agent (VOICEHOOK_AGENT_KEY set; token vh.owner_agent, None = unknown)
         self.tell = vtell.Tracker()
+        # 0.36.0 Leitsterne (goals.py): last known guiding stars of the call (None = not read yet)
+        # and the worker's answers to own `goal propose`
+        self.goals: list[dict] | None = None
+        self.goal_acks = vgoals.Acks()
+        self.goals_hinted = False
+        self.goals_ping_pending = False   # coalesces vh.goals pings: at most one read per GOALS_PING_S
         self.agent_key_set = False
         self.owner_agent: bool | None = None
         # 0.21.0 Silent Mode: aggregate of the humans' vh.mic_muted/vh.speaker_muted/vh.away
@@ -1697,7 +1755,8 @@ async def _decide_rpc(ctl: _Control, req: dict) -> dict:
         ("recommend", req.get("recommend")), ("id", req.get("id")),
         ("delete", True if req.get("delete") else None),
         ("context", req.get("context")), ("recent", req.get("recent")),
-        ("faq", req.get("faq") or None)) if v is not None}  # 0.21.4 faq: hidden, for Delta
+        ("faq", req.get("faq") or None),  # 0.21.4 faq: hidden, for Delta
+        ("goal", req.get("goal"))) if v is not None}  # 0.36.0 Leitstern-Nr (0 = keiner)
     if req.get("sender"):  # 0.16.0: a helper session's question (Vertrag A)
         body["sender"] = str(req["sender"])
     room = await ctl.wait_room(10.0)
@@ -1821,6 +1880,43 @@ async def _transcript_request(ctl: _Control, req: dict) -> dict:
     return {"ok": True, "type": "transcript", "id": rid, "n": len(lines),
             "total": res.get("total") or len(lines), "truncated": bool(res.get("truncated")),
             "parts": res.get("parts", 1), "lines": lines}
+
+
+async def _goal_cmd(ctl: _Control, req: dict) -> dict:
+    """0.36.0 Leitsterne: `goal list` reads the guiding stars again (own token); `goal propose`
+    sends operator.goal to the worker and waits for its answer (a card the owner clicks)."""
+    if req.get("cmd") == vgoals.CMD_LIST:
+        rows = await _goals_refresh(ctl)
+        if rows is None:
+            return vgoals.failed("unavailable", vgoals.HINT_NOT_OWNER)
+        return {"ok": True, "type": "goals", "goals": rows, "line": vgoals.line(rows)}
+    try:
+        body = vgoals.propose_request(req.get("title"), req.get("done_when"))
+    except vgoals.GoalError as e:
+        return {"ok": False, "type": "invalid", "error": str(e)}
+    ctl.watchdog.touch()
+    room = await ctl.wait_room(10.0)
+    if room is None:
+        return vgoals.failed("not connected to the room (yet)")
+    worker = next((p.identity for p in room.remote_participants.values()
+                   if _kind_label(p) == "agent"), None)
+    if worker is None:
+        return vgoals.failed("no_delta", vgoals.HINT_NO_DELTA)
+    rid = vgoals.new_req()
+    fut = ctl.goal_acks.expect(rid)
+    data = json.dumps(vgoals.payload(body, rid), ensure_ascii=False).encode("utf-8")
+    try:
+        await room.local_participant.publish_data(data, reliable=True, topic=vgoals.OP_TOPIC,
+                                                  destination_identities=[worker])
+    except Exception as e:  # noqa: BLE001  publish error: only the class
+        ctl.goal_acks.drop(rid)
+        return vgoals.failed(f"publish failed ({type(e).__name__})")
+    try:
+        ack = await asyncio.wait_for(fut, vgoals.ACK_WAIT_S)
+    except asyncio.TimeoutError:
+        ctl.goal_acks.drop(rid)
+        ack = None
+    return vgoals.answer(ack)
 
 
 async def _tell_delta(ctl: _Control, req: dict) -> dict:
@@ -1948,7 +2044,10 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         await room.local_participant.publish_data(data, reliable=True, topic="operator.status")
         ctl.clock.board(board=board)
         ctl.ledger.board("", board, own=True)
-        return {"ok": True, "type": "board", "board": board}
+        out = {"ok": True, "type": "board", "board": board}
+        if "goal" not in board and (h := vgoals.missing_hint(ctl.goals or [])):
+            out["goal_hint"] = h   # 0.36.0: soft, never an error
+        return out
     if cmd == "decide":
         # Decision Board: create/update/delete. Unlike say/status this is a LiveKit RPC
         # to the voicebot (worker, method vh.decide), mirroring Session.decide in the
@@ -1956,6 +2055,9 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
         ctl.watchdog.touch()
         out = await _decide_rpc(ctl, req)
         ctl.ledger.created(req, out)  # 0.21.4 `board`
+        if (isinstance(out, dict) and out.get("ok") and req.get("question") and not req.get("id")
+                and req.get("goal") is None and (h := vgoals.missing_hint(ctl.goals or []))):
+            out = {**out, "goal_hint": h}   # 0.36.0: soft, never an error
         return out
     if cmd == "delta":  # 0.23.0 `voicehook-agent delta-rule|delta-note` (rules/facts for Delta)
         ctl.watchdog.touch()
@@ -1963,6 +2065,8 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
     if cmd == "data":  # 0.21.4 `voicehook-agent send-data` (datachan.py)
         ctl.watchdog.touch()
         return await _send_data(ctl, req)
+    if cmd in vgoals.CMDS:  # 0.36.0 `voicehook-agent goal list|propose` (goals.py)
+        return await _goal_cmd(ctl, req)
     if cmd == vtell.CMD:  # 0.35.9 `voicehook-agent tell-delta` (telldelta.py)
         ctl.watchdog.touch()
         return await _tell_delta(ctl, req)
@@ -3188,6 +3292,17 @@ async def _connect_and_listen(
                         ctl.events.put_nowait(vtell.status_event(change))
                     _print_event(json_mode, "system",
                                  f"({topic}) id={change['id']} state={change['state']}", topic=topic)
+        elif topic == vgoals.STATUS_TOPIC:
+            # 0.36.0: the worker's answer to an own `goal propose` (only the worker)
+            if ctl is not None and getattr(pkt.participant, "kind", None) == 4:
+                ctl.goal_acks.note(payload)
+        elif topic == vgoals.PING_TOPIC:
+            # 0.36.0: guiding stars changed (no content): read them again with the own token
+            if ctl is not None and not ctl.goals_ping_pending:
+                # a flood of pings (anyone in the room may send one) becomes one read per
+                # GOALS_PING_S; a ping while one is pending is covered by that read
+                ctl.goals_ping_pending = True
+                _spawn_bg(_goals_ping_refresh(ctl, json_mode))
         elif topic == vdata.TOPIC:
             # 0.21.4 agent-to-agent data: a `next` event (never printed with its content)
             ev = vdata.receive_event(ctl.ident if ctl is not None else "", pkt.participant, payload,
@@ -3412,6 +3527,11 @@ async def _connect_and_listen(
     if share_hint is not None and not share_hint.get("shown"):
         share_hint["shown"] = True  # once per join: never again on a reconnect cycle
         _emit_share_hint(json_mode)
+    if ctl is not None and not ctl.goals_hinted:   # 0.36.0 Leitsterne: own `_meta` hint line
+        # never waits: the share hint is out first, the stars follow as their own hint once
+        # read (old server, slow net or no stars: nothing more)
+        ctl.goals_hinted = True
+        _spawn_bg(_goals_hint(ctl, json_mode))
     if share_hint is not None and not share_hint.get("hooks"):
         share_hint["hooks"] = True  # 0.35.9: hooks are the default from the first join on
         _emit_hooks(json_mode)
@@ -4334,6 +4454,8 @@ def _client_request(args) -> dict:
         if args.delete or args.id:
             if not args.id:
                 raise ValueError("decide --delete needs --id")
+            if getattr(args, "goal", None) is not None:   # 0.36.0: never drop the flag silently
+                raise ValueError("decide --goal works only for a new decision, not with --id/--delete")
             req = {"cmd": "decide", "id": args.id}
             if args.delete:
                 req["delete"] = True
@@ -4383,6 +4505,8 @@ def _client_request(args) -> dict:
         ttl_s = getattr(args, "ttl_s", None)
         if ttl_s is not None:
             req["ttl_s"] = ttl_s
+        if getattr(args, "goal", None) is not None:   # 0.36.0 Leitstern-Nr (goals.py)
+            req["goal"] = vgoals.check_ref(args.goal)
         return req
     faq_raw = getattr(args, "faq", None) or []
     project = vui.project_field(getattr(args, "project", None))  # 0.21.0
@@ -4432,6 +4556,8 @@ def _client_request(args) -> dict:
             warn(f"{relay.MANDATORY_HINT} Fehlt bei: " + "; ".join(missing[:5]))
         if project is not None:
             board["project"] = project
+        if getattr(args, "goal", None) is not None:   # 0.36.0 Leitstern-Nr (goals.py)
+            board["goal"] = vgoals.check_ref(args.goal)
         return {"cmd": "board", "board": board}
     if project is not None:
         raise ValueError("status --project goes with a board: TEXT, --doing, --open, --done or -f")
@@ -4545,7 +4671,7 @@ def _run_client(args) -> int:
     try:
         req = _client_request(args)
     except (vvisual.VisualError, vcards.CardError, vui.UiError, vplain.PlainError,
-            vwait.WaitError) as e:  # bad shape/card/ui, not plain, 0.21.6 waits: nothing sent, exit 2
+            vwait.WaitError, vgoals.GoalError) as e:  # bad shape/card/ui, not plain, 0.21.6 waits, 0.36.0 --goal: exit 2
         print(json.dumps({"ok": False, "type": "invalid", "error": str(e)}, ensure_ascii=False),
               flush=True)
         print(f"[error] {e}", file=sys.stderr, flush=True)
@@ -4594,6 +4720,8 @@ def _run_client(args) -> int:
         return 0
     if req.get("cmd") == "transcript" and not getattr(args, "json", False):
         return _print_transcript(reply)
+    if isinstance(reply, dict) and reply.get("goal_hint"):   # 0.36.0: soft hint, never an error
+        print(reply["goal_hint"], file=sys.stderr, flush=True)
     print(json.dumps(reply, ensure_ascii=False), flush=True)
     if req.get("cmd") == "next":
         _ack(vsession.request, sock, reply)
@@ -4664,6 +4792,34 @@ def _run_tell_delta(args) -> int:
         return 3
     if not isinstance(reply, dict) or reply.get("type") not in ("delta_tell", "invalid"):
         reply = vtell.failed("join_too_old", vtell.HINT_OLD_JOIN)   # join older than this CLI
+    print(json.dumps(reply, ensure_ascii=False), flush=True)
+    if reply.get("type") == "invalid":
+        return 2
+    return 0 if reply.get("ok") else 1
+
+
+def _run_goal(args) -> int:
+    """0.36.0 `goal list` / `goal propose`: over the running join (goals.py). One line; exit 0 ok,
+    1 refused/failed, 2 bad input, 3 no join."""
+    if args.goal_op == "list":
+        req: dict = {"cmd": vgoals.CMD_LIST}
+    else:
+        try:
+            req = vgoals.propose_request(" ".join(args.title), args.done_when)
+        except vgoals.GoalError as e:
+            print(json.dumps({"ok": False, "type": "invalid", "error": str(e)}, ensure_ascii=False), flush=True)
+            return 2
+    try:
+        sock = vsession.resolve_socket(args.session, wait=30.0)
+        reply = vsession.request(sock, req, timeout=vgoals.ACK_WAIT_S + 15.0)
+    except (vsession.ForeignJoin, vsession.SessionError, OSError):
+        print(json.dumps(vgoals.failed("no_join", vgoals.HINT_JOIN), ensure_ascii=False), flush=True)
+        return 3
+    if not isinstance(reply, dict) or reply.get("type") not in ("goal", "goals", "invalid"):
+        reply = vgoals.failed("join_too_old", vgoals.HINT_OLD_JOIN)   # join older than this CLI
+    if args.goal_op == "list" and not getattr(args, "json", False) and reply.get("ok"):
+        print(reply.get("line") or "Keine Leitsterne für diesen Call.", flush=True)
+        return 0
     print(json.dumps(reply, ensure_ascii=False), flush=True)
     if reply.get("type") == "invalid":
         return 2
@@ -5348,6 +5504,21 @@ def main(argv: list[str] | None = None) -> None:
                              "default 0 = return the id at once")
     p_tell.add_argument("--session", default=None, metavar="SLUG",
                         help="room slug of the join (default: the only / own running join)")
+    p_goal = sub.add_parser(
+        "goal", help="0.36.0 Leitsterne: the guiding stars (goals) of the call; list them or propose one "
+        "(a card on the Decision Board, it counts only after the owner's click)",
+        formatter_class=argparse.RawDescriptionHelpFormatter, description=vgoals.__doc__)
+    goal_sub = p_goal.add_subparsers(dest="goal_op", required=True)
+    p_gl = goal_sub.add_parser("list", help="the guiding stars of this call (at most 3)")
+    p_gl.add_argument("--json", action="store_true", default=False, help="one JSON line instead of text")
+    p_gl.add_argument("--session", default=None, metavar="SLUG",
+                      help="room slug of the join (default: the only / own running join)")
+    p_gp = goal_sub.add_parser("propose", help="propose a guiding star: a card the owner clicks")
+    p_gp.add_argument("title", nargs="+", metavar="TITEL", help=f"the goal, max {vgoals.TITLE_MAX} characters")
+    p_gp.add_argument("--done-when", dest="done_when", default=None, metavar="TEXT",
+                      help=f"done-criterion ('fertig, wenn ...'), max {vgoals.DONE_MAX} characters")
+    p_gp.add_argument("--session", default=None, metavar="SLUG",
+                      help="room slug of the join (default: the only / own running join)")
     p_leave = sub.add_parser("leave", help="end the running join cleanly")
     p_leave.add_argument("--say", default=None, metavar="TEXT", help="goodbye line spoken before leaving")
     _add_session(p_leave)
@@ -5364,6 +5535,9 @@ def main(argv: list[str] | None = None) -> None:
         f"numbers or abbreviations; bad: '{vplain.BAD_ITEM}', good: '{vplain.GOOD_ITEM}'")
     p_status.add_argument("text", nargs="?", default=None,
                           help="what you are doing right now, one sentence ('' = finished, clears)")
+    p_status.add_argument("--goal", default=None, metavar="N",
+                          help="0.36.0: this board serves guiding star N of the call (goal list; 0 = none). "
+                               "Optional: without it only a soft hint while the call has guiding stars")
     p_status.add_argument("--doing", default=None, action=_SeqAction, help="current task (same as TEXT)")
     p_status.add_argument("--open", action=_SeqAction, default=[], metavar="TASK", help="open task (repeatable)")
     p_status.add_argument("--done", action=_SeqAction, default=[], metavar="TASK", help="finished task (repeatable)")
@@ -5561,6 +5735,9 @@ def main(argv: list[str] | None = None) -> None:
                        help="an answer option, max 40 chars (give 2 or 3; repeatable)")
     p_dec.add_argument("--recommend", type=int, default=None, metavar="N",
                        help="index of the recommended option, 0-based")
+    p_dec.add_argument("--goal", default=None, metavar="N",
+                       help="0.36.0: this question serves guiding star N of the call (goal list; 0 = none). "
+                            "Optional, a soft hint without it")
     p_dec.add_argument("--id", default=None, metavar="ID",
                        help="change or delete this decision (d + 8 hex), only while still open")
     p_dec.add_argument("--delete", action="store_true", default=False,
@@ -5860,6 +6037,8 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(_run_task(args))
     if args.cmd == "tell-delta":
         sys.exit(_run_tell_delta(args))
+    if args.cmd == "goal":
+        sys.exit(_run_goal(args))
     if args.cmd == "listen":
         sys.exit(_run_listen(args))
     if args.cmd == "log-summary":

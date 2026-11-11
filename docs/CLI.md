@@ -595,6 +595,25 @@ once with exit 1: `not_owner_agent` (not the owner's main agent), `interrupted` 
 mid-announcement), `not_spoken` (never started: sound off or an error), `call_ended` (the call is
 over, never said).
 
+### Guiding stars of the call: `goal` (0.36.0)
+
+Up to 3 Leitsterne per call (server `goals.for_room`): goals the owner bound to the call first, then
+goals he pinned for the account. They give every agent a direction; tying a step to one is optional.
+
+    voicehook-agent goal list [--json]                   # Leitsterne: #2 Titel (fertig, wenn …); #5 …
+    voicehook-agent goal propose "Titel" --done-when "…" # a card on the Decision Board, counts after the owner's click
+    voicehook-agent status "…" --goal 2                  # this board serves guiding star 2 (0 = none)
+    voicehook-agent decide --question "…?" --goal 2      # this question serves guiding star 2
+
+Only own agents of the owner (join with `VOICEHOOK_AGENT_KEY`) see and propose them. Setting, reached
+and dropped are the owner's click, never by voice and never by an agent. Without `--goal` while the
+call has guiding stars: a soft `[hint]` on stderr, never an error, never a decide duty. The stars are
+the first line of the `_meta` hint after the join; `status_due` asks which one the step serves; a
+change comes as one `next` event `{type: "goals", goals, text}` (ping `vh.goals` without content, the
+join reads them again with its own token: `GET /api/bridge/goals`). Transport of `propose`:
+`operator.goal` `{op: "propose", title, done_when?, req}` to the worker, answer
+`operator.goal_status` `{req, ok, number?, error?}`.
+
 ## Activity feed (operator.activity, 0.10.0)
 
 Delta knows what the coding agent is doing in the background, without asking. Claude

@@ -3,6 +3,15 @@
 voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the version notes in
 [docs/CLI.md](docs/CLI.md).
 
+## 0.36.0
+
+- **Leitsterne (goals) of the call (Oliver 10.11.: "goals ... die als leitsterne gelten ... würde agenten eine richtung geben"; server voicehook-v4 `goals.for_room`).** Up to 3 guiding stars per call: goals the owner bound to the call first, then goals he pinned for the account. Only own agents of the owner see them; a guest's agent gets nothing.
+  - `voicehook-agent goal list [--json]`: the guiding stars of this call (one line `Leitsterne: #2 Titel (fertig, wenn …); #5 …`, or JSON). The running join reads them with its own LiveKit token (`GET /api/bridge/goals`); the token never leaves the join.
+  - `voicehook-agent goal propose "Titel" [--done-when "…"]`: propose a guiding star. The join sends `operator.goal` `{op: "propose", title, done_when?, req}` to the worker only and waits up to 10 s for `operator.goal_status` `{req, ok, number?, error?}`: a card on the Decision Board that counts only after the owner's click (never by voice). Title max 80, done-criterion max 200 characters (the server limits). Exit 0 ok, 1 refused (`not_owner_agent` with hint) or timeout, 2 bad input, 3 no join.
+  - `status … --goal N` / `decide … --goal N`: this board / this question serves guiding star N (field `goal` on `operator.status` and the `vh.decide` RPC; 0 = none). Without `--goal` while the call has guiding stars only a soft `[hint]` on stderr (field `goal_hint` in the answer): never an error, never a decide duty ("micromanagement ist ein hänger").
+  - The guiding stars come as their own `_meta` hint right after the share hint, once read; the join never waits for them (old server or slow net: no line). `decide --goal` with `--id`/`--delete` is refused (exit 2), never dropped. A flood of `vh.goals` pings becomes at most one read per second. The `status_due` hint asks "Welchem Leitstern dient dein Schritt? (--goal N, wenn es passt)" while the call has some.
+  - A change (`vh.goals` ping in the room, no content) makes the join read them again; a real change is one `next` event `{type: "goals", goals, text}`.
+- No version bump in this PR: the release sets 0.36.0.
 ## Unreleased
 
 - **Session Watcher: the detached watcher no longer inherits `VOICEHOOK_SESSION_LABEL` from the join that starts it (Trello ZeBWRYzR).** Before, every local session in the "Sessions" list of the call page was named like that head and the list collapsed to one entry. `spawn_detached` now drops it (besides the state dir) from the child's environment. `VOICEHOOK_AGENT_KEY` is still passed on (same machine, same owner; the server accepts the session list only from owner agents, voicehook-v4 #931).

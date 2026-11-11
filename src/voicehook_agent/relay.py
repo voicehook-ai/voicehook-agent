@@ -1160,6 +1160,7 @@ class TurnClock:
         self.board_doing = ""                    # 0.13.0 board_now
         self.request_at: float | None = None     # open status_request
         self.said_at: float | None = None
+        self.goal_rows: list[dict] = []          # 0.36.0 Leitsterne: the hint asks which one the step serves
 
     @staticmethod
     def _t(now: float | None) -> float:
@@ -1221,7 +1222,12 @@ class TurnClock:
             reason = "stale"
         else:
             return {}
-        out: dict = {"status_due": True, "status_reason": reason, "hint": STATUS_HINTS[reason]}
+        hint = STATUS_HINTS[reason]
+        if self.goal_rows:   # 0.36.0 Leitsterne (goals.py): a question, never a duty
+            from .goals import status_hint
+
+            hint = status_hint(hint, self.goal_rows)
+        out: dict = {"status_due": True, "status_reason": reason, "hint": hint}
         if age is not None:
             out["board_age_s"] = age
         return out
