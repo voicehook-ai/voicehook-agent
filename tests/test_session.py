@@ -128,9 +128,11 @@ class _FakeRoom:
     async def disconnect(self):
         return None
 
-    def emit(self, topic, obj, sender="agent-AJ_worker"):
+    def emit(self, topic, obj, sender="agent-AJ_worker", kind=None):
+        # 0.36.1: the worker is LiveKit kind AGENT (4); decisions are only taken from it
+        k = kind if kind is not None else (4 if sender == "agent-AJ_worker" else None)
         pkt = SimpleNamespace(topic=topic, data=json.dumps(obj).encode("utf-8"),
-                              participant=SimpleNamespace(identity=sender))
+                              participant=SimpleNamespace(identity=sender, kind=k))
         self.handlers["data_received"](pkt)
 
     def topics(self, topic):

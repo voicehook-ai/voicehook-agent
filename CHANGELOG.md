@@ -14,6 +14,11 @@ voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the vers
 - No version bump in this PR: the release sets 0.36.0.
 ## Unreleased
 
+## 0.36.1
+
+- **Security: worker-only packets only from the worker (Nika 11.11., review of voicehook-agents #57 and of #192).** `operator.decision`, `operator.helper_decision`, `transcript`, `call_end`, `operator.revise`, `operator.say_status`, `operator.status_request`, `operator.helper_stale`/`helper_fresh` are taken only from the worker (LiveKit kind AGENT, server-assigned). Before, a guest with data rights could send a forged owner "Ja" (`{"type": "decision", "answered_role": "owner", …}`), a forged human turn ("Ja, deploy", `speaker: Oliver`, routed to us), a stale notice into a helper's answer file, or end our join with `call_end`. Now such a packet is dropped, counted and shown as a `_meta` line without content (`(<topic>) verworfen: Absender ist nicht der Worker (kind=…, n=…)`; lines 1–3 and every 50th, the count stays exact). The check (`_from_worker`) reads the kind from the room's peer table first (server-assigned, also on the bridge via hello/peer-joined), then the packet; no sender: dropped (fail-closed). The bridge transport also passes `sender_kind` when the server sends it (voicehook-v4 #953).
+- **Wake: the explicit address list wins (Nika 11.11.).** In data-channel mode a turn with `addressed_ids` wakes only if one of our ids is in it; `wake.ids` naming us no longer overrides `addressed_ids=["andere"]` (e.g. `routed_by_delta` to another agent). Every queued user event now carries `addressed_ids` and `addressed_to_you` when the server stamped `addressed_ids` (old server: no fields, never a false "yes").
+
 ## 0.36.0
 
 - **Session Watcher: the detached watcher no longer inherits `VOICEHOOK_SESSION_LABEL` from the join that starts it (Trello ZeBWRYzR).** Before, every local session in the "Sessions" list of the call page was named like that head and the list collapsed to one entry. `spawn_detached` now drops it (besides the state dir) from the child's environment. `VOICEHOOK_AGENT_KEY` is still passed on (same machine, same owner; the server accepts the session list only from owner agents, voicehook-v4 #931).
