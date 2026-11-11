@@ -27,6 +27,13 @@ def _pkt(items, v=1, ts=TS, **extra):
             **extra}
 
 
+def test_for_us():
+    assert ledger.for_us({"agent": "me"}, {"me", "x"})
+    assert not ledger.for_us({"agent": "other"}, {"me"})
+    assert not ledger.for_us({"agent": 5}, {"me"})
+    assert ledger.for_us({}, {"me"}) and ledger.for_us({"agent": None}, {"me"})
+
+
 # ---- ledger.py -------------------------------------------------------------------------- #
 def test_parse_keeps_unknown_fields():
     st = ledger.parse(_pkt([QUESTION], future={"x": 1}))
@@ -185,24 +192,31 @@ def test_join_end_to_end(env, capsys):
         room = _Room.instances[0]
         path = vs.session_dir(SLUG, st0["identity"]) / ledger.FILE_NAME
         res = {"st0": st0}
+        me = st0["identity"]
         # from a guest: dropped and counted, no file, no event
         room.emit(ledger.TOPIC, _pkt([BOARD]), GUEST)
         res["guest_next"] = await _call({"cmd": "next", "timeout": 0.3})
         res["guest_file"] = path.exists()
         # from the worker: file + event
-        room.emit(ledger.TOPIC, _pkt([BOARD, QUESTION], extra_field=7), WORKER)
+        room.emit(ledger.TOPIC, _pkt([BOARD, QUESTION], extra_field=7, agent=me), WORKER)
         res["ev1"] = await _call({"cmd": "next", "timeout": 2})
         res["file1"] = json.loads(path.read_text())
         # the same id set again: file updated, no new event
-        room.emit(ledger.TOPIC, _pkt([QUESTION, BOARD], ts=TS + 60), WORKER)
+        room.emit(ledger.TOPIC, _pkt([QUESTION, BOARD], ts=TS + 60, agent=me), WORKER)
         res["same_next"] = await _call({"cmd": "next", "timeout": 0.3})
         # unknown version: _meta line, previous state kept
         room.emit(ledger.TOPIC, _pkt([], v=2), WORKER)
         res["v2_next"] = await _call({"cmd": "next", "timeout": 0.3})
         res["file_v2"] = json.loads(path.read_text())
         res["st1"] = await _call({"cmd": "status"})
-        # empty: "Alles erledigt"
-        room.emit(ledger.TOPIC, _pkt([], ts=TS + 120), WORKER)
+        # agent names someone else: _meta, previous state kept
+        room.emit(ledger.TOPIC, _pkt([], ts=TS + 90, agent="ravi-crown-b394"), WORKER)
+        res["other_next"] = await _call({"cmd": "next", "timeout": 0.3})
+        res["file_other"] = json.loads(path.read_text())
+        # empty, without `agent` (taken: the routing is enough): "Alles erledigt"
+        done = _pkt([], ts=TS + 120)
+        del done["agent"]
+        room.emit(ledger.TOPIC, done, WORKER)
         res["ev_done"] = await _call({"cmd": "next", "timeout": 2})
         res["st2"] = await _call({"cmd": "status"})
         await _call({"cmd": "leave"})
@@ -225,6 +239,8 @@ def test_join_end_to_end(env, capsys):
     assert r["file_v2"]["ts"] == TS + 60 and len(r["file_v2"]["items"]) == 2
     assert r["st1"]["ledger"] == {"items": 2, "ts": TS + 60}
     assert r["st1"]["forged_decisions"] == 1
+    assert r["other_next"]["type"] == "timeout" and r["file_other"]["ts"] == TS + 60
+    assert "(operator.ledger) für andere Identität, ignoriert" in out
     assert r["ev_done"]["type"] == "ledger" and r["ev_done"]["items"] == [] \
         and r["ev_done"]["text"] == "Alles erledigt."
     assert r["st2"]["ledger"] == {"items": 0, "ts": TS + 120}

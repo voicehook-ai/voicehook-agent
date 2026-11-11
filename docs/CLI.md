@@ -533,7 +533,9 @@ and puts the newest one as field `ledger` on the event it wakes with. The PostTo
 the joining session adds one todo line with the hints (`voicehook offene Punkte (vom Call):
 ...`) on a change and at most every 3 min while items stay open; a ledger older than 10 min
 shows `Stand veraltet` instead of old items. An unknown `v` or a broken packet is one `_meta`
-line (`(operator.ledger) unbekannte Version v=2 ignoriert`), the previous state stays; from
+line (`(operator.ledger) unbekannte Version v=2 ignoriert`), the previous state stays; an
+`agent` that is not one of our ids: `(operator.ledger) für andere Identität, ignoriert`, the
+previous state stays (no `agent`: taken, the routing is enough); from
 anyone but the worker it is dropped and counted (`forged_decisions`). Unknown fields
 (packet and items, e.g. a future `sub`) are kept as they are.
 

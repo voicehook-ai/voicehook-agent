@@ -73,6 +73,14 @@ def parse(payload: object) -> dict:
     return out
 
 
+def for_us(state: dict, own_ids) -> bool:
+    """`agent` names one of our ids; a packet without `agent` counts as ours (routing)."""
+    agent = state.get("agent")
+    if agent is None or agent == "":
+        return True
+    return isinstance(agent, str) and agent in {i for i in own_ids if i}
+
+
 def ids(state: dict | None) -> frozenset[str]:
     return frozenset(str(it.get("id")) for it in ((state or {}).get("items") or [])
                      if isinstance(it, dict))

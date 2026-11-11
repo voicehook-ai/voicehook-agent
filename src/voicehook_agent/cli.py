@@ -2568,14 +2568,20 @@ def _from_worker(room, pkt) -> bool:
         return False
 
 
-def _on_ledger(ctl: _Control, payload: object, json_mode: bool) -> None:
+def _on_ledger(ctl: _Control, payload: object, json_mode: bool,
+               own_ids: set[str] | None = None) -> None:
     """operator.ledger (ledger.py): keep the last valid packet (ctl + <join dir>/ledger.json)
-    and queue one `ledger` event when its id set changed. An unknown version or a broken packet
-    is one `_meta` line, the previous state stays (never silent)."""
+    and queue one `ledger` event when its id set changed. An unknown version, a broken packet
+    or one whose `agent` is not one of our ids is one `_meta` line, the previous state stays
+    (never silent). No `agent`: taken (the worker routes to our identity)."""
     try:
         state = vledger.parse(payload)
     except vledger.LedgerError as e:
         _print_event(json_mode, "system", f"({vledger.TOPIC}) {e}", topic="_meta")
+        return
+    if not vledger.for_us(state, own_ids if own_ids is not None else {ctl.ident}):
+        _print_event(json_mode, "system", f"({vledger.TOPIC}) für andere Identität, ignoriert",
+                     topic="_meta")
         return
     old = ctl.ledger_state
     ctl.ledger_state = state
@@ -3400,7 +3406,7 @@ async def _connect_and_listen(
             _on_transcript(ctl, room, pkt, payload, json_mode)
         elif topic == vledger.TOPIC:
             if ctl is not None:
-                _on_ledger(ctl, payload, json_mode)
+                _on_ledger(ctl, payload, json_mode, _own_ids())
         elif topic.startswith("operator."):
             if topic in ("operator.revise", "operator.say_status") and relay.foreign_owner(
                     payload, _own_ids()):
