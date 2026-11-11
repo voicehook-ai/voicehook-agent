@@ -258,12 +258,23 @@ def similar(a: str, b: str) -> bool:
     return inter / len(ta | tb) >= SIMILAR_MIN or inter / min(len(ta), len(tb)) >= 0.85
 
 
-def mirror_question(event: dict, skey: str = "", room: str = "") -> dict | None:
+MIRROR_AGENT_TURN = "agent_turn"        # the turn was started by another agent, not the human
+MIRROR_TO_AGENT = "to_agent"            # the question names an agent of the call
+MIRROR_ASKED = "already_asked"          # a session of this room already asked it with decide
+
+
+def mirror_question(event: dict, skey: str = "", room: str = "", why: dict | None = None) -> dict | None:
     """0.35.8: stop_question, but only what is addressed to the human: never the answer of a
     turn another agent started, never a question to an agent of the call, never one a session
     of this call's room already asked with decide (open or answered, until the call ends; no
-    time limit, AGT-F8)."""
+    time limit, AGT-F8). `why` gets {"reason": MIRROR_*} when a question was found but is not
+    mirrored (no question at the end of the reply is no reason: nothing was sorted out)."""
+    def skip(reason: str) -> None:
+        if why is not None:
+            why["reason"] = reason
     if agent_turn(event):
+        if why is not None and stop_question(last_message(event)) is not None:
+            skip(MIRROR_AGENT_TURN)
         return None
     item = stop_question(last_message(event))
     if item is None:
@@ -271,8 +282,10 @@ def mirror_question(event: dict, skey: str = "", room: str = "") -> dict | None:
     from . import board
     names, asked = board.room_questions(skey, room)
     if _to_agent(item["question"], names):
+        skip(MIRROR_TO_AGENT)
         return None
     if any(similar(item["question"], q) for q in asked):
+        skip(MIRROR_ASKED)
         return None
     return item
 
@@ -460,7 +473,11 @@ def stop_ask(raw: str, wait: bool = True, now: float | None = None, post=None,
             return 0, ""
         skey, rel, frm = who
         t = time.time() if now is None else now
-        item = mirror_question(event, skey, str(rel.get("room") or ""))
+        why: dict = {}
+        item = mirror_question(event, skey, str(rel.get("room") or ""), why)
+        if why.get("reason"):   # Audit "Stille Caps" 10.11.: a question not mirrored, visible with reason
+            from . import skiplog
+            skiplog.note("ask-mirror", why["reason"], label=frm)
         if item is None or not _first_time(skey, _hash(item), t):
             # 0.21.4: no new question at this Stop, but earlier ones (`vh-helper decide`,
             # `voicehook-agent decide`) still open: wait for their answers and wake the session

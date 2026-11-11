@@ -12,6 +12,10 @@ voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the vers
   - The guiding stars are the first line of the `_meta` hint after the join (with `--quiet` alone, without the share line). The `status_due` hint asks "Welchem Leitstern dient dein Schritt? (--goal N, wenn es passt)" while the call has some.
   - A change (`vh.goals` ping in the room, no content) makes the join read them again; a real change is one `next` event `{type: "goals", goals, text}`.
 - No version bump in this PR: the release sets 0.36.0.
+## Unreleased
+
+- **Sender role on events: `speaker_owner`, `from_owner`, `from_owner_agent` (for third-party services that may only react to the owner and the owner's own agents; names like `speaker`/`from` prove nothing).** User turns (`next` `type: user`, the `--json` stdout line of a user `transcript` turn, `since_last` items, a helper's local `user_turn`) and the lines of `operator.transcript` carry `speaker_owner`: the worker's `speaker_owner: true`, passed on only when the packet came from a LiveKit participant of kind AGENT (server-assigned); another sender, the bridge transport, a missing field or a non-bool give `false`. Data events (`type: data`) carry `from_owner` (sender's signed `vh.owner` == `"1"`) and `from_owner_agent` (signed `vh.owner_agent` == `"1"` AND `vh.owner_acct` equal to the account tag in this join's own owner-agent token; the CLI has no room account of its own, so without an own owner-agent token, and on the bridge, it is always `false`). Only from signed participant data, never from the packet; fail-closed. docs/CLI.md: "Sender role on events".
+- **`connect` keeps `account_email_sha256`, `connect --status` shows it.** The device poll (voicehook-v4) now also returns the SHA-256 hex of the trimmed, lowercased account email, so another service can check which account a connected machine belongs to (the mask `o***@n***.ai` collides). Stored in `device.json` only as 64 hex characters (anything else, or an old server without the field: `""`, shown as `-`). Never the email itself.
 
 ## 0.35.9
 

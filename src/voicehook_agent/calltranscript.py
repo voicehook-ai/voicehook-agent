@@ -35,7 +35,18 @@ NOT_ALLOWED = ("not_allowed: only the owner's own agents (joined with the owner'
                "may read the call transcript")
 NOT_ALLOWED_DE = ("Kein Zugriff: den Verlauf lesen nur eigene Agenten des Inhabers mit "
                   "Schlüssel (Join mit dem Agent-Key des Inhabers).")
-LINE_KEYS = ("id", "t", "speaker", "role", "text", "interrupted", "cut")
+LINE_KEYS = ("id", "t", "speaker", "role", "text", "interrupted", "cut", "speaker_owner")
+
+
+def with_speaker_owner(payload: dict, trusted: bool) -> dict:
+    """Every line gets `speaker_owner` (bool): the worker's value only from a trusted sender
+    (LiveKit kind AGENT) and only as a real `true`; otherwise false (fail-closed)."""
+    lines = payload.get("lines")
+    if not isinstance(lines, list):
+        return payload
+    out = [{**ln, "speaker_owner": trusted and ln.get("speaker_owner") is True}
+           if isinstance(ln, dict) else ln for ln in lines]
+    return {**payload, "lines": out}
 
 
 def new_id() -> str:
