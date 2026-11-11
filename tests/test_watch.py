@@ -1082,7 +1082,8 @@ def test_old_orders_before_first_sight_are_ignored_and_long_wording_cut(monkeypa
     w, f.sessions = _kw(f, tp)
     w.tick()
     ws = [c[2]["wording"] for c in kb.writes("tasks")]
-    assert len(ws) == 1 and len(ws[0]) <= K.WORDING_MAX and ws[0].endswith("Satz.")
+    # whole sentences, then the visible cut mark (Audit "Stille Caps" 10.11.)
+    assert len(ws) == 1 and len(ws[0]) <= K.WORDING_MAX and ws[0].endswith("Satz." + K.WORDING_CUT_MARK)
 
 
 def test_pick_sets_in_arbeit_and_never_done(monkeypatch, tmp_path):
@@ -1547,3 +1548,65 @@ def test_order_text_keeps_real_orders():
     # Eine echte Bitte mit eingefügtem Text bleibt ein Auftrag (offen: reine Pastes, siehe PR)
     t = "schau dir das an\n<pasted_content id=\"a\">Fehler 500</pasted_content id=\"a\">"
     assert K.order_text(_user_rec(t)) == t
+
+
+# --- Audit "Stille Caps" (10.11.): what is no order is counted with its reason, caps visible ---
+def test_read_orders_counts_what_is_no_order(tmp_path):
+    tp = _tp(tmp_path, "[Takt] Stand automatisch", "<cross-session-message from=\"x\">Hallo</cross-session-message>",
+             "ok", "<command-name>/clear</command-name>", "Bau bitte den Export fertig.")
+    stats: dict = {}
+    orders, _off, pending = K.read_orders(str(tp), 0, 0.0, False, stats=stats)
+    assert [o["text"] for o in orders] == ["Bau bitte den Export fertig."]          # positive control
+    assert stats == {"automat": 1, "message": 1, "short": 1, "system": 1} and pending == 0
+
+
+def test_read_orders_counts_old_orders_at_first_sight(tmp_path):
+    tp = tmp_path / "s.jsonl"
+    tp.write_text(_user("Alter Auftrag von gestern bitte.", ts=_iso(NOW - 2 * K.BACKFILL_S))
+                  + _user("Neuer Auftrag von heute bitte."))
+    stats: dict = {}
+    orders, _off, _p = K.read_orders(str(tp), 0, NOW - K.BACKFILL_S, True, stats=stats)
+    assert [o["text"] for o in orders] == ["Neuer Auftrag von heute bitte."]
+    assert stats == {"old": 1}
+
+
+def test_read_orders_skips_an_oversized_line_instead_of_stalling(tmp_path, monkeypatch):
+    monkeypatch.setattr(K, "READ_MAX", 4096)
+    tp = tmp_path / "s.jsonl"
+    tp.write_text(_user("x " * 5000) + _user("Danach der echte Auftrag hier."))
+    stats: dict = {}
+    off, seen = 0, []
+    for _ in range(6):                      # before: the cursor never moved past the long line
+        orders, off, _p = K.read_orders(str(tp), off, 0.0, False, stats=stats)
+        seen += [o["text"] for o in orders]
+    assert seen == ["Danach der echte Auftrag hier."]
+    assert stats.get("oversized", 0) >= 1
+
+
+def test_wording_cut_is_marked():
+    text = "Erster Satz ist kurz. " + "Zweiter Satz ist sehr lang und geht weiter. " * 60
+    w, cut = K.fit_wording(text)
+    assert cut and len(w) <= K.WORDING_MAX and w.endswith(K.WORDING_CUT_MARK)
+    assert K.fit_wording("Kurzer Auftrag bleibt.") == ("Kurzer Auftrag bleibt.", False)   # positive control
+
+
+def test_classify_prompt_says_how_many_cards_and_points_it_leaves_out():
+    cards = [{"nr": i, "title": f"Karte {i}", "state": "beauftragt"} for i in range(1, K.OPEN_CARDS_MAX + 4)]
+    cards[-1]["points"] = [f"Punkt {i}" for i in range(K.POINTS_SHOWN + 2)]
+    p = K.build_classify_prompt("Neuer Auftrag", cards)
+    assert "(+3 ältere offene Karten nicht gezeigt" in p
+    assert "+2 weitere" in p and "Karte 1:" not in p and f"{K.OPEN_CARDS_MAX + 3}: Karte" in p
+    assert K.hidden_open(cards) == 3
+    small = K.build_classify_prompt("Neuer Auftrag", cards[:2])
+    assert "nicht gezeigt" not in small and K.hidden_open(cards[:2]) == 0          # positive control
+
+
+def test_duty_kanban_logs_skipped_with_reason(monkeypatch, tmp_path):
+    KB(monkeypatch)
+    tp = _tp(tmp_path, "[Fragen-Wächter] 1 offene Frage", "Baue die Kartenansicht fertig.")
+    f = Fake(monkeypatch)
+    w, f.sessions = _kw(f, tp)
+    w.tick()
+    logtxt = (W.vact.state_root() / W.LOG_NAME).read_text()
+    assert "kanban label=Alpha skipped=1 why=automat" in logtxt
+    assert "Fragen-Wächter" not in logtxt

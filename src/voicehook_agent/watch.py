@@ -1224,7 +1224,7 @@ class Watcher:
         if toks:
             self.spent.append((now, toks))
         got = K.parse_classification(text, {c["nr"] for c in K.open_cards(cards)})
-        log("classify", tokens=toks, ok=bool(got))
+        log("classify", tokens=toks, ok=bool(got), hidden=K.hidden_open(cards))
         if not got:
             return fallback
         return got[0], got[1], got[2] or fallback[2]
@@ -1284,8 +1284,11 @@ class Watcher:
             cur = dict(cur)
         card0 = cur.get("card")
         try:
+            skipped: dict = {}
             orders, new_off, pending = K.read_orders(s["tp"], int(cur.get("off") or 0),
-                                                     float(cur.get("since") or 0), first)
+                                                     float(cur.get("since") or 0), first, stats=skipped)
+            for why, n in skipped.items():   # Audit "Stille Caps" 10.11.: no order, visible with reason
+                log("kanban", label=label, skipped=n, why=why)
             if first or new_off != cur.get("off"):
                 cur["off"] = new_off if not orders else cur["off"]
                 K.save_cursor(key, cur, now)

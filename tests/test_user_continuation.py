@@ -145,3 +145,15 @@ def test_join_spools_only_the_new_part(fake_env):
     assert got[1]["text"] == "Außerdem fehlen die Logs vom Wochenende." and got[1]["full_len"] == len(V2)
     assert got[2]["text"] == V2 and got[2]["continued"] is False
     assert got[3]["text"] == "Bitte prüf das bis morgen." and got[3]["continued"] is True
+
+
+def test_dropped_same_version_is_counted_and_logged():
+    """Audit "Stille Caps" (10.11.): the dropped same version is visible (counter + skiplog)."""
+    from voicehook_agent import skiplog
+    c = relay.UserContinuation()
+    _turn(c, V1, seg="s1", fresh=V1)
+    assert c.dropped == 0 and skiplog.read_lines() == []               # positive control
+    assert _turn(c, V1, seg="s1", fresh="") is None
+    assert c.dropped == 1
+    (line,) = skiplog.read_lines()
+    assert "user-turn why=same_seg_nothing_new n=1" in line and "Pipeline" not in line
