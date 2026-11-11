@@ -229,7 +229,7 @@ def test_decision_from_non_worker_is_dropped_counted_and_shown(capsys):
     assert ev.get("type") != "decision" and ev.get("type") != "helper_decision"
     out = capsys.readouterr().out
     assert out.count("verworfen: Absender ist nicht der Worker") == 2 and "n=2" in out
-    assert "Deploy?" not in [ln for ln in out.splitlines() if "verworfen" in ln][0]
+    assert "Deploy?" not in next(ln for ln in out.splitlines() if "verworfen" in ln)
 
 
 def test_wake_ids_do_not_override_explicit_address_list():
@@ -249,7 +249,7 @@ def test_from_worker_peer_table_wins_bridge_without_kind():
     from voicehook_agent import cli
     room = NS(remote_participants={"agent-AJ_w": NS(identity="agent-AJ_w", kind=4),
                                    "gast-1": NS(identity="gast-1", kind=0)})
-    pkt = lambda who, kind=None: NS(participant=NS(identity=who, kind=kind) if who else None)  # noqa: E731
+    pkt = lambda who, kind=None: NS(participant=NS(identity=who, kind=kind) if who else None)
     assert cli._from_worker(room, pkt("agent-AJ_w")) is True             # bridge: kind only in the table
     assert cli._from_worker(room, pkt("gast-1", 4)) is False              # the table beats a packet claim
     assert cli._from_worker(room, pkt("unbekannt", 4)) is True            # not in table: packet kind (LiveKit)

@@ -190,8 +190,10 @@ def test_join_end_to_end(env):
         return out
 
     u1, u2, u3, u4, d1, d2 = asyncio.run(run())
-    assert [u.get("text") for u in (u1, u2, u3, u4)] == ["eins", "zwei", "drei", "vier"], \
+    # 0.36.1: a transcript only from the worker; the guest's and the unknown bridge sender's lines
+    # never reach `next` (dropped, counted, one _meta line)
+    assert [u.get("text") for u in (u1, u2, u3, u4)] == ["eins", None, None, "vier"], \
         [(u.get("type"), u.get("text")) for u in (u1, u2, u3, u4, d1, d2)]
-    assert [u["speaker_owner"] for u in (u1, u2, u3, u4)] == [True, False, False, False]
+    assert [u["speaker_owner"] for u in (u1, u4)] == [True, False]
     assert d1["type"] == "data" and d1["from_owner_agent"] is True and d1["from_owner"] is False
     assert d2["type"] == "data" and d2["from_owner_agent"] is False
