@@ -5322,7 +5322,19 @@ def _restart_after_update(argv: list[str] | None, updater: _Updater, execve=None
               file=sys.stderr, flush=True)
 
 
+def _safe_stdio() -> None:
+    """0.36.3 (Nika 11.11.): never write invalid UTF-8. A text with a lone surrogate (e.g. from a
+    JSON packet) would otherwise go out as a raw byte (surrogateescape) and kill a strict reader,
+    or end the join with UnicodeEncodeError (strict). Such characters become U+FFFD."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 def main(argv: list[str] | None = None) -> None:
+    _safe_stdio()
     ap = argparse.ArgumentParser(prog="voicehook-agent", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=vselfupdate.version_text(_VERSION))

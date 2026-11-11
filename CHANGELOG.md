@@ -14,6 +14,10 @@ voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the vers
 - No version bump in this PR: the release sets 0.36.0.
 ## Unreleased
 
+## 0.36.3
+
+- **stdout/stderr never carry invalid UTF-8 (Nika 11.11.).** A worker text with a lone surrogate (from a JSON packet) went out as a raw byte (surrogateescape) and killed a strict reader (its pipe filled, the join froze), or ended the join with `UnicodeEncodeError`. The CLI now sets `errors="replace"` on stdout and stderr at start; such characters become U+FFFD.
+
 ## 0.36.2
 
 - **Security: `speaker_owner` only for the room account's own agent (review of voicehook-v4 #928).** `speaker_owner: true` means "the creator of THIS room", not "the owner of my account": a customer agent invited into another account's room would otherwise treat that account's speech as its owner's. Now `speaker_owner` is `true` only when this join is the own agent of the room's account (`owner-agent: granted`, i.e. `VOICEHOOK_AGENT_KEY` of that account); every other join (no key, other account, bridge without a signed token) gets `false` (fail-closed).
