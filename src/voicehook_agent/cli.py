@@ -1239,7 +1239,7 @@ class _Control:
         self.goals: list[dict] | None = None
         self.goal_acks = vgoals.Acks()
         self.goals_hinted = False
-        self.forged_decisions = 0   # 0.36.1: operator.decision/helper_decision not from the worker
+        self.forged_decisions = 0   # 0.36.1: worker-only packets (WORKER_ONLY_TOPICS) from someone else
         self.goals_ping_pending = False   # coalesces vh.goals pings: at most one read per GOALS_PING_S
         self.agent_key_set = False
         self.owner_agent: bool | None = None
@@ -2529,6 +2529,27 @@ async def _activity_loop(ctl: _Control, path: Path) -> None:
 
 
 DECISION_TOPICS = ("operator.decision", "operator.helper_decision")
+# 0.36.1 (Nika 11.11., Review #192): topics only the worker (voicebot, LiveKit kind AGENT, server-
+# assigned) sends. From anyone else they would forge the owner's answer, a human turn, a stale
+# notice or the call end -> dropped, counted, shown without content.
+WORKER_ONLY_TOPICS = frozenset({
+    *DECISION_TOPICS, "transcript", "call_end", "operator.revise", "operator.say_status",
+    "operator.status_request", "operator.helper_stale", "operator.helper_fresh"})
+
+
+def _from_worker(room, pkt) -> bool:
+    """Fail-closed: the sender is the worker. The room's peer table (server-assigned kind, also on
+    the bridge via hello/peer-joined) wins; else the packet's participant kind; no sender: False."""
+    p = getattr(pkt, "participant", None)
+    ident = getattr(p, "identity", None) if p is not None else None
+    if not ident:
+        return False
+    known = (getattr(room, "remote_participants", None) or {}).get(ident)
+    k = getattr(known, "kind", None) if known is not None else getattr(p, "kind", None)
+    try:
+        return int(k) == 4 and not isinstance(k, bool)
+    except (TypeError, ValueError):
+        return False
 
 
 def _route_helper_decision(ctl: _Control, payload: dict) -> bool:
@@ -3211,6 +3232,19 @@ async def _connect_and_listen(
             payload = json.loads(bytes(pkt.data).decode("utf-8"))
         except Exception:
             return
+        if topic in WORKER_ONLY_TOPICS and not _from_worker(room, pkt):
+            if ctl is not None:
+                ctl.forged_decisions += 1
+                n = ctl.forged_decisions
+            else:
+                n = 1
+            if n <= 3 or n % 50 == 0:   # a flood gives few lines; the count stays exact
+                k = getattr(getattr(pkt, "participant", None), "kind", None)
+                k = k if isinstance(k, int) and not isinstance(k, bool) else None
+                _print_event(json_mode, "system",
+                             f"({topic}) verworfen: Absender ist nicht der Worker (kind={k}, n={n})",
+                             topic="_meta")
+            return
         if topic == "transcript":
             role = payload.get("role", "?")
             text = payload.get("text", "")
@@ -3340,17 +3374,6 @@ async def _connect_and_listen(
                 # 0.9.0: first in line for `next`, status_due until the next board
                 ctl.events.put_front_nowait(relay.status_request_event(payload))
                 ctl.clock.requested()
-            if topic in DECISION_TOPICS and getattr(pkt.participant, "kind", None) != 4:
-                # 0.36.1 (Nika 11.11., Sicherheit): Antworten auf Entscheidungen kommen nur vom Worker
-                # (LiveKit kind AGENT, vom Server vergeben). Ein Gast könnte sonst ein "Ja" des Inhabers
-                # fälschen. Verworfen, gezählt und sichtbar gemeldet (ohne Inhalt).
-                if ctl is not None:
-                    ctl.forged_decisions += 1
-                _print_event(json_mode, "system",
-                             f"({topic}) verworfen: Absender ist nicht der Worker "
-                             f"(kind={getattr(pkt.participant, 'kind', None)}, "
-                             f"n={ctl.forged_decisions if ctl is not None else 1})", topic="_meta")
-                return
             if ctl is not None and payload.get("type") in ("decision", "helper_decision") \
                     and topic in ("operator.decision", "operator.helper_decision"):
                 ctl.ledger.answered(payload, str(payload.get("sender") or payload.get("label")
