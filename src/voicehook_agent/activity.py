@@ -119,7 +119,13 @@ NO_MATCHER_EVENTS = ("UserPromptSubmit", "Stop", "SessionStart", "SessionEnd")  
 # older binary (usage error = exit 2) never wakes a session with its usage text.
 HOOK_COMMAND_ASK_WAIT = "voicehook-agent-hook ask-wait || true"
 HOOK_COMMAND_STOP_WAIT = "voicehook-agent-hook stop-wait; test $? -eq 3 && exit 2; exit 0"
+# permission-wait (SS2kwgDK): a SECOND PermissionRequest hook, long timeout: only the owner's click
+# on the board allows, a no denies, else the dialog shows as before.
+HOOK_COMMAND_PERM_WAIT = "voicehook-agent-hook permission-wait || true"
 EXTRA_HOOKS = {
+    "PermissionRequest": (HOOK_COMMAND_PERM_WAIT, {"matcher": "*"},
+                          {"timeout": 100, "statusMessage": "Permission is on the voicehook call board "
+                                                            "(click there, or here after 90 s)"}),
     "PreToolUse": (HOOK_COMMAND_ASK_WAIT, {"matcher": "AskUserQuestion"},
                    {"timeout": 100, "statusMessage": "Question is on the voicehook call board "
                                                      "(answer there, or here after 90 s)"}),
@@ -1313,7 +1319,7 @@ class _deadline:
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     cmd = args[0] if args else ""
-    if cmd in ("ask-wait", "stop-wait"):  # 0.21.3 (asks.py): answers from the Decision Board
+    if cmd in ("ask-wait", "stop-wait", "permission-wait"):  # asks.py: answers from the Decision Board
         from . import asks
         return asks.main(cmd)
     if cmd == "session-end":  # 0.21.4 (board.py): the session's board leaves the call
