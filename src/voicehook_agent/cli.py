@@ -207,6 +207,10 @@ Decision background + page control (0.21.0):
                                      every output, event type human_state on a change. While
                                      speaker_muted/away nobody hears: says wait, Delta sums up on
                                      return; put what matters on board, cards or decide.
+    next                             operator.ledger (worker only): event type ledger {items,
+                                     thresholds, text} when the open gaps of this agent change
+                                     (no wake; `listen` carries it as field ledger); kept in
+                                     <join dir>/ledger.json, `status` shows ledger {items, ts}.
 """
 from __future__ import annotations
 
@@ -237,6 +241,7 @@ from . import cards as vcards
 from . import datachan as vdata
 from . import goals as vgoals
 from . import helperaccess as vhelp
+from . import ledger as vledger
 from . import localsessions as vlocal
 from . import midturn as vmidturn
 from . import multisession as vmulti
@@ -1251,6 +1256,10 @@ class _Control:
         self.last_say_at: float | None = None  # 0.21.7 (midturn.py): wall clock of the last say
         self.onboarding: dict | None = None  # 0.21.8: queued once, with the first say/next
         self.peers_path: Path | None = None  # 0.35.9: <join dir>/peers.json for the watcher
+        # operator.ledger (ledger.py): the worker's last valid list of this agent's open gaps
+        # (full state per packet) and the join dir its ledger.json lives in
+        self.ledger_state: dict | None = None
+        self.ledger_dir: Path | None = None
         # `transcript` / Delta's send_transcript (calltranscript.py): parts put together in
         # memory only; request id -> the waiting `transcript` command
         self.transcripts = vtranscript.Assembler()
@@ -2286,6 +2295,8 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
                 # owner_agent: this join is the room account's own agent (None = unknown/no key)
                 "forged_decisions": ctl.forged_decisions,
                 "owner_agent": ctl.owner_agent,
+                # operator.ledger: open gaps of this agent (counts only, ts of the packet)
+                "ledger": vledger.status_view(ctl.ledger_state),
                 "idle_timeout_s": ctl.watchdog.timeout,
                 "peers": sorted(peers, key=lambda d: d["identity"])}
     return {"ok": False, "error": f"unknown cmd {cmd!r}"}
@@ -2538,7 +2549,8 @@ DECISION_TOPICS = ("operator.decision", "operator.helper_decision")
 # notice or the call end -> dropped, counted, shown without content.
 WORKER_ONLY_TOPICS = frozenset({
     *DECISION_TOPICS, "transcript", "call_end", "operator.revise", "operator.say_status",
-    "operator.status_request", "operator.helper_stale", "operator.helper_fresh"})
+    "operator.status_request", "operator.helper_stale", "operator.helper_fresh",
+    vledger.TOPIC})  # operator.ledger (Ravi 11.11.): open gaps of this agent
 
 
 def _from_worker(room, pkt) -> bool:
@@ -2554,6 +2566,29 @@ def _from_worker(room, pkt) -> bool:
         return int(k) == 4 and not isinstance(k, bool)
     except (TypeError, ValueError):
         return False
+
+
+def _on_ledger(ctl: _Control, payload: object, json_mode: bool) -> None:
+    """operator.ledger (ledger.py): keep the last valid packet (ctl + <join dir>/ledger.json)
+    and queue one `ledger` event when its id set changed. An unknown version or a broken packet
+    is one `_meta` line, the previous state stays (never silent)."""
+    try:
+        state = vledger.parse(payload)
+    except vledger.LedgerError as e:
+        _print_event(json_mode, "system", f"({vledger.TOPIC}) {e}", topic="_meta")
+        return
+    old = ctl.ledger_state
+    ctl.ledger_state = state
+    if ctl.ledger_dir is not None:
+        try:
+            vledger.write(ctl.ledger_dir, state)
+        except OSError as e:
+            print(f"[warn] ledger.json not written ({type(e).__name__})", file=sys.stderr, flush=True)
+    if vledger.ids(state) != vledger.ids(old):
+        # not a wake type (like human_state): `next` returns it, `listen` carries it along
+        ctl.events.put_nowait(vledger.event(state))
+        _print_event(json_mode, "system", f"({vledger.TOPIC}) {len(state['items'])} offen",
+                     topic=vledger.TOPIC)
 
 
 def _route_helper_decision(ctl: _Control, payload: dict) -> bool:
@@ -3363,6 +3398,9 @@ async def _connect_and_listen(
             # the call's transcript (a requested one or Delta's send_transcript); the lines
             # never go to stdout or a log here, only counts
             _on_transcript(ctl, room, pkt, payload, json_mode)
+        elif topic == vledger.TOPIC:
+            if ctl is not None:
+                _on_ledger(ctl, payload, json_mode)
         elif topic.startswith("operator."):
             if topic in ("operator.revise", "operator.say_status") and relay.foreign_owner(
                     payload, _own_ids()):
@@ -3940,6 +3978,10 @@ async def _join(
     vactivity.clear(sess_dir)  # 0.10.0: no activity lines of a previous call leak in
     vrelayops.clear_dir(sess_dir)  # 0.16.0: nor helper requests/answers
     ctl.activity_path = sess_dir / vactivity.ACTIVITY_NAME
+    # operator.ledger: a restart of this join (self-update / rejoin) keeps the last state, so an
+    # unchanged id set is no new event; the worker only sends on a change
+    ctl.ledger_dir = sess_dir
+    ctl.ledger_state = vledger.read(sess_dir)
     loop = asyncio.get_running_loop()
     for sig in _quit_signals():
         try:
@@ -5031,10 +5073,12 @@ def _run_listen(args, request=None, resolve=None, clock=time.monotonic) -> int:
     except (vsession.SessionError, OSError) as e:
         _print_json({"ok": False, "type": "no-session", "error": str(e)})
         return 3
+    ledger = None  # operator.ledger: the newest `ledger` event, rides along with the next wake
     while True:
         wait = poll if deadline is None else min(poll, deadline - clock())
         if wait <= 0:
-            _print_json({"ok": True, "type": "timeout", "pending": 0})
+            _print_json({"ok": True, "type": "timeout", "pending": 0,
+                         **({"ledger": ledger} if ledger is not None else {})})
             return 0
         try:
             reply = request(sock, {"cmd": "next", "timeout": max(1.0, wait), "lease": True},
@@ -5050,9 +5094,11 @@ def _run_listen(args, request=None, resolve=None, clock=time.monotonic) -> int:
             _print_json(reply)
             return 1
         if kind in LISTEN_WAKE:
-            _print_json(reply)
+            _print_json({**reply, "ledger": ledger} if ledger is not None else reply)
             _ack(request, sock, reply)  # after the print: a kill in between = once more, never lost
             return 0
+        if kind == "ledger":  # no wake of its own; the hook shows it too (ledger.hook_line)
+            ledger = {k: reply.get(k) for k in ("items", "thresholds", "text", "ts")}
         _ack(request, sock, reply)  # timeout / human_state / voicebot_back: consumed silently
 
 

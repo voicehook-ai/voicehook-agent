@@ -518,6 +518,25 @@ hear: says are queued and not spoken, Delta sums up when they come back; put wha
 on the board, cards or `decide`. `mic_muted` alone: Delta still speaks, but expect no spoken
 answer. Bridge transport: the same, from the participant attributes the bridge streams.
 
+### Open gaps of this agent: ledger (Unreleased)
+
+The worker sends `operator.ledger` (only from the worker, only to this join's identity) with
+the FULL list of what this agent still owes the call: `{"v": 1, "ts", "agent", "thresholds":
+{...}, "items": [{"id", "kind", "since", "ref", "hint"}]}`; kinds today `board_stale`,
+`unanswered_turn`, `question_not_decide`, `waiting_without_card`; `items: []` = all done.
+The join keeps the last valid packet in `<join dir>/ledger.json` (0600, atomic; it survives a
+rejoin) and in `status` as `"ledger": {"items": N, "ts": ...}` (counts only). A change of the
+id set is one `next` event `{"type":"ledger","role":"system","items":[...],"thresholds":{...},
+"text":"2 offene Punkte: Board seit 11 min alt; Frage nur als Aktivität gemeldet."}` (empty:
+`"Alles erledigt."`). It does not wake on its own (like `human_state`): `listen` keeps waiting
+and puts the newest one as field `ledger` on the event it wakes with. The PostToolUse hook of
+the joining session adds one todo line with the hints (`voicehook offene Punkte (vom Call):
+...`) on a change and at most every 3 min while items stay open; a ledger older than 10 min
+shows `Stand veraltet` instead of old items. An unknown `v` or a broken packet is one `_meta`
+line (`(operator.ledger) unbekannte Version v=2 ignoriert`), the previous state stays; from
+anyone but the worker it is dropped and counted (`forged_decisions`). Unknown fields
+(packet and items, e.g. a future `sub`) are kept as they are.
+
 ### Project tag (0.21.0)
 
 `status ... --project NAME` and `activity ... --project NAME` (1-40 chars) send the field
