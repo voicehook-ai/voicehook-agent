@@ -151,6 +151,9 @@ class _Room:
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     monkeypatch.setenv("VOICEHOOK_AGENT_HOME", str(tmp_path / "vh"))
+    # 0.36.2: speaker_owner counts only for the room account's own agent (owner-agent granted)
+    monkeypatch.setenv("VOICEHOOK_AGENT_KEY", "vhak_" + "t" * 40)
+    monkeypatch.setenv("VOICEHOOK_AGENT_KEY_HOST", "voicehook.example")
     monkeypatch.setattr(cli.rtc, "Room", _Room)
 
     async def _mint(*a, **k):
@@ -197,3 +200,27 @@ def test_join_end_to_end(env):
     assert [u["speaker_owner"] for u in (u1, u4)] == [True, False]
     assert d1["type"] == "data" and d1["from_owner_agent"] is True and d1["from_owner"] is False
     assert d2["type"] == "data" and d2["from_owner_agent"] is False
+
+
+
+def test_speaker_owner_false_without_own_agent_key(env, monkeypatch):
+    """0.36.2 (review of voicehook-v4 #928): a join without the room account's agent key (e.g. a
+    customer agent invited into someone else's room) never sees speaker_owner=true."""
+    monkeypatch.delenv("VOICEHOOK_AGENT_KEY")
+
+    async def run():
+        join = asyncio.create_task(cli._join(f"https://voicehook.example/r/{SLUG}", "me", "Claude",
+                                             True, None, model="opus-5.5", idle_timeout=0))
+        await _call({"cmd": "status"})
+        await _call({"cmd": "next", "timeout": 0.1})
+        room = _Room.instances[0]
+        room.emit("transcript", {"role": "user", "text": "eins", "speaker": "Oliver", "speaker_owner": True}, WORKER)
+        ev = await _call({"cmd": "next", "timeout": 2})
+        st = await _call({"cmd": "status"})
+        await _call({"cmd": "leave"})
+        await asyncio.wait_for(join, 5)
+        return ev, st
+
+    ev, st = asyncio.run(run())
+    assert ev.get("text") == "eins" and ev["speaker_owner"] is False
+    assert st["owner_agent"] is None and st["forged_decisions"] == 0
