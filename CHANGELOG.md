@@ -14,6 +14,12 @@ voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the vers
 - No version bump in this PR: the release sets 0.36.0.
 ## Unreleased
 
+- **Ledger: the open gaps of this agent from the worker (`operator.ledger`, with Ravi 11.11.).** The worker sends the FULL list of what this agent still owes the call (`{v: 1, ts, agent, thresholds, items: [{id, kind, since, ref, hint}]}`; `board_stale`, `unanswered_turn`, `question_not_decide`, `waiting_without_card`; `items: []` = all done), only to this identity.
+  - Worker only (`WORKER_ONLY_TOPICS`): from anyone else dropped, counted (`forged_decisions`), one `_meta` line without content. An unknown `v` or a broken packet: one `_meta` line (`(operator.ledger) unbekannte Version v=… ignoriert`), the previous state stays. An `agent` that is not one of our ids: one `_meta` line without content (`(operator.ledger) für andere Identität, ignoriert`), the previous state stays; no `agent`: taken (the routing is enough). Unknown fields (packet and items, e.g. a future `sub`) are kept.
+  - The last valid packet: `<join dir>/ledger.json` (0600, tmp + `os.replace`; read again on a rejoin) and `status` → `"ledger": {"items": N, "ts": …}` (counts only).
+  - `next`: on a change of the id set one event `{type: "ledger", items, thresholds, text}` (`text`: "2 offene Punkte: Board seit 11 min alt; Frage nur als Aktivität gemeldet." / "Alles erledigt."). No wake of its own (like `human_state`); `listen` keeps waiting and puts the newest one as field `ledger` on the event it wakes with.
+  - The PostToolUse hook of the joining session (mid-turn path, no new hook) adds one todo line with the hints on a change and at most every 3 min while items stay open; a ledger older than 10 min says `Stand veraltet` instead of old items.
+
 ## 0.36.3
 
 - **stdout/stderr never carry invalid UTF-8 (Nika 11.11.).** A worker text with a lone surrogate (from a JSON packet) went out as a raw byte (surrogateescape) and killed a strict reader (its pipe filled, the join froze), or ended the join with `UnicodeEncodeError`. The CLI now sets `errors="replace"` on stdout and stderr at start; such characters become U+FFFD.

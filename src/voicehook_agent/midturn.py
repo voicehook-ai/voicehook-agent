@@ -23,6 +23,9 @@ he waits for minutes. The productive behavior now lives in the product:
   a line of the call) and stays unread: its content comes via `voicehook-agent next`/listen.
   Other events (status_request, a normal revise, voicebot_left,
   ...) stay for `listen` only.
+* operator.ledger (ledger.py): the open gaps of this agent (`<join dir>/ledger.json`) ride
+  along as one short todo line, on a change of their id set and at most every 3 min while
+  they stay open; a ledger older than 10 min is shown as stale, never with its old items.
 * Never for subagents (agent_id), other sessions (owner_session), another agent process
   with the same session id (0.22.2: owner_agent_pid, listenguard.own_join_dirs) or without
   a live join.
@@ -165,10 +168,14 @@ def handle(raw: str) -> dict | None:
         event = json.loads(raw) if raw and raw.strip() else {}
         if not isinstance(event, dict) or str(event.get("agent_id") or "").strip():
             return None  # a subagent: the operator answers, not its background agent
-        from . import listenguard
+        from . import ledger, listenguard
         for d in listenguard.own_join_dirs(event):
             reply = take(d)
             text = text_for(reply) if isinstance(reply, dict) and reply.get("ok") else None
+            # operator.ledger: the open gaps of this agent ride along as one todo line (on a
+            # change of its id set, else at most every ledger.REMIND_GAP_S)
+            todo = ledger.hook_line(d)
+            text = " ".join(t for t in (text, todo) if t)
             if text:
                 name = str(event.get("hook_event_name") or "PostToolUse")
                 return {"hookSpecificOutput": {"hookEventName": name, "additionalContext": text}}
