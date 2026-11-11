@@ -41,6 +41,9 @@ from . import notify as vnotify
 
 ENV_OFF = "VOICEHOOK_AUTO_ASK"
 ASK_WAIT_ENV = "VOICEHOOK_ASK_WAIT_S"
+PERM_WAIT_ENV = "VOICEHOOK_PERMISSION_WAIT_S"
+PERM_WAIT_S = 90.0           # PermissionRequest: wait this long for the owner's click on the board
+PERM_HOOK_TIMEOUT_S = 100    # settings timeout of the permission-wait hook (> PERM_WAIT_S)
 ASK_WAIT_S = 90.0            # AskUserQuestion: wait this long for the board answers
 ASK_HOOK_TIMEOUT_S = 100     # settings timeout of the ask-wait hook (> ASK_WAIT_S)
 ID_WAIT_S = 15.0             # the parallel pre-tool-use child creates the decisions
@@ -77,6 +80,14 @@ def ask_wait_s() -> float:
 # --------------------------------------------------------------------------- #
 # a reply that ends with a question
 # --------------------------------------------------------------------------- #
+def perm_wait_s() -> float:
+    try:
+        v = float(os.environ.get(PERM_WAIT_ENV, "") or PERM_WAIT_S)
+    except ValueError:
+        return PERM_WAIT_S
+    return max(0.0, min(v, PERM_HOOK_TIMEOUT_S - 5))
+
+
 def _plain(text: str) -> str:
     return " ".join(_MD.sub("", text).split())
 
@@ -549,14 +560,67 @@ def wait_open(skey: str, rel: dict, t0: float, next_events=None,
         return 0, ""
 
 
+def permission_decision(ev: dict) -> dict | None:
+    """The PermissionRequest decision for one board answer, or None (the dialog shows locally).
+    allow ONLY on yes by the owner's click (answered_via click, answered_role owner): never by voice,
+    never automatically, never by a guest (Oliver 10.11., SS2kwgDK: "Klick gibt frei, nie automatisch").
+    no by the owner (click or voice) denies; everything else (free text, missing fields) -> None."""
+    verdict = str(ev.get("verdict") or "")
+    owner = ev.get("answered_role") == "owner"
+    if verdict == "yes" and owner and ev.get("answered_via") == "click":
+        return {"behavior": "allow"}
+    if verdict == "no" and owner and ev.get("answered_via") in ("click", "voice"):
+        why = vact.scrub(str(ev.get("text") or "")).strip()[:200]
+        return {"behavior": "deny", "message": "Declined in the voicehook call" + (f": {why}" if why else ".")}
+    return None
+
+
+def permission_wait(raw: str, next_events=None, clock=time.monotonic, sleep=time.sleep) -> dict | None:
+    """`voicehook-agent-hook permission-wait` (an extra PermissionRequest hook): waits up to
+    PERM_WAIT_S for the board answer of the decision the parallel permission-request hook created
+    (notify.handle) and decides the dialog, or None (the dialog shows as before). Never raises."""
+    try:
+        event = json.loads(raw) if raw and raw.strip() else {}
+        if not isinstance(event, dict) or event.get("hook_event_name") != "PermissionRequest":
+            return None
+        if vact.sanitize_tool(event.get("tool_name")) == vnotify.ASK_TOOL:
+            return None   # AskUserQuestion: ask-wait answers it
+        wait = perm_wait_s()
+        who = _helper(event) if wait > 0 else None
+        if who is None:
+            return None
+        skey, rel, frm = who
+        info = vnotify.classify(event, frm)
+        if not info or info.get("kind") != "ask":
+            return None   # nothing concrete on the board: the dialog shows
+        qk = vnotify.group_key(info)
+        start = clock()
+        ids = _ids_of(skey, qk, 1, ID_WAIT_S, sleep=sleep)
+        if len(ids) != 1:
+            return None
+        got = _wait_answers(rel, frm, ids, start + wait, skey, qk, next_events, clock)
+        if got is None:
+            return None
+        ev = got[ids[0]]
+        decision = permission_decision(ev)
+        vnotify.forget(skey, qk)
+        from . import board
+        board.mark_delivered(skey, [ev])
+        if decision is None:
+            return None
+        return {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}
+    except Exception:  # noqa: BLE001 - a hook must never disturb Claude Code
+        return None
+
+
 def main(cmd: str) -> int:
-    """`voicehook-agent-hook ask-wait|stop-wait` (stdin: the hook event)."""
+    """`voicehook-agent-hook ask-wait|stop-wait|permission-wait` (stdin: the hook event)."""
     try:
         raw = sys.stdin.read()
     except Exception:  # noqa: BLE001
         raw = ""
-    if cmd == "ask-wait":
-        out = ask_wait(raw)
+    if cmd in ("ask-wait", "permission-wait"):
+        out = ask_wait(raw) if cmd == "ask-wait" else permission_wait(raw)
         if out:
             print(json.dumps(out, ensure_ascii=False), flush=True)
         return 0

@@ -242,7 +242,11 @@ def test_snippet_shape():
              "timeout": 3}]}],
         "PermissionRequest": [{"matcher": "*", "hooks": [
             {"type": "command", "command": "voicehook-agent-hook permission-request || true",
-             "timeout": 3}]}],
+             "timeout": 3}]},
+            # SS2kwgDK: only the owner's click on the board allows (asks.permission_wait)
+            {"matcher": "*", "hooks": [
+                {"type": "command", "command": "voicehook-agent-hook permission-wait || true", "timeout": 100,
+                 "statusMessage": "Permission is on the voicehook call board (click there, or here after 90 s)"}]}],
         # 0.21.0 answers to the session's questions at (re)start (board.py)
         "SessionStart": [{"hooks": [
             {"type": "command", "command": "voicehook-agent-hook session-start || true",
