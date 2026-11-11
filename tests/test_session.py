@@ -50,7 +50,7 @@ def test_user_turn_event_only_final_user_text():
     assert relay.user_turn_event("user", "  ") is None
     assert relay.user_turn_event("user", "hi", {"final": False}) is None
     ev = relay.user_turn_event("user", " Hallo ", {}, now=5.0)
-    assert ev == {"type": "user", "role": "user", "text": "Hallo", "ts": 5.0}
+    assert ev == {"type": "user", "role": "user", "text": "Hallo", "ts": 5.0, "speaker_owner": False}
 
 
 def test_revise_event_carries_unspoken():

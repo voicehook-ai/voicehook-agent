@@ -116,3 +116,18 @@ def owner_granted(jwt: object) -> bool | None:
         return (payload.get("attributes") or {}).get("vh.owner_agent") == "1"
     except Exception:  # noqa: BLE001
         return None
+
+
+def owner_acct_tag(jwt: object) -> str:
+    """The account tag (`vh.owner_acct`, server kanban_account.tag) of our own join token, but
+    only when that token is an own agent of the room's account (`vh.owner_agent=1`): the CLI
+    does not know the room's account, the server stamps exactly that tag into an owner-agent
+    token. Anything else (no owner agent, no tag, unreadable token) -> "" (fail-closed)."""
+    try:
+        part = str(jwt).split(".")[1]
+        payload = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+        attrs = payload.get("attributes") or {}
+        tag = attrs.get("vh.owner_acct")
+    except Exception:  # noqa: BLE001
+        return ""
+    return tag if attrs.get("vh.owner_agent") == "1" and isinstance(tag, str) and tag else ""

@@ -401,10 +401,34 @@ def other_operators(peers: Iterable[tuple[str, str, dict | None]]) -> list[str]:
     return sorted(out)
 
 
+AGENT_KIND = 4  # LiveKit ParticipantKind.AGENT: assigned by the server, never by a client
+
+
+def sender_is_agent_kind(sender: object) -> bool:
+    """The packet's sender is a LiveKit participant of kind AGENT (the voice worker). A
+    sender without a kind (bridge: identity only) or anything else -> False."""
+    k = getattr(sender, "kind", None) if sender is not None else None
+    if k is None or isinstance(k, bool):
+        return False
+    try:
+        return int(k) == AGENT_KIND
+    except (TypeError, ValueError):
+        return False
+
+
+def speaker_owner(payload: object, sender: object) -> bool:
+    """Is the human speaker of this transcript packet the room's owner? Delta's worker stamps
+    `speaker_owner` (a bool) into every transcript packet; it counts only from a sender of
+    kind AGENT and only as a real `true`. Missing / not a bool / other sender -> False."""
+    return (isinstance(payload, dict) and payload.get("speaker_owner") is True
+            and sender_is_agent_kind(sender))
+
+
 def user_turn_event(role: str, text: str, payload: dict | None = None,
-                    now: float | None = None) -> dict | None:
+                    now: float | None = None, speaker_owner: bool = False) -> dict | None:
     """Queue event for `voicehook-agent next`, or None if this transcript line
-    is not a finalized, non-empty user turn."""
+    is not a finalized, non-empty user turn. `speaker_owner`: the caller's checked value
+    (see `speaker_owner()`), never the packet's field itself."""
     if role != "user":
         return None
     if not TurnNotifier._is_final(payload or {}):
@@ -413,7 +437,7 @@ def user_turn_event(role: str, text: str, payload: dict | None = None,
     if not text:
         return None
     ev = {"type": "user", "role": "user", "text": text,
-          "ts": now if now is not None else time.time()}
+          "ts": now if now is not None else time.time(), "speaker_owner": speaker_owner is True}
     speaker = (payload or {}).get("speaker")
     if speaker:  # 0.11.0: v4 names the speaker (user name); old servers: no field
         ev["speaker"] = speaker
@@ -605,6 +629,7 @@ class QuietTurns:
         for k in ("speaker",):
             if ev.get(k):
                 item[k] = ev[k]
+        item["speaker_owner"] = ev.get("speaker_owner") is True
         if scope:
             item["scope"] = scope
         if ev.get("to"):
@@ -622,10 +647,12 @@ class QuietTurns:
         return ev
 
 
-def helper_user_turn_event(text: str, name: str, speaker: str = "", now: float | None = None) -> dict:
+def helper_user_turn_event(text: str, name: str, speaker: str = "", now: float | None = None,
+                           speaker_owner: bool = False) -> dict:
     """The inbox event of a helper the human spoke to by name (same shape as the server's)."""
     ev = {"type": "user_turn", "role": "user", "text": " ".join(str(text or "").split())[:USER_TURN_MAX],
-          "to": [name], "to_kind": "helper", "ts": now if now is not None else time.time()}
+          "to": [name], "to_kind": "helper", "ts": now if now is not None else time.time(),
+          "speaker_owner": speaker_owner is True}
     if speaker:
         ev["speaker"] = " ".join(str(speaker).split())[:80]
     return ev
