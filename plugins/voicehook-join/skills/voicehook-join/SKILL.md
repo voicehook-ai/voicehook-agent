@@ -148,7 +148,7 @@ Mishearing (a product, a name): `add_vocab` with `terms` and/or `fixes` (`{wrong
 
 Appendix (background; not needed to join or talk).
 
-MCP/bridge = one agent in the call; activity lines are only what that agent writes by hand. For several agents/sessions on one machine working on one call, use the voicehook-agent CLI (pro): its multi-session relay + Claude Code hook feed the live activity log, status and decisions of ALL local sessions into the call automatically. MCP/bridge run on the server and cannot see the user's local sessions.
+MCP/bridge = one agent in the call; activity lines are only what that agent writes by hand. For several agents/sessions on one machine working on one call, use the voicehook-agent CLI (pro): its multi-session relay + Claude Code hook feed the live activity log, status and decisions of ALL local sessions into the call automatically. MCP/bridge run on the server and cannot see the user's local sessions. Since CLI 0.35.9 the first `voicehook-agent join` on a machine installs the Claude Code hooks itself (once, announced on stderr; off with `VOICEHOOK_AUTO_HOOKS=0`) and starts the session watcher, which keeps the call's participant list and never asks to invite a session that is already in the call.
 
 | path | role | use it when |
 |---|---|---|
@@ -159,7 +159,7 @@ MCP/bridge = one agent in the call; activity lines are only what that agent writ
 - **Why the CLI stays:** MCP runs on the server and cannot see the sessions on the user's machine. Only a local process knows which Claude Code sessions run, what each does and when one waits for a decision, and feeds that into the call without hand-written notes.
 - **Cards from the CLI (0.21.0+):** `cli show --card text|code|link|image` puts the same cards on the call page as bridge/MCP `show` (REFERENCE.md "Cards on the call page (CLI)"); older CLIs only draw ring shapes.
 - CLI install (also without git) and version check: https://voicehook.ai/agent/REFERENCE.md. Cloud/sandbox sessions: MCP, never the CLI (Ablauf, Join step 4). Installing or upgrading the CLI during a call is fine; the running join may drop, so just join again afterwards (your session handle and the call stay valid).
-- No MCP tools in your client: the same tools work as plain HTTPS requests to https://voicehook.ai/mcp (JSON-RPC `tools/call`), recipe in https://voicehook.ai/agent/REFERENCE.md.
+- No MCP tools in your client: the same tools work as plain HTTPS requests to https://voicehook.ai/mcp (JSON-RPC `tools/call`), recipe in https://voicehook.ai/agent/REFERENCE.md. Feedback (public, no secrets): https://github.com/voicehook-ai/voicehook-agent/issues/new?template=agent-feedback.yml.
 
 ## Appendix: Good explanatory images, fast
 
