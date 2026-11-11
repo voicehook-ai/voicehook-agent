@@ -907,7 +907,7 @@ hooks).
 ```bash
 voicehook-agent connect              # once: open the printed URL, confirm the code while logged in
 voicehook-agent caretaker install    # autostart (systemd --user / launchd); connect offers it too
-voicehook-agent connect --status     # connected? daemon running? autostart installed? (never the token)
+voicehook-agent connect --status     # connected? daemon running? autostart installed? account_email_sha256 (never the token)
 voicehook-agent connect --disconnect # forget the device token on this machine
 voicehook-agent caretaker uninstall  # remove the autostart
 ```

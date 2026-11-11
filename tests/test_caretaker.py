@@ -76,6 +76,35 @@ def test_connect_pending_then_token_0600():
     assert DEVTOK not in "\n".join(out) and "DC1" not in "\n".join(out)
 
 
+SHA = "a" * 63 + "f"   # 64 Hex-Zeichen, Form wie sha256().hexdigest()
+
+
+def test_connect_stores_account_email_sha256_and_status_shows_it(capsys, monkeypatch):
+    net = Net()
+    net.polls = [(200, {"device_token": DEVTOK, "account_hint": "o***@x.de", "account_email_sha256": SHA.upper()})]
+    rc, _out = _connect(net)
+    assert rc == 0
+    assert D.load_device()["account_email_sha256"] == SHA          # normalisiert auf klein
+    assert D.public_view(D.load_device())["account_email_sha256"] == SHA
+    from voicehook_agent import cli
+    monkeypatch.setattr("sys.argv", ["voicehook-agent", "connect", "--status"])
+    try:
+        cli.main()
+    except SystemExit as e:
+        assert e.code == 0
+    o = capsys.readouterr().out
+    assert f"account_email_sha256: {SHA}" in o and DEVTOK not in o
+
+
+def test_account_email_sha256_missing_or_bad_is_empty():
+    for raw in (None, "", "kein-hash", "g" * 64, "a" * 65, 42):
+        D.save_device(DEVTOK, "h", BASE, "box", NOW, account_email_sha256=raw)
+        assert D.load_device()["account_email_sha256"] == "", raw
+        assert D.public_view(D.load_device())["account_email_sha256"] == ""
+    D.save_device(DEVTOK, "h", BASE, "box", NOW)     # alter Server ohne Feld
+    assert D.public_view(D.load_device())["account_email_sha256"] == ""
+
+
 def test_connect_denied_and_expired():
     for status, word in ((403, "denied"), (410, "expired")):
         net = Net()

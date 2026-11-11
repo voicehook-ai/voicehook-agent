@@ -7,8 +7,10 @@ tokens by hand.
 
 Server contract (voicehook-v4), base `$VOICEHOOK_API` (default https://voicehook.ai):
 * POST /api/device/start {name} -> {device_code, user_code, verify_url, interval, expires_in}
-* POST /api/device/poll {device_code} -> 428 pending | 200 {device_token, account_hint} |
-  403 denied | 410 expired
+* POST /api/device/poll {device_code} -> 428 pending | 200 {device_token, account_hint,
+  account_email_sha256} | 403 denied | 410 expired
+  (account_email_sha256: sha256 hex of the trimmed, lowercased account email, "" without one;
+  kept in device.json and shown by `connect --status` so another service can match the account)
 * GET  /api/device/calls?wait=25 (Bearer device token) -> {calls: [{room, started_at, owner_present}]}
 * POST /api/device/calls/{room}/caretaker -> {url, token, expires_at} (relay credential, owner rights)
 * POST /api/device/calls/{room}/helpers {labels} -> {helpers: [{label, url, token, expires_at}]}
@@ -141,10 +143,17 @@ def load_device() -> dict | None:
     return d
 
 
+def clean_sha256(v: object) -> str:
+    """64 hex characters (lowercased) or "": never store or show anything else."""
+    s = v.strip().lower() if isinstance(v, str) else ""
+    return s if len(s) == 64 and all(c in "0123456789abcdef" for c in s) else ""
+
+
 def save_device(token: str, account_hint: str, base: str, name: str,
-                now: float | None = None) -> Path:
+                now: float | None = None, account_email_sha256: object = "") -> Path:
     vact._private_dir(vact.state_root())
-    d = {"device_token": token, "account_hint": str(account_hint or "")[:80], "base": base,
+    d = {"device_token": token, "account_hint": str(account_hint or "")[:80],
+         "account_email_sha256": clean_sha256(account_email_sha256), "base": base,
          "name": name[:60], "connected_at": int(time.time() if now is None else now)}
     vact._write_private(device_path(), json.dumps(d))
     return device_path()
@@ -162,7 +171,8 @@ def public_view(dev: dict | None) -> dict:
     """What may be shown: never the token."""
     if not dev:
         return {"connected": False}
-    return {"connected": True, "account": dev.get("account_hint") or "", "base": dev.get("base") or "",
+    return {"connected": True, "account": dev.get("account_hint") or "",
+            "account_email_sha256": clean_sha256(dev.get("account_email_sha256")), "base": dev.get("base") or "",
             "name": dev.get("name") or "", "connected_at": dev.get("connected_at") or 0}
 
 
@@ -250,7 +260,7 @@ def connect(name: str | None = None, *, http=http_request, sleep=time.sleep, clo
             continue
         if verdict == "ok":
             save_device(body["device_token"], str(body.get("account_hint") or ""), base, name,
-                        clock())
+                        clock(), body.get("account_email_sha256"))
             out(f"Verbunden / connected: {body.get('account_hint') or 'account'}")
             return 0
         out("[error] Verbindung abgelehnt / connection denied" if verdict == "denied"

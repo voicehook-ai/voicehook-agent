@@ -467,11 +467,12 @@ class UserContinuation:
         again is NEVER swallowed: a new normal event with the full text and `continued: false`.
         A sentence that starts the same but is rewritten stays a normal event. No time window.
     Both paths keep the last FULL text (and `seg`) per speaker. `apply` returns the event or
-    None (drop)."""
+    None (drop: counted in `dropped`, one skiplog line with the reason, never the text)."""
 
     def __init__(self) -> None:
         self.last: dict[str, str] = {}
         self.seg: dict[str, object] = {}
+        self.dropped = 0
 
     @staticmethod
     def _boundary(last: str, rest: str) -> bool:
@@ -490,6 +491,9 @@ class UserContinuation:
             out = {**ev, SEG_FIELD: seg}
             if not fresh:
                 if seg == prev_seg:
+                    self.dropped += 1   # Audit "Stille Caps" 10.11.: same version again, visible
+                    from . import skiplog
+                    skiplog.note("user-turn", "same_seg_nothing_new", n=self.dropped)
                     return None
                 out[CONTINUED_FIELD] = False      # a new line with nothing new marked: all of it
                 return out
