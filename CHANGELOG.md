@@ -14,6 +14,11 @@ voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the vers
 - No version bump in this PR: the release sets 0.36.0.
 ## Unreleased
 
+## 0.36.2
+
+- **Security: `speaker_owner` only for the room account's own agent (review of voicehook-v4 #928).** `speaker_owner: true` means "the creator of THIS room", not "the owner of my account": a customer agent invited into another account's room would otherwise treat that account's speech as its owner's. Now `speaker_owner` is `true` only when this join is the own agent of the room's account (`owner-agent: granted`, i.e. `VOICEHOOK_AGENT_KEY` of that account); every other join (no key, other account, bridge without a signed token) gets `false` (fail-closed).
+- **`status --json`: `forged_decisions` and `owner_agent` (Nika).** `forged_decisions` counts the worker-only packets from someone else that 0.36.1 dropped; `owner_agent` is `true` / `false` / `null` (no key or unknown).
+
 ## 0.36.1
 
 - **Security: worker-only packets only from the worker (Nika 11.11., review of voicehook-agents #57 and of #192).** `operator.decision`, `operator.helper_decision`, `transcript`, `call_end`, `operator.revise`, `operator.say_status`, `operator.status_request`, `operator.helper_stale`/`helper_fresh` are taken only from the worker (LiveKit kind AGENT, server-assigned). Before, a guest with data rights could send a forged owner "Ja" (`{"type": "decision", "answered_role": "owner", …}`), a forged human turn ("Ja, deploy", `speaker: Oliver`, routed to us), a stale notice into a helper's answer file, or end our join with `call_end`. Now such a packet is dropped, counted and shown as a `_meta` line without content (`(<topic>) verworfen: Absender ist nicht der Worker (kind=…, n=…)`; lines 1–3 and every 50th, the count stays exact). The check (`_from_worker`) reads the kind from the room's peer table first (server-assigned, also on the bridge via hello/peer-joined), then the packet; no sender: dropped (fail-closed). The bridge transport also passes `sender_kind` when the server sends it (voicehook-v4 #953).

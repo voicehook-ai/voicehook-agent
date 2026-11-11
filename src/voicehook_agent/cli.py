@@ -2282,6 +2282,10 @@ async def _control_handler(ctl: _Control, req: dict) -> dict:
                 # or shown with status --waiting) and the open own decisions
                 **_waiting_view(ctl),
                 "leaving": ctl.leaving,
+                # 0.36.2 (Nika): worker-only packets from someone else, dropped (0.36.1);
+                # owner_agent: this join is the room account's own agent (None = unknown/no key)
+                "forged_decisions": ctl.forged_decisions,
+                "owner_agent": ctl.owner_agent,
                 "idle_timeout_s": ctl.watchdog.timeout,
                 "peers": sorted(peers, key=lambda d: d["identity"])}
     return {"ok": False, "error": f"unknown cmd {cmd!r}"}
@@ -3257,7 +3261,11 @@ async def _connect_and_listen(
             who = {k: payload[k] for k in ("speaker", "op") if payload.get(k)}
             # speaker_owner: Delta's worker stamps it; it counts only from a sender of kind
             # AGENT (server-assigned), otherwise / missing / not a bool -> false (fail-closed)
-            spk_owner = relay.speaker_owner(payload, pkt.participant)
+            # 0.36.2 (review of voicehook-v4 #928): speaker_owner means "creator of THIS room",
+            # not "owner of my account". It counts only when this join is the own agent of the
+            # room's account (owner-agent granted); otherwise always False (fail-closed).
+            spk_owner = relay.speaker_owner(payload, pkt.participant) and (
+                ctl is not None and ctl.owner_agent is True)
             if role == "user":
                 who["speaker_owner"] = spk_owner
             _print_event(json_mode, role, text, topic=topic, **who)
