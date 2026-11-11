@@ -581,6 +581,18 @@ def wakes_helper(payload: dict | None, key: str) -> bool:
 _DC_WAKE_BY = frozenset({"name", "mention"})   # the human named / mentioned this agent
 
 
+def address_fields(payload: dict | None, own: set[str] | str | None) -> dict:
+    """0.36.1: address fields for a queued user event, so the consumer can check it itself:
+    `addressed_ids` (as the server stamped it, only when it is a list) and `addressed_to_you`
+    (one of our ids is in it). Without `addressed_ids` (old server): {} (unknown, not "yes")."""
+    ids = (payload or {}).get("addressed_ids")
+    if not isinstance(ids, list):
+        return {}
+    mine = {own} if isinstance(own, str) else set(own or ())
+    clean = [str(i) for i in ids if isinstance(i, (str, int)) and not isinstance(i, bool)]
+    return {"addressed_ids": clean, "addressed_to_you": bool(mine & set(clean))}
+
+
 def wakes_data_channel(payload: dict | None, own: set[str] | str | None) -> bool:
     """A data-channel join wakes its LLM for this user turn only when the turn is explicitly
     addressed to it: its identity is in `addressed_ids` (or `wake.ids`) AND either
@@ -595,8 +607,12 @@ def wakes_data_channel(payload: dict | None, own: set[str] | str | None) -> bool
     # the turn must name THIS session as a target
     ids = p.get("addressed_ids")
     w = wake_info(p)
-    targeted = (isinstance(ids, list) and bool(mine & {str(i) for i in ids})) \
-        or (w is not None and w["scope"] in ("agents", "main") and bool(mine & set(w["ids"])))
+    if isinstance(ids, list):
+        # 0.36.1 (Nika 11.11.): the explicit address list wins; wake.ids naming us must not wake
+        # a turn the server addressed to someone else (routed_by_delta + addressed_ids=["andere"])
+        targeted = bool(mine & {str(i) for i in ids})
+    else:
+        targeted = w is not None and w["scope"] in ("agents", "main") and bool(mine & set(w["ids"]))
     if not targeted:
         return False
     # and it must be meant for it: named/mentioned, or Delta routed it here

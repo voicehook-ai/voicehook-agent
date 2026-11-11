@@ -1239,6 +1239,7 @@ class _Control:
         self.goals: list[dict] | None = None
         self.goal_acks = vgoals.Acks()
         self.goals_hinted = False
+        self.forged_decisions = 0   # 0.36.1: operator.decision/helper_decision not from the worker
         self.goals_ping_pending = False   # coalesces vh.goals pings: at most one read per GOALS_PING_S
         self.agent_key_set = False
         self.owner_agent: bool | None = None
@@ -2527,6 +2528,9 @@ async def _activity_loop(ctl: _Control, path: Path) -> None:
             pass
 
 
+DECISION_TOPICS = ("operator.decision", "operator.helper_decision")
+
+
 def _route_helper_decision(ctl: _Control, payload: dict) -> bool:
     """0.16.0: a decision event whose `sender` names a helper session of this machine
     (local relay) goes into that helper's answer file, not into our own `next`."""
@@ -3231,6 +3235,7 @@ async def _connect_and_listen(
                 if ev is not None:  # 0.35.9: a grown utterance spools only its new part
                     ev = ctl.continuation.apply(ev, payload)
                 if ev is not None:
+                    ev.update(relay.address_fields(payload, _own_ids()))   # 0.36.1
                     hf = relay.helper_turn_fields(payload)
                     if hf:  # 0.22.0: the human spoke to a helper by name: info copy for us
                         ev.update(hf)
@@ -3335,6 +3340,17 @@ async def _connect_and_listen(
                 # 0.9.0: first in line for `next`, status_due until the next board
                 ctl.events.put_front_nowait(relay.status_request_event(payload))
                 ctl.clock.requested()
+            if topic in DECISION_TOPICS and getattr(pkt.participant, "kind", None) != 4:
+                # 0.36.1 (Nika 11.11., Sicherheit): Antworten auf Entscheidungen kommen nur vom Worker
+                # (LiveKit kind AGENT, vom Server vergeben). Ein Gast könnte sonst ein "Ja" des Inhabers
+                # fälschen. Verworfen, gezählt und sichtbar gemeldet (ohne Inhalt).
+                if ctl is not None:
+                    ctl.forged_decisions += 1
+                _print_event(json_mode, "system",
+                             f"({topic}) verworfen: Absender ist nicht der Worker "
+                             f"(kind={getattr(pkt.participant, 'kind', None)}, "
+                             f"n={ctl.forged_decisions if ctl is not None else 1})", topic="_meta")
+                return
             if ctl is not None and payload.get("type") in ("decision", "helper_decision") \
                     and topic in ("operator.decision", "operator.helper_decision"):
                 ctl.ledger.answered(payload, str(payload.get("sender") or payload.get("label")

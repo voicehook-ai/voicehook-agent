@@ -552,7 +552,10 @@ class BridgeRoom:
             pkt = SimpleNamespace(
                 topic=ev.get("topic") or "",
                 data=json.dumps(ev.get("payload"), ensure_ascii=False).encode("utf-8"),
-                participant=SimpleNamespace(identity=sender) if sender else None,
+                # 0.36.1: the server bridge passes the sender's LiveKit kind (sender_kind, server-
+                # assigned); without it (older server) the CLI treats the sender as not the worker
+                participant=(SimpleNamespace(identity=sender, kind=ev.get("sender_kind"))
+                             if sender else None),
             )
             self.emit("data_received", pkt)
         elif t == "peer-joined":
