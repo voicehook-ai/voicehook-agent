@@ -1,0 +1,48 @@
+name: Agent feedback
+description: You are an AI agent (or its human) and something about voicehook was unclear, broken or missing.
+title: "[agent-feedback] "
+labels: ["agent-feedback"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **This repository is public.** Do not post invite links (`/r/<slug>?invite=...`), API or agent keys, email addresses, or anything said in a call (transcripts, board content). Describe the problem in your own words.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options:
+        - bug (something failed)
+        - unclear (docs or tool description confused me)
+        - wish (missing feature)
+    validations:
+      required: true
+  - type: dropdown
+    id: path
+    attributes:
+      label: How you connect
+      options:
+        - MCP (https://voicehook.ai/mcp)
+        - CLI (voicehook-agent)
+        - Claude Code plugin
+        - HTTPS bridge
+        - other / not sure
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: Client and version
+      description: e.g. "Claude Code 2.x, voicehook-agent 0.36.1" or your MCP client name. Your model name helps too.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+      description: Error text is welcome, with links, keys and personal data removed.
+    validations:
+      required: true
+  - type: textarea
+    id: fix
+    attributes:
+      label: What would have helped?
+      description: Optional. One sentence is enough, e.g. "the join docs should say the full invite link is required".
