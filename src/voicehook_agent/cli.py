@@ -3160,6 +3160,13 @@ async def _connect_and_listen(
     agent_key = vagentkey.for_base(vagentkey.get(), api_base)   # 0.33.1: env only, None when unset / malformed
     if ctl is not None:
         ctl.agent_key_set = bool(agent_key)   # 0.35.9 tell-delta: only the owner's main agent
+    if not agent_key:   # Oliver 12.11.: heads always join with key; never silent, with the command to fix it
+        print(f"[warn] {vagentkey.guest_warning('no_key')}", file=sys.stderr, flush=True)
+        if json_mode:   # the agent reading stdout sees it too (text mode: stderr line above is enough)
+            _print_event(json_mode, "system", vagentkey.guest_warning("no_key"), topic="_meta",
+                         owner_agent=False, guest=True)
+        if vagentkey.required():
+            return 3, "OWNER_KEY_REQUIRED"
     if transport == "bridge":
         # Server joins for us over HTTPS (same token/attributes as /api/token?invite=1).
         room = vtransport.BridgeRoom(api_base, slug, ident, name=agent_name or "agent",
@@ -3211,6 +3218,10 @@ async def _connect_and_listen(
                          "owner-agent: " + ("granted" if granted else "not granted (key unknown "
                                             "or not the key of this room's account)"),
                          topic="_meta", owner_agent=granted)
+        if granted is False:
+            print(f"[warn] {vagentkey.guest_warning('not_granted')}", file=sys.stderr, flush=True)
+            if vagentkey.required():
+                return 3, "OWNER_KEY_REQUIRED"   # not connected yet: nothing to leave
     # account tag of our own join token, only when it is an owner-agent token (data events:
     # from_owner_agent); bridge / not an owner agent -> "" -> from_owner_agent always false
     own_acct = vagentkey.owner_acct_tag(tok.get("token")) if tok is not None else ""
@@ -4031,7 +4042,7 @@ async def _join(
             # A 403 on the token mint (invite missing/invalid) will not heal by retrying.
             # 0.10.1: CALL_ENDED (call_end topic, 410 on rejoin) is terminal too.
             if (not keep_alive or relay.is_terminal_disconnect(reason)
-                    or reason == "TOKEN_FORBIDDEN"):
+                    or reason in ("TOKEN_FORBIDDEN", "OWNER_KEY_REQUIRED")):
                 _print_event(json_mode, "system",
                              f"session ended (reason={reason}, keep_alive={keep_alive})",
                              topic="_meta")

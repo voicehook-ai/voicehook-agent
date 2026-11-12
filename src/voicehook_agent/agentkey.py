@@ -24,6 +24,8 @@ DEFAULT_HOST = "voicehook.ai"
 LOCAL_HOSTS = ("localhost", "127.0.0.1")
 PREFIX = "vhak_"
 
+REQUIRE_ENV = "VOICEHOOK_REQUIRE_OWNER_KEY"   # 1 = join only as the account's own agent (Oliver 12.11.: heads)
+FIX_CMD = "VOICEHOOK_AGENT_KEY=vhak_... voicehook-agent join '<link>' --name <Name> ..."   # never a real value
 _warned = False
 _warned_hosts: set[str] = set()
 
@@ -131,3 +133,20 @@ def owner_acct_tag(jwt: object) -> str:
     except Exception:  # noqa: BLE001
         return ""
     return tag if attrs.get("vh.owner_agent") == "1" and isinstance(tag, str) and tag else ""
+
+
+def required() -> bool:
+    """VOICEHOOK_REQUIRE_OWNER_KEY=1/true/yes/on: refuse a join that is not an own agent of the account."""
+    return (os.environ.get(REQUIRE_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def guest_warning(reason: str) -> str:
+    """Loud warning with the concrete next step (no value, no host). reason: 'no_key' | 'not_granted'."""
+    if reason == "no_key":
+        why, step = ("no agent key set",
+                     f"create a key on voicehook.ai/account and join with: {FIX_CMD}")
+    else:   # own key of another account: an invited agent; a new key would not help (Review Ines #199)
+        why, step = ("the agent key is not a key of this room's account",
+                     "ask the room owner to let you join as an own agent of the account, or ignore this if you were invited as a guest")
+    return (f"joining as GUEST: {why}. Delta passes no questions to guests, Kanban and tell-delta are closed. "
+            f"Next step: {step}" + (f" ({REQUIRE_ENV}=1: join refused)" if required() else ""))

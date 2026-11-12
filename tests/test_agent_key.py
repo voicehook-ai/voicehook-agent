@@ -178,3 +178,53 @@ def test_bridge_foreign_host_gets_no_key(capsys):
     assert "not trusted" in capsys.readouterr().err
     assert vt.BridgeRoom("https://voicehook.ai", "a-b-c-AB12", "x", name="C", model="m",
                          agent_key=FAKE)._agent_key == FAKE
+
+
+# ---- Oliver 12.11.: heads always join with key; without key = guest, loud, with the command ----
+def _join_rc(monkeypatch, tmp_path, resp, sent):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    monkeypatch.setattr(cli.httpx, "AsyncClient", _client(sent, resp))
+    return asyncio.run(cli._join("https://voicehook.ai/r/a-b-c-AB12", None, "Claude", True,
+                                 model="opus-5.5", no_greet=True, idle_timeout=0, control=False,
+                                 transport="webrtc", keep_alive=False))
+
+
+def _jwt(attrs):
+    b = base64.urlsafe_b64encode(json.dumps({"attributes": attrs}).encode()).decode().rstrip("=")
+    return f"h.{b}.s"
+
+
+def test_join_without_key_warns_loud_with_command(monkeypatch, capsys, tmp_path):
+    monkeypatch.delenv(agentkey.REQUIRE_ENV, raising=False)
+    sent: dict = {}
+    _join_rc(monkeypatch, tmp_path, _Resp(403, text="forbidden"), sent)
+    err = capsys.readouterr().err
+    assert "joining as GUEST: no agent key set" in err
+    assert "voicehook.ai/account" in err and "VOICEHOOK_AGENT_KEY=vhak_... voicehook-agent join" in err
+    assert "url" in sent                                   # without the switch: join still tried (customers' guests)
+
+
+def test_join_without_key_refused_when_required(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv(agentkey.REQUIRE_ENV, "1")
+    sent: dict = {}
+    _join_rc(monkeypatch, tmp_path, _Resp(), sent)
+    err = capsys.readouterr().err
+    assert "join refused" in err and "url" not in sent     # refused before any token mint
+
+
+def test_join_with_foreign_key_refused_when_required(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv(agentkey.ENV, FAKE)
+    monkeypatch.setenv(agentkey.REQUIRE_ENV, "1")
+    sent: dict = {}
+    _join_rc(monkeypatch, tmp_path, _Resp(body={"token": _jwt({"vh.role": "agent"}), "url": "wss://x"}), sent)
+    out, err = capsys.readouterr()
+    assert "not a key of this room's account" in err and "join refused" in err
+    assert "ask the room owner" in err and "create a key" not in err
+    assert FAKE not in out and FAKE not in err
+
+
+def test_required_switch_values(monkeypatch):
+    for v, want in (("1", True), ("true", True), ("on", True), ("0", False), ("", False), ("nein", False)):
+        monkeypatch.setenv(agentkey.REQUIRE_ENV, v)
+        assert agentkey.required() is want
