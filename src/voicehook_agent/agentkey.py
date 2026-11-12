@@ -147,6 +147,6 @@ def guest_warning(reason: str) -> str:
                      f"create a key on voicehook.ai/account and join with: {FIX_CMD}")
     else:   # own key of another account: an invited agent; a new key would not help (Review Ines #199)
         why, step = ("the agent key is not a key of this room's account",
-                     "ask the room owner to join you as his own agent, or ignore this if you were invited as a guest")
+                     "ask the room owner to let you join as an own agent of the account, or ignore this if you were invited as a guest")
     return (f"joining as GUEST: {why}. Delta passes no questions to guests, Kanban and tell-delta are closed. "
             f"Next step: {step}" + (f" ({REQUIRE_ENV}=1: join refused)" if required() else ""))
