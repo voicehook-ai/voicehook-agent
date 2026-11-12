@@ -142,8 +142,11 @@ def required() -> bool:
 
 def guest_warning(reason: str) -> str:
     """Loud warning with the concrete next step (no value, no host). reason: 'no_key' | 'not_granted'."""
-    why = ("no agent key set" if reason == "no_key" else
-           "the agent key is not a key of this room's account")
+    if reason == "no_key":
+        why, step = ("no agent key set",
+                     f"create a key on voicehook.ai/account and join with: {FIX_CMD}")
+    else:   # own key of another account: an invited agent; a new key would not help (Review Ines #199)
+        why, step = ("the agent key is not a key of this room's account",
+                     "ask the room owner to join you as his own agent, or ignore this if you were invited as a guest")
     return (f"joining as GUEST: {why}. Delta passes no questions to guests, Kanban and tell-delta are closed. "
-            f"Next step: create a key on voicehook.ai/account and join with: {FIX_CMD}"
-            + (f" ({REQUIRE_ENV}=1: join refused)" if required() else ""))
+            f"Next step: {step}" + (f" ({REQUIRE_ENV}=1: join refused)" if required() else ""))

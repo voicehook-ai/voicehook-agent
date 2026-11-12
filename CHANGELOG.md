@@ -6,6 +6,7 @@ voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the vers
 ## 0.36.4
 
 - **Heads always join with key (Oliver 12.11.: "die Heads immer mit Schlüssel beigetreten sein müssen. Das muss im gesamten Produkt als Vorgabe drin sein.").** A join without `VOICEHOOK_AGENT_KEY`, or with a key that is not a key of the room's account, is a guest: Delta passes it no questions, Kanban and tell-delta stay closed. The join now says so, never silently: a `[warn] joining as GUEST: …` line on stderr with the next step (create a key on voicehook.ai/account, `VOICEHOOK_AGENT_KEY=vhak_... voicehook-agent join '<link>' …`); with `--json` also a `_meta` event `{guest: true, owner_agent: false}`.
+  - With a key of another account (an invited agent) the next step is "ask the room owner …, or ignore this if you were invited as a guest", not "create a key".
   - `VOICEHOOK_REQUIRE_OWNER_KEY=1`: the join is refused instead (exit 3, reason `OWNER_KEY_REQUIRED`, no reconnect): without key before any token mint, with a foreign key before connecting. For the team's heads; guests of customers keep joining with the warning.
 
 ## 0.36.0

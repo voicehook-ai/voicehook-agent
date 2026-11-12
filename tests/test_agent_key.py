@@ -220,6 +220,7 @@ def test_join_with_foreign_key_refused_when_required(monkeypatch, capsys, tmp_pa
     _join_rc(monkeypatch, tmp_path, _Resp(body={"token": _jwt({"vh.role": "agent"}), "url": "wss://x"}), sent)
     out, err = capsys.readouterr()
     assert "not a key of this room's account" in err and "join refused" in err
+    assert "ask the room owner" in err and "create a key" not in err
     assert FAKE not in out and FAKE not in err
 
 
