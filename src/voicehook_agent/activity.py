@@ -121,10 +121,9 @@ HOOK_COMMAND_ASK_WAIT = "voicehook-agent-hook ask-wait || true"
 HOOK_COMMAND_STOP_WAIT = "voicehook-agent-hook stop-wait; test $? -eq 3 && exit 2; exit 0"
 # permission-wait (SS2kwgDK): a SECOND PermissionRequest hook, long timeout: only the owner's signed
 # click on the board allows, a no denies, else the dialog shows as before. OFF by default (Review Ines
-# #196 Punkt 6): only installed locally with `hook install --permission-wait` or PERM_WAIT_ON_ENV=1 at
-# install time, never switched on by relay.json or the server.
+# #196 Punkt 6, Re-Review 7): only installed by the explicit `hook install --permission-wait`, never by an
+# env var (a join installs hooks too), relay.json or the server.
 HOOK_COMMAND_PERM_WAIT = "voicehook-agent-hook permission-wait || true"
-PERM_WAIT_ON_ENV = "VOICEHOOK_PERMISSION_WAIT"
 OPT_HOOKS = {
     "PermissionRequest": (HOOK_COMMAND_PERM_WAIT, {"matcher": "*"},
                           {"timeout": 100, "statusMessage": "Permission is on the voicehook call board "
@@ -986,10 +985,9 @@ def extra_entry(event: str, exe: str = HOOK_BIN, table: dict | None = None) -> d
     return {**outer, "hooks": [{"type": "command", "command": _with_bin(command, exe), **inner}]}
 
 
-def perm_wait_wanted(flag: bool = False, env=None) -> bool:
-    """Install permission-wait? Only by a local choice: the flag or PERM_WAIT_ON_ENV=1."""
-    env = os.environ if env is None else env
-    return flag or str(env.get(PERM_WAIT_ON_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+def perm_wait_wanted(flag: bool = False) -> bool:
+    """Install permission-wait? Only the explicit `hook install --permission-wait` (flag is True)."""
+    return flag is True
 
 
 def _our_extra(entries: list, event: str, table: dict | None = None) -> list[dict]:

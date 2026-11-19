@@ -51,7 +51,8 @@ def _perm(sid="other-1", cmd="git push origin main", tool="Bash", inp=None):
 
 
 def _answer(verdict, via="click", role="owner", text="", signed=True):
-    ev = {"type": "decision", "id": "d00000000", "verdict": verdict, "by": "Oliver", "number": 3, "question": "q"}
+    ev = {"type": "decision", "id": "d00000000", "verdict": verdict, "by": "Oliver", "number": 3, "question": "q",
+          "immutable": True, "rev": 1}
     if via:
         ev["answered_via"] = via
     if role:
@@ -63,15 +64,42 @@ def _answer(verdict, via="click", role="owner", text="", signed=True):
     return ev
 
 
-def _run(raw, answers, wait_raw=None, wall=T):
-    """The parallel permission-request hook (notify.handle) creates the card for `raw`; permission-wait
-    then runs for `wait_raw` (default: the same request)."""
+class Server:
+    """The board behind notify.create (#196 Feldvertrag): records each decide body and answers like v4
+    fix/perm-card-immutable (ok, id, rev 1, immutable echoed). `answer` overrides fields."""
+
+    def __init__(self, **answer):
+        self.bodies: list[dict] = []
+        self.answer = answer
+
+    def __call__(self, job, body):
+        self.bodies.append(dict(body))
+        if body.get("delete"):
+            return {"ok": True}
+        out = {"ok": True, "id": "d00000000", "number": 3, "rev": 1}
+        if body.get("immutable") is True:
+            out["immutable"] = True
+        out.update(self.answer)
+        return out
+
+
+def _run(raw, answers, wait_raw=None, wall=T, server=None, monkeypatch=None):
+    """The parallel permission-request hook (notify.handle) creates the card for `raw` through the real
+    notify.create against `server`; permission-wait then runs for `wait_raw` (default: the same request)."""
     fb, clock = FakeBoard(), Clock()
+    srv = server or Server()
     jobs: list = []
     notify.handle(raw, now=T, post=jobs.append)
     assert jobs, "permission-request legte keine Entscheidung an"
-    fb.create(jobs[0])
-    fb.queue = list(answers)
+    old = notify._decide
+    notify._decide = srv
+    try:
+        notify.create(jobs[0])
+    finally:
+        notify._decide = old
+    shown = next(b["question"] for b in srv.bodies if not b.get("delete"))
+    fb.created = [dict(b, id="d00000000") for b in srv.bodies if not b.get("delete")]
+    fb.queue = [dict(a, question=shown) if a.get("question") == "q" else a for a in answers]
     out = asks.permission_wait(wait_raw or raw, next_events=fb.next_events, clock=clock,
                                sleep=lambda s: None, wall=lambda: wall)
     return out, fb
@@ -246,8 +274,7 @@ def _perm_hooks(path):
     return [h for e in hooks for h in e["hooks"] if "permission-wait" in h["command"]]
 
 
-def test_standard_aus_nur_mit_flag_oder_env(tmp_path, monkeypatch):
-    monkeypatch.delenv(activity.PERM_WAIT_ON_ENV, raising=False)
+def test_standard_aus_nur_mit_flag_env_zaehlt_nie(tmp_path, monkeypatch):
     s = tmp_path / "settings.json"
     activity.install(s, exe="voicehook-agent-hook")
     assert _perm_hooks(s) == []                                            # Standard: aus
@@ -256,9 +283,9 @@ def test_standard_aus_nur_mit_flag_oder_env(tmp_path, monkeypatch):
     (h,) = _perm_hooks(s)
     assert h["command"].endswith("permission-wait || true") and h["timeout"] > asks.PERM_WAIT_S
     s2 = tmp_path / "s2.json"
-    monkeypatch.setenv(activity.PERM_WAIT_ON_ENV, "1")
+    monkeypatch.setenv("VOICEHOOK_PERMISSION_WAIT", "1")                   # Re-Review 7: Join-Install mit Env
     activity.install(s2, exe="voicehook-agent-hook")
-    assert len(_perm_hooks(s2)) == 1
+    assert _perm_hooks(s2) == []
 
 
 def test_flag_wird_gelesen_und_nur_fuer_claude():
@@ -269,14 +296,174 @@ def test_flag_wird_gelesen_und_nur_fuer_claude():
 
 def test_relay_json_schaltet_nie_ein():
     import inspect
-    src = inspect.getsource(asks.permission_wait) + inspect.getsource(activity.install)
     assert "relay" not in inspect.getsource(activity.perm_wait_wanted)
-    assert "PERM_WAIT_ON_ENV" in src or "perm_wait_wanted" in src
+    assert "environ" not in inspect.getsource(activity.perm_wait_wanted)
 
 
-def test_auf_der_karte_gekuerzt_nie_frei(local):
-    """Ein Befehl, der für sich passt, aber hinter Name und Verb auf der Karte gekürzt würde."""
-    cmd = ("echo " + "wort " * 40)[:notify.PERM_CARD_MAX - 2].strip()
-    assert notify.bash_exact({"tool_name": "Bash", "tool_input": {"command": cmd}}) == cmd
-    out, fb = _run(_perm(cmd=cmd), [_answer("yes")])
-    assert cmd not in fb.created[0]["question"] and out is None
+# ----- Re-Review Ines (395884b) ----------------------------------------------------------------------------
+def test_antwort_mit_anderem_kartentext_nie_frei(local):
+    """HOCH 1: the card was rewritten on the server (merge/update/rebind) to something harmless."""
+    a = _answer("yes")
+    a["question"] = "Hooks will ausführen: ls – erlauben?"
+    out, _fb = _run(_perm(cmd="echo; rm -rf ~"), [a])
+    assert out is None
+
+
+def _without_question(ev):
+    return {k: v for k, v in ev.items() if k != "question"}
+
+
+@pytest.mark.parametrize("make", [
+    lambda: dict(_answer("yes"), merged=True),     # Server hat die Karte zusammengeführt (Text = unsere Frage)
+    lambda: _without_question(_answer("yes")),     # älterer Server ohne question
+    lambda: dict(_answer("yes"), question=""),
+])
+def test_zusammengefuehrt_oder_ohne_kartentext_nie_frei(local, make):
+    out, _fb = _run(_perm(), [make()])
+    assert out is None
+    out, _fb = _run(_perm(sid="other-2", cmd="git push origin dev"), [_answer("yes")])   # Gegenprobe
+    assert out == ALLOW
+
+
+@pytest.mark.parametrize("extra", [{"dangerouslyDisableSandbox": True}, {"run_in_background": True}, {"x": 1}])
+def test_nur_erlaubte_schluessel_in_tool_input(local, extra):
+    out, _fb = _run(_perm(inp={"command": "git push origin main", "description": "push", "timeout": 5, **extra}),
+                    [_answer("yes")])
+    assert out is None
+    out, _fb = _run(_perm(sid="other-2", inp={"command": "git push origin dev", "description": "d", "timeout": 5}),
+                    [_answer("yes")])
+    assert out == ALLOW
+
+
+@pytest.mark.parametrize("cmd", [
+    ("curl -u ad" "min:pw https://h"), "export db_password=x", "my_token=abc ./run", "x --pass=y",
+    ("curl -H 'Auth" "orization: Basic Zm9v'"), "redis-cli -a geheim", "openssl enc -k geheim",
+    "MY_AUTH=1 ./run", "creds_file=x ./run",
+])
+def test_schwaerzen_re_review(cmd):
+    assert notify.perm_scrub(cmd) != cmd
+    assert notify.bash_exact({"tool_name": "Bash", "tool_input": {"command": cmd}}) == ""
+
+
+@pytest.mark.parametrize("cmd", [
+    "git push оrigin main",          # kyrillisches o
+    "echo \u05d0\u05d1 ls",           # hebräisch
+    "echo \u3164 ls",                # Hangul-Füller
+    "echo e\u0301 ls",               # Kombinationszeichen
+    "echo \u202e ls",                # bidi override
+])
+def test_nur_ascii_und_druckbar(cmd):
+    assert notify.bash_exact({"tool_name": "Bash", "tool_input": {"command": cmd}}) == ""
+
+
+def test_subagent_nie_frei_und_kein_hinweis(local):
+    raw = json.loads(_perm())
+    raw["agent_id"] = "sub-1"
+    assert notify.can_allow(raw, ms.load_relay()) is False
+    assert notify.perm_hash(raw) != notify.perm_hash(json.loads(_perm()))
+
+
+# ----- every allow gate on its own (Re-Review 8) ---------------------------------------------------------------
+def _gate_args(**over):
+    event = json.loads(_perm())
+    q = "Hooks will ausführen: git push origin main – erlauben?"
+    rel = {"kind": ms.LOCAL, "owner_agent": True}
+    slot = {"h": notify.perm_hash(event), "id": "d1", "at": T, "imm": {"id": "d1", "rev": 1, "question": q}}
+    ev = {"question": q, "id": "d1", "immutable": True, "rev": 1}
+    args = {"event": event, "rel": rel, "slot": slot, "question": q, "t0": T, "ev": ev, "dec_id": "d1"}
+    args.update(over)
+    return args
+
+
+def test_alle_gates_offen_gibt_frei():
+    assert asks.allow_gates(**_gate_args()) == ""
+
+
+@pytest.mark.parametrize("over,why", [
+    ({"rel": {"kind": "remote", "owner_agent": True}}, "remote_relay"),       # Remote mit owner_agent: true
+    ({"rel": {"kind": ms.LOCAL, "owner_agent": "1"}}, "no_owner_agent"),
+    ({"event": dict(json.loads(_perm()), agent_id="s")}, "subagent"),
+    ({"event": json.loads(_perm(cmd="git push origin main\n"))}, ""),         # Rand-Whitespace ist ok
+    ({"event": json.loads(_perm(inp={"command": "git push origin main", "run_in_background": True}))},
+     "not_exact_bash"),                                                         # Karte passt, Input nicht
+    ({"question": "Hooks will ausführen: git push – erlauben?"}, "card_differs"),
+    ({"ev": {"question": "Hooks will ausführen: git push origin main – erlauben?", "merged": True}}, "merged"),
+    ({"slot": {"id": "d1", "at": T, "imm": None}}, "hash_mismatch"),
+    ({"ev": {}}, "answer_text_differs"),
+    ({"ev": {"question": "Hooks will ausführen: ls – erlauben?"}}, "answer_text_differs"),
+    ({"slot": {"h": "x", "id": "d1", "at": T}}, "hash_mismatch"),
+    ({"dec_id": "d2"}, "slot_id_differs"),
+    ({"t0": T + asks.PERM_FRESH_S + 1}, "stale_slot"),
+    ({"t0": T - asks.PERM_FRESH_S - 1}, "stale_slot"),                          # Slot aus der Zukunft
+])
+def test_jedes_gate_einzeln(over, why):
+    args = _gate_args(**over)
+    if "event" in over and why in ("subagent", ""):
+        args["slot"] = dict(args["slot"], h=notify.perm_hash(args["event"]))
+    assert asks.allow_gates(**args) == why
+
+
+@pytest.mark.parametrize("at", [float("nan"), float("inf"), "x", None])
+def test_slot_zeit_kaputt_nie_frei(at):
+    args = _gate_args()
+    args["slot"] = dict(args["slot"], at=at)
+    assert asks.allow_gates(**args) == "stale_slot"
+
+
+# ----- #196 Feldvertrag (Ines 19.11., v4 fix/perm-card-immutable) -------------------------------------------
+def test_immutable_wird_beim_anlegen_gesendet(local):
+    srv = Server()
+    out, _fb = _run(_perm(), [_answer("yes")], server=srv)
+    (body,) = [b for b in srv.bodies if not b.get("delete")]
+    assert body["immutable"] is True and out == ALLOW
+
+
+def test_ohne_freigabe_moeglichkeit_kein_immutable(relay):
+    srv = Server()
+    _run(_perm(), [], server=srv)
+    assert all("immutable" not in b for b in srv.bodies)                  # Remote: normale Karte
+
+
+@pytest.mark.parametrize("answer", [{"rev": 2}, {"rev": True}, {"immutable": False}, {"immutable": "true"},
+                                    {"merged": True}, {"rev": None}])
+def test_anlege_antwort_nicht_unveraenderlich_nie_frei(local, answer):
+    srv = Server(**answer)
+    out, _fb = _run(_perm(), [_answer("yes")], server=srv)
+    assert out is None
+
+
+@pytest.mark.parametrize("patch", [{"rev": 2}, {"rev": True}, {"rev": "1"}, {"immutable": False},
+                                   {"immutable": 1}, {"id": "d99999999"}])
+def test_antwort_ereignis_nicht_unveraenderlich_nie_frei(local, patch):
+    out, _fb = _run(_perm(), [dict(_answer("yes"), **patch)])
+    assert out is None
+
+
+@pytest.mark.parametrize("drop", ["rev", "immutable"])
+def test_antwort_ohne_felder_nie_frei(local, drop):
+    ev = {k: v for k, v in _answer("yes").items() if k != drop}
+    out, _fb = _run(_perm(), [ev])
+    assert out is None
+
+
+def test_fremde_id_im_slot_nie_frei():
+    args = _gate_args()
+    args["slot"] = dict(args["slot"], imm={"id": "d9", "rev": 1, "question": args["question"]})
+    assert asks.allow_gates(**args) == "not_immutable"
+    args = _gate_args(ev={"question": _gate_args()["question"], "id": "d9", "immutable": True, "rev": 1})
+    assert asks.allow_gates(**args) == "answer_not_immutable"
+
+
+def test_relay_reicht_immutable_unveraendert_durch():
+    from voicehook_agent import relayops
+    assert relayops._valid_decide({"question": "q", "immutable": True}) == {"question": "q", "immutable": True}
+    assert relayops._valid_decide({"question": "q", "immutable": "true"}) is None      # kein echter bool
+    assert relayops.decide_body({"question": "q", "immutable": True})["immutable"] is True
+
+
+def test_rpc_body_traegt_immutable():
+    import inspect
+
+    from voicehook_agent import cli
+    src = inspect.getsource(cli._decide_rpc)
+    assert '("immutable", True if req.get("immutable") is True else None)' in src

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -423,6 +424,22 @@ def _ids_of(skey: str, qk: str, n: int, wait_s: float, sleep=time.sleep) -> list
         sleep(0.3)
 
 
+def _ids_slot(skey: str, qk: str, wait_s: float, sleep=time.sleep) -> tuple[list[str], dict | None]:
+    """Like _ids_of for one decision, but returns the ids together with the slot they came from."""
+    end = time.monotonic() + wait_s
+    while True:
+        slot = vnotify.open_slot(skey)
+        if slot is None or slot.get("q") != qk:
+            return [], None
+        ids = [i for i in (slot.get("ids") or ([slot["id"]] if slot.get("id") else []))
+               if isinstance(i, str)]
+        if ids:
+            return ids, slot
+        if time.monotonic() >= end:
+            return [], None
+        sleep(0.3)
+
+
 def ask_wait(raw: str, now: float | None = None, next_events=None, clock=time.monotonic,
              sleep=time.sleep, create=None) -> dict | None:
     """`voicehook-agent-hook ask-wait` (PreToolUse, AskUserQuestion): the hook output that
@@ -580,28 +597,47 @@ def permission_decision(ev: dict) -> dict | None:
     return None
 
 
-def allow_gates(event: dict, rel: dict, slot: dict | None, question: str, t0: float) -> str:
+def allow_gates(event: dict, rel: dict, slot: dict | None, question: str, t0: float,
+                ev: dict | None = None, dec_id: str = "") -> str:
     """Why a yes from the board may NOT allow this dialog ('' = it may). Review Ines #196:
     1 local relay of a join with the signed owner_agent (relay.json, written by the CLI at join);
-    3 the slot was created fresh for exactly this request (sha256 of session, tool, tool_input);
-    4 a one-line Bash command shown whole and verbatim on the card;
-    5 nothing blacked out (bash_exact). Deny never needs these."""
+    3 the slot was created fresh for exactly this request (sha256 of session, agent, tool, tool_input),
+      one snapshot, its id is the answered decision;
+    4 a one-line printable ASCII Bash command with only command/description/timeout, shown whole and
+      verbatim on the card; 5 nothing blacked out (bash_exact);
+    Re-Review 1: the answer names the card text the owner saw (ev.question == our question, never
+    merged); an older server without `question` never allows. Deny never needs these."""
     from . import multisession as vmulti
     if not vmulti._is_local(rel):
         return "remote_relay"
     if rel.get("owner_agent") is not True:
         return "no_owner_agent"
+    if event.get("agent_id"):
+        return "subagent"
     if not vnotify.bash_exact(event):
         return "not_exact_bash"
     if not vnotify.perm_card_exact(question, event):
         return "card_differs"
+    ev = ev if isinstance(ev, dict) else {}
+    if ev.get("merged"):
+        return "merged"
+    if not isinstance(ev.get("question"), str) or ev.get("question") != question:
+        return "answer_text_differs"
     if not isinstance(slot, dict) or slot.get("h") != vnotify.perm_hash(event):
         return "hash_mismatch"
+    if not dec_id or slot.get("id") != dec_id:
+        return "slot_id_differs"
+    imm = slot.get("imm") if isinstance(slot.get("imm"), dict) else None
+    if imm is None or imm.get("id") != dec_id or imm.get("rev") != 1 or imm.get("question") != question:
+        return "not_immutable"          # #196 Feldvertrag: the create answer was not checked as immutable
+    rev = ev.get("rev")
+    if ev.get("id") != dec_id or ev.get("immutable") is not True or isinstance(rev, bool) or rev != 1:
+        return "answer_not_immutable"   # the answer event: same id, immutable True, rev 1
     try:
-        at = float(slot.get("at") or 0)
+        at = float(slot.get("at"))
     except (TypeError, ValueError):
-        at = 0.0
-    if at < t0 - PERM_FRESH_S:
+        return "stale_slot"
+    if not math.isfinite(at) or abs(t0 - at) > PERM_FRESH_S:
         return "stale_slot"
     return ""
 
@@ -629,10 +665,9 @@ def permission_wait(raw: str, next_events=None, clock=time.monotonic, sleep=time
             return None   # nothing concrete on the board: the dialog shows
         qk = vnotify.group_key(info)
         start = clock()
-        ids = _ids_of(skey, qk, 1, ID_WAIT_S, sleep=sleep)
+        ids, slot = _ids_slot(skey, qk, ID_WAIT_S, sleep=sleep)   # one snapshot: ids and h together
         if len(ids) != 1:
             return None
-        slot = vnotify.open_slot(skey)
         got = _wait_answers(rel, frm, ids, start + wait, skey, qk, next_events, clock)
         if got is None:
             return None
@@ -644,7 +679,7 @@ def permission_wait(raw: str, next_events=None, clock=time.monotonic, sleep=time
         if decision is None:
             return None
         if decision["behavior"] == "allow":
-            why = allow_gates(event, rel, slot, str(info.get("question") or ""), t0)
+            why = allow_gates(event, rel, slot, str(info.get("question") or ""), t0, ev, ids[0])
             if why:
                 print(f"voicehook permission-wait: yes on the board, not allowed here ({why}); "
                       "decide in the terminal", file=sys.stderr, flush=True)

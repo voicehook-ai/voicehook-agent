@@ -227,11 +227,14 @@ _VERBS = {"Bash": "ausführen", "Read": "lesen", "NotebookRead": "lesen", "Edit"
 # Only for permission cards: a hit is blacked out on the card and the dialog is never allowed from
 # the board (it stays in the terminal).
 PERM_SECRET_PATTERNS = [
-    re.compile(r"\w*(PASS|PWD|TOKEN|SECRET|KEY)\w*=\S*"),               # DB_PASSWORD=..., MY_TOKEN=...
-    re.compile(r"(?<!\S)-p\s*(\"[^\"]*\"|'[^']*'|\S+)"),              # -p <x> (mysql -p..., sshpass -p ...)
-    re.compile(r"(?i)--password(?:[=\s]+(\"[^\"]*\"|'[^']*'|\S+))?"),   # --password x / --password=x
-    re.compile(r"(?i)\b[a-z][a-z0-9+.\-]*://[^\s/@:]+:[^\s/@]+@"),      # user:pass@ in a URL
+    re.compile(r"(?i)\w*(pass|pwd|token|secret|key|auth|cred)\w*\s*=\S*"),   # db_password=, MY_TOKEN=, --pass=
+    re.compile(r"(?<!\S)-[pak]\s*(\"[^\"]*\"|'[^']*'|\S+)"),                # -p x (mysql), -a x (redis-cli), -k x (openssl)
+    re.compile(r"(?<!\S)-u\s*\S*:\S*"),                                     # Basic-Login per -u (curl)
+    re.compile(r"(?i)--password(?:[=\s]+(\"[^\"]*\"|'[^']*'|\S+))?"),       # --password x / --password=x
+    re.compile(r"(?i)authorization\s*:.*"),                                  # Authorization: Basic/Bearer ...
+    re.compile(r"(?i)\b[a-z][a-z0-9+.\-]*://[^\s/@:]+:[^\s/@]+@"),          # user:pass@ in a URL
 ]
+PERM_BASH_KEYS = frozenset({"command", "description", "timeout"})   # anything else: terminal
 PERM_CARD_MAX = DETAIL_MAX + 40   # a whole command on the card (QUESTION_MAX leaves room for who/verb)
 
 
@@ -251,12 +254,16 @@ def bash_exact(event: dict) -> str:
     if vact.sanitize_tool(event.get("tool_name")) != "Bash":
         return ""
     inp = event.get("tool_input") if isinstance(event.get("tool_input"), dict) else {}
+    if not set(inp) <= PERM_BASH_KEYS:
+        return ""            # dangerouslyDisableSandbox, run_in_background, ...: not on the card (Re-Review 2)
     cmd = inp.get("command")
     if not isinstance(cmd, str):
         return ""
     cmd = cmd.strip()
     if not cmd or len(cmd) > PERM_CARD_MAX or vact._clean(cmd) != cmd:
         return ""            # empty, too long, multi-line, control chars or doubled spaces
+    if not (cmd.isascii() and cmd.isprintable()):
+        return ""            # look-alikes, bidi, fillers, combining marks (Re-Review 4)
     if vact.REDACTED in cmd or perm_scrub(cmd) != cmd:
         return ""
     return cmd
@@ -265,8 +272,8 @@ def bash_exact(event: dict) -> str:
 def perm_hash(event: dict) -> str:
     """Binding of a board answer to exactly one permission request (Review Ines #196 Punkt 3):
     sha256 over session, tool_name and the canonical JSON of tool_input."""
-    blob = json.dumps([str(event.get("session_id") or ""), str(event.get("tool_name") or ""),
-                       event.get("tool_input")], sort_keys=True, separators=(",", ":"),
+    blob = json.dumps([str(event.get("session_id") or ""), str(event.get("agent_id") or ""),
+                       str(event.get("tool_name") or ""), event.get("tool_input")], sort_keys=True, separators=(",", ":"),
                       ensure_ascii=False, default=str)
     return hashlib.sha256(f"vh-perm|{blob}".encode()).hexdigest()
 
@@ -338,8 +345,8 @@ def can_allow(event: dict, rel: dict | None) -> bool:
     the signed owner_agent, a whole one-line Bash command, permission-wait installed. Only then the card
     shows the command verbatim (else paths/URLs stay shortened as always) and says „Ja gibt sofort frei“."""
     from . import multisession as vmulti
-    return (isinstance(rel, dict) and vmulti._is_local(rel) and rel.get("owner_agent") is True
-            and bool(bash_exact(event)) and perm_wait_installed())
+    return (not event.get("agent_id") and isinstance(rel, dict) and vmulti._is_local(rel)
+            and rel.get("owner_agent") is True and bool(bash_exact(event)) and perm_wait_installed())
 
 
 def perm_classify(event: dict, label: str, rel: dict | None) -> dict | None:
@@ -354,15 +361,18 @@ def perm_classify(event: dict, label: str, rel: dict | None) -> dict | None:
         return info
     q, ctx = got
     info["question"] = q
-    info["items"] = [{"question": q, "options": [],
+    info["items"] = [{"question": q, "options": [], "immutable": True,
                       "context": "; ".join(x for x in (ctx, PERM_YES_NOTE) if x)}]
     return info
 
 
 def perm_card_exact(question: str, event: dict) -> bool:
-    """Does the card show the whole command of this request verbatim (bash_exact)?"""
-    exact = bash_exact(event)
-    return bool(exact) and question.endswith(f": {exact} – erlauben?")
+    """Does the card end with the (stripped) command of this request verbatim? Independent of
+    bash_exact, so each allow gate stands on its own (Re-Review 8)."""
+    inp = event.get("tool_input") if isinstance(event.get("tool_input"), dict) else {}
+    cmd = inp.get("command")
+    return isinstance(cmd, str) and bool(cmd.strip()) and isinstance(question, str) \
+        and question.endswith(f": {cmd.strip()} – erlauben?")
 
 
 def unattended(env=None) -> bool:
@@ -572,9 +582,10 @@ def recent(label: str, info: dict, t: float, mark: bool = False) -> bool:
     return bool(_with_state(step))
 
 
-def set_id(skey: str, qk: str, dec_id: str) -> bool:
+def set_id(skey: str, qk: str, dec_id: str, imm: dict | None = None) -> bool:
     """Child: store the id of the decision it created. True when the session went on in the
-    meantime (or another question replaced it): then delete it right away."""
+    meantime (or another question replaced it): then delete it right away. `imm` (#196): the
+    checked create answer of an immutable permission card {id, rev, question}."""
     def step(st: dict):
         me = st["sessions"].get(skey)
         open_ = me.get("open") if isinstance(me, dict) and isinstance(me.get("open"), dict) else None
@@ -584,6 +595,8 @@ def set_id(skey: str, qk: str, dec_id: str) -> bool:
             me.pop("open", None)
             return True
         open_["id"] = dec_id
+        if imm:
+            open_["imm"] = dict(imm)
         return False
     return bool(_with_state(step))
 
@@ -762,7 +775,19 @@ def _body(item: dict) -> dict:
     ctx = item.get("context")
     if isinstance(ctx, str) and ctx.strip():
         body["context"] = ctx[:CONTEXT_MAX]
+    if item.get("immutable") is True:   # #196 Feldvertrag: only at creation, a real bool
+        body["immutable"] = True
     return body
+
+
+def immutable_created(res: object, sent_question: str) -> bool:
+    """#196 Feldvertrag (Ines 19.11.): the create answer of an immutable permission card is
+    ok, has an id, rev == 1, immutable is True and is not merged."""
+    if not isinstance(res, dict) or not res.get("ok") or not isinstance(res.get("id"), str):
+        return False
+    rev = res.get("rev")
+    return (res.get("immutable") is True and isinstance(rev, int) and not isinstance(rev, bool)
+            and rev == 1 and not res.get("merged") and bool(sent_question))
 
 
 def _record(job: dict, dec_id: str, question: str, res: dict, item: dict) -> None:
@@ -801,7 +826,9 @@ def create(job: dict) -> list[str]:
         res = _decide(job, _body({**item, "question": q}))
         dec_id = res.get("id") if isinstance(res, dict) and res.get("ok") else None
         if isinstance(dec_id, str) and _ID.match(dec_id):
-            if set_id(str(job.get("skey") or ""), str(job.get("qk") or _qkey(q)), dec_id):
+            imm = ({"id": dec_id, "rev": 1, "question": q}
+                   if item.get("immutable") is True and immutable_created(res, q) else None)
+            if set_id(str(job.get("skey") or ""), str(job.get("qk") or _qkey(q)), dec_id, imm):
                 _decide(job, {"id": dec_id, "delete": True})
                 return []
             _record(job, dec_id, q, res, item)
@@ -897,6 +924,9 @@ def ask_job(rt: str, skey: str, info: dict, adm: dict, extra: dict) -> dict:
     if len(items) > 1 or (items and items[0].get("context")):
         job["items"] = [{k: i.get(k) or ("" if k != "options" else []) for k in
                          ("question", "options", "context")} for i in items]
+        for src, dst in zip(items, job["items"]):
+            if src.get("immutable") is True:   # #196: permission card where a yes can allow
+                dst["immutable"] = True
         job["qk"] = group_key(info)
     return job
 
