@@ -925,7 +925,8 @@ async def _publish_relay(room, tok: dict | None, slug: str, json_mode: bool,
             path = vmulti.write_relay(rel["url"], rel["token"], slug, rel.get("expires_in"))
             kind = ""
         elif local_dir is not None:
-            path = vmulti.write_local_relay(local_dir, slug)
+            granted = vagentkey.owner_granted(tok.get("token")) if isinstance(tok, dict) else None
+            path = vmulti.write_local_relay(local_dir, slug, owner_agent=granted is True)
             kind = " (local)"
         else:
             return
@@ -1757,7 +1758,8 @@ async def _decide_rpc(ctl: _Control, req: dict) -> dict:
         ("delete", True if req.get("delete") else None),
         ("context", req.get("context")), ("recent", req.get("recent")),
         ("faq", req.get("faq") or None),  # 0.21.4 faq: hidden, for Delta
-        ("goal", req.get("goal"))) if v is not None}  # 0.36.0 Leitstern-Nr (0 = keiner)
+        ("goal", req.get("goal")),  # 0.36.0 Leitstern-Nr (0 = keiner)
+        ("immutable", True if req.get("immutable") is True else None)) if v is not None}  # #196
     if req.get("sender"):  # 0.16.0: a helper session's question (Vertrag A)
         body["sender"] = str(req["sender"])
     room = await ctl.wait_room(10.0)

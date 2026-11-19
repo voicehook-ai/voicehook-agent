@@ -406,7 +406,8 @@ def clear_dir(dir_: Path) -> None:
 # --------------------------------------------------------------------------- #
 DECIDE_KEYS = ("question", "options", "recommend", "id", "delete", "context", "recent",  # 0.21.0
                "faq",  # 0.21.4: hidden follow-up questions for the voicebot
-               "ttl_s")  # board-hygiene: optional TTL in seconds
+               "ttl_s",  # board-hygiene: optional TTL in seconds
+               "immutable")  # SS2kwgDK/#196: permission card, never merged/updated (server: 409)
 STATUS_KEYS = ("doing", "open", "done", "project")
 
 
@@ -473,7 +474,8 @@ def _valid_decide(body: object) -> dict | None:
         return None
     out: dict = {}
     for k, typ in (("question", str), ("id", str), ("delete", bool),
-                   ("context", str), ("recent", str)):  # 0.21.0 context/recent
+                   ("context", str), ("recent", str),   # 0.21.0 context/recent
+                   ("immutable", bool)):                 # #196: real bool, unchanged to vh.decide
         if body.get(k) is not None:
             if not isinstance(body[k], typ):
                 return None

@@ -223,11 +223,66 @@ _VERBS = {"Bash": "ausführen", "Read": "lesen", "NotebookRead": "lesen", "Edit"
           "Grep": "durchsuchen"}
 
 
+# permission-wait (SS2kwgDK, Review Ines #196 Punkt 5): secrets in a command beyond activity.scrub.
+# Only for permission cards: a hit is blacked out on the card and the dialog is never allowed from
+# the board (it stays in the terminal).
+PERM_SECRET_PATTERNS = [
+    re.compile(r"(?i)\w*(pass|pwd|token|secret|key|auth|cred)\w*\s*=\S*"),   # db_password=, MY_TOKEN=, --pass=
+    re.compile(r"(?<!\S)-[pak]\s*(\"[^\"]*\"|'[^']*'|\S+)"),                # -p x (mysql), -a x (redis-cli), -k x (openssl)
+    re.compile(r"(?<!\S)-u\s*\S*:\S*"),                                     # Basic-Login per -u (curl)
+    re.compile(r"(?i)--password(?:[=\s]+(\"[^\"]*\"|'[^']*'|\S+))?"),       # --password x / --password=x
+    re.compile(r"(?i)authorization\s*:.*"),                                  # Authorization: Basic/Bearer ...
+    re.compile(r"(?i)\b[a-z][a-z0-9+.\-]*://[^\s/@:]+:[^\s/@]+@"),          # user:pass@ in a URL
+]
+PERM_BASH_KEYS = frozenset({"command", "description", "timeout"})   # anything else: terminal
+PERM_CARD_MAX = DETAIL_MAX + 40   # a whole command on the card (QUESTION_MAX leaves room for who/verb)
+
+
+def perm_scrub(text: str) -> str:
+    """activity.scrub plus PERM_SECRET_PATTERNS (permission cards only)."""
+    s = vact.scrub(text)
+    for rx in PERM_SECRET_PATTERNS:
+        s = rx.sub(vact.REDACTED, s)
+    return s
+
+
+def bash_exact(event: dict) -> str:
+    """The command of a Bash PermissionRequest when it can be shown WHOLE on the card: one line,
+    no control characters, nothing blacked out (scrub or PERM_SECRET_PATTERNS), short enough to
+    never be cut. Else '' (Review Ines #196 Punkt 4: only such a command may be allowed from the
+    board; MCP, Write, Edit, multi-line, cut or blacked-out commands stay in the terminal)."""
+    if vact.sanitize_tool(event.get("tool_name")) != "Bash":
+        return ""
+    inp = event.get("tool_input") if isinstance(event.get("tool_input"), dict) else {}
+    if not set(inp) <= PERM_BASH_KEYS:
+        return ""            # dangerouslyDisableSandbox, run_in_background, ...: not on the card (Re-Review 2)
+    cmd = inp.get("command")
+    if not isinstance(cmd, str):
+        return ""
+    cmd = cmd.strip()
+    if not cmd or len(cmd) > PERM_CARD_MAX or vact._clean(cmd) != cmd:
+        return ""            # empty, too long, multi-line, control chars or doubled spaces
+    if not (cmd.isascii() and cmd.isprintable()):
+        return ""            # look-alikes, bidi, fillers, combining marks (Re-Review 4)
+    if vact.REDACTED in cmd or perm_scrub(cmd) != cmd:
+        return ""
+    return cmd
+
+
+def perm_hash(event: dict) -> str:
+    """Binding of a board answer to exactly one permission request (Review Ines #196 Punkt 3):
+    sha256 over session, tool_name and the canonical JSON of tool_input."""
+    blob = json.dumps([str(event.get("session_id") or ""), str(event.get("agent_id") or ""),
+                       str(event.get("tool_name") or ""), event.get("tool_input")], sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False, default=str)
+    return hashlib.sha256(f"vh-perm|{blob}".encode()).hexdigest()
+
+
 def _detail(tool: str, inp: dict) -> str:
     """The concrete action of a tool call, safe for the call ('' = nothing concrete)."""
     if tool == "Bash":
         cmd = next((ln for ln in str(inp.get("command") or "").splitlines() if ln.strip()), "")
-        return clean_text(cmd, DETAIL_MAX) if cmd else ""
+        return clean_text(perm_scrub(cmd), DETAIL_MAX) if cmd else ""
     if tool in vact.FILE_TOOLS:
         return vact.basename(inp.get(vact.FILE_TOOLS[tool]))
     if tool == "WebFetch":
@@ -238,7 +293,7 @@ def _detail(tool: str, inp: dict) -> str:
     return ""
 
 
-def permission_question(event: dict, label: str = "") -> tuple[str, str] | None:
+def permission_question(event: dict, label: str = "", exact: bool = False) -> tuple[str, str] | None:
     """0.21.4 (question, context) of a PermissionRequest: the session and the concrete
     action, `<label> will ausführen: <command> – erlauben?`; the tool's own description as
     context. None when nothing concrete can be named (then no decision)."""
@@ -247,6 +302,8 @@ def permission_question(event: dict, label: str = "") -> tuple[str, str] | None:
     who = vact._clean(label)[:40].strip() or "Eine Session"
     desc = clean_text(_tool_desc(event), 200).rstrip(" .?!:")
     detail = _detail(tool, inp)
+    if exact:   # permission-wait can allow: the whole command verbatim (Review Ines #196 Punkt 4)
+        detail = bash_exact(event) or detail
     if tool.startswith("mcp__"):
         parts = [p for p in tool.split("__")[1:] if p]
         action = f"{' '.join(parts)} nutzen" if parts else ""
@@ -269,6 +326,53 @@ def permission_question(event: dict, label: str = "") -> tuple[str, str] | None:
         q = f"{head}{tail}"
     ctx = f"Beschreibung: {desc}" if desc and desc != detail else ""
     return q, ctx
+
+
+PERM_YES_NOTE = "Ja gibt sofort frei."
+
+
+def perm_wait_installed(path: Path | None = None) -> bool:
+    """Is the opt-in permission-wait hook in the user's Claude Code settings?"""
+    path = Path.home() / ".claude" / "settings.json" if path is None else path
+    try:
+        return "voicehook-agent-hook permission-wait" in path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+
+def can_allow(event: dict, rel: dict | None) -> bool:
+    """Could a yes on the board allow this dialog at all (before the answer)? Local relay of a join with
+    the signed owner_agent, a whole one-line Bash command, permission-wait installed. Only then the card
+    shows the command verbatim (else paths/URLs stay shortened as always) and says „Ja gibt sofort frei“."""
+    from . import multisession as vmulti
+    return (not event.get("agent_id") and isinstance(rel, dict) and vmulti._is_local(rel)
+            and rel.get("owner_agent") is True and bool(bash_exact(event)) and perm_wait_installed())
+
+
+def perm_classify(event: dict, label: str, rel: dict | None) -> dict | None:
+    """classify() for a PermissionRequest of a helper; where a yes can allow (can_allow), the card
+    carries the whole command and the note (Review Ines #196 Punkte 4 und 8). The parallel
+    permission-request hook (handle) and permission-wait both use this, so both see the same card."""
+    info = classify(event, label)
+    if not info or info.get("kind") != "ask" or not can_allow(event, rel):
+        return info
+    got = permission_question(event, label, exact=True)
+    if got is None or not perm_card_exact(got[0], event):
+        return info
+    q, ctx = got
+    info["question"] = q
+    info["items"] = [{"question": q, "options": [], "immutable": True,
+                      "context": "; ".join(x for x in (ctx, PERM_YES_NOTE) if x)}]
+    return info
+
+
+def perm_card_exact(question: str, event: dict) -> bool:
+    """Does the card end with the (stripped) command of this request verbatim? Independent of
+    bash_exact, so each allow gate stands on its own (Re-Review 8)."""
+    inp = event.get("tool_input") if isinstance(event.get("tool_input"), dict) else {}
+    cmd = inp.get("command")
+    return isinstance(cmd, str) and bool(cmd.strip()) and isinstance(question, str) \
+        and question.endswith(f": {cmd.strip()} – erlauben?")
 
 
 def unattended(env=None) -> bool:
@@ -478,9 +582,10 @@ def recent(label: str, info: dict, t: float, mark: bool = False) -> bool:
     return bool(_with_state(step))
 
 
-def set_id(skey: str, qk: str, dec_id: str) -> bool:
+def set_id(skey: str, qk: str, dec_id: str, imm: dict | None = None) -> bool:
     """Child: store the id of the decision it created. True when the session went on in the
-    meantime (or another question replaced it): then delete it right away."""
+    meantime (or another question replaced it): then delete it right away. `imm` (#196): the
+    checked create answer of an immutable permission card {id, rev, question}."""
     def step(st: dict):
         me = st["sessions"].get(skey)
         open_ = me.get("open") if isinstance(me, dict) and isinstance(me.get("open"), dict) else None
@@ -490,6 +595,8 @@ def set_id(skey: str, qk: str, dec_id: str) -> bool:
             me.pop("open", None)
             return True
         open_["id"] = dec_id
+        if imm:
+            open_["imm"] = dict(imm)
         return False
     return bool(_with_state(step))
 
@@ -668,7 +775,19 @@ def _body(item: dict) -> dict:
     ctx = item.get("context")
     if isinstance(ctx, str) and ctx.strip():
         body["context"] = ctx[:CONTEXT_MAX]
+    if item.get("immutable") is True:   # #196 Feldvertrag: only at creation, a real bool
+        body["immutable"] = True
     return body
+
+
+def immutable_created(res: object, sent_question: str) -> bool:
+    """#196 Feldvertrag (Ines 19.11.): the create answer of an immutable permission card is
+    ok, has an id, rev == 1, immutable is True and is not merged."""
+    if not isinstance(res, dict) or not res.get("ok") or not isinstance(res.get("id"), str):
+        return False
+    rev = res.get("rev")
+    return (res.get("immutable") is True and isinstance(rev, int) and not isinstance(rev, bool)
+            and rev == 1 and not res.get("merged") and bool(sent_question))
 
 
 def _record(job: dict, dec_id: str, question: str, res: dict, item: dict) -> None:
@@ -707,7 +826,9 @@ def create(job: dict) -> list[str]:
         res = _decide(job, _body({**item, "question": q}))
         dec_id = res.get("id") if isinstance(res, dict) and res.get("ok") else None
         if isinstance(dec_id, str) and _ID.match(dec_id):
-            if set_id(str(job.get("skey") or ""), str(job.get("qk") or _qkey(q)), dec_id):
+            imm = ({"id": dec_id, "rev": 1, "question": q}
+                   if item.get("immutable") is True and immutable_created(res, q) else None)
+            if set_id(str(job.get("skey") or ""), str(job.get("qk") or _qkey(q)), dec_id, imm):
                 _decide(job, {"id": dec_id, "delete": True})
                 return []
             _record(job, dec_id, q, res, item)
@@ -760,7 +881,10 @@ def handle(raw: str, now: float | None = None, post=None) -> dict | None:
         if rt:
             from . import multisession as vmulti
             label = vmulti.session_label(event, _cached_label(skey))
-        info = classify(event, label)
+        if str(event.get("hook_event_name") or "") == "PermissionRequest" and rt == "relay":
+            info = perm_classify(event, label, _rel)
+        else:
+            info = classify(event, label)
         if info is None:
             return None
         if info["kind"] == "done":
@@ -771,6 +895,8 @@ def handle(raw: str, now: float | None = None, post=None) -> dict | None:
         if info["kind"] != "ask" or rt == "bridge" or unattended():
             return None  # 0.21.4: nobody at an unattended session could answer
         extra = {"dir": str(dir_)} if rt == "own" else {"from": label}
+        if str(event.get("hook_event_name") or "") == "PermissionRequest":
+            extra["h"] = perm_hash(event)   # permission-wait: the slot is bound to exactly this request
         if recent(label, info, t):
             return None
         adm = admit_ask(skey, info, rt, t, extra)
@@ -798,6 +924,9 @@ def ask_job(rt: str, skey: str, info: dict, adm: dict, extra: dict) -> dict:
     if len(items) > 1 or (items and items[0].get("context")):
         job["items"] = [{k: i.get(k) or ("" if k != "options" else []) for k in
                          ("question", "options", "context")} for i in items]
+        for src, dst in zip(items, job["items"]):
+            if src.get("immutable") is True:   # #196: permission card where a yes can allow
+                dst["immutable"] = True
         job["qk"] = group_key(info)
     return job
 
