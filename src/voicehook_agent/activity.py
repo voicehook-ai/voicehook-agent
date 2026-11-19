@@ -119,13 +119,18 @@ NO_MATCHER_EVENTS = ("UserPromptSubmit", "Stop", "SessionStart", "SessionEnd")  
 # older binary (usage error = exit 2) never wakes a session with its usage text.
 HOOK_COMMAND_ASK_WAIT = "voicehook-agent-hook ask-wait || true"
 HOOK_COMMAND_STOP_WAIT = "voicehook-agent-hook stop-wait; test $? -eq 3 && exit 2; exit 0"
-# permission-wait (SS2kwgDK): a SECOND PermissionRequest hook, long timeout: only the owner's click
-# on the board allows, a no denies, else the dialog shows as before.
+# permission-wait (SS2kwgDK): a SECOND PermissionRequest hook, long timeout: only the owner's signed
+# click on the board allows, a no denies, else the dialog shows as before. OFF by default (Review Ines
+# #196 Punkt 6): only installed locally with `hook install --permission-wait` or PERM_WAIT_ON_ENV=1 at
+# install time, never switched on by relay.json or the server.
 HOOK_COMMAND_PERM_WAIT = "voicehook-agent-hook permission-wait || true"
-EXTRA_HOOKS = {
+PERM_WAIT_ON_ENV = "VOICEHOOK_PERMISSION_WAIT"
+OPT_HOOKS = {
     "PermissionRequest": (HOOK_COMMAND_PERM_WAIT, {"matcher": "*"},
                           {"timeout": 100, "statusMessage": "Permission is on the voicehook call board "
                                                             "(click there, or here after 90 s)"}),
+}
+EXTRA_HOOKS = {
     "PreToolUse": (HOOK_COMMAND_ASK_WAIT, {"matcher": "AskUserQuestion"},
                    {"timeout": 100, "statusMessage": "Question is on the voicehook call board "
                                                      "(answer there, or here after 90 s)"}),
@@ -976,13 +981,19 @@ def hook_entry(event: str = "PostToolUse", exe: str = HOOK_BIN) -> dict:
     return {"hooks": hooks} if event in NO_MATCHER_EVENTS else {"matcher": "*", "hooks": hooks}
 
 
-def extra_entry(event: str, exe: str = HOOK_BIN) -> dict:
-    command, outer, inner = EXTRA_HOOKS[event]
+def extra_entry(event: str, exe: str = HOOK_BIN, table: dict | None = None) -> dict:
+    command, outer, inner = (EXTRA_HOOKS if table is None else table)[event]
     return {**outer, "hooks": [{"type": "command", "command": _with_bin(command, exe), **inner}]}
 
 
-def _our_extra(entries: list, event: str) -> list[dict]:
-    want = EXTRA_HOOKS[event][0]
+def perm_wait_wanted(flag: bool = False, env=None) -> bool:
+    """Install permission-wait? Only by a local choice: the flag or PERM_WAIT_ON_ENV=1."""
+    env = os.environ if env is None else env
+    return flag or str(env.get(PERM_WAIT_ON_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _our_extra(entries: list, event: str, table: dict | None = None) -> list[dict]:
+    want = (EXTRA_HOOKS if table is None else table)[event][0]
     return [h for e in entries if isinstance(e, dict) for h in (e.get("hooks") or [])
             if isinstance(h, dict) and normalize_command(h.get("command", "")) == want]
 
@@ -1014,7 +1025,7 @@ def _installed(entries: list, event: str = "PostToolUse") -> bool:
     return bool(_our_hooks(entries, event))
 
 
-def install(path: Path, exe: str | None = None) -> tuple[int, str]:
+def install(path: Path, exe: str | None = None, permission_wait: bool = False) -> tuple[int, str]:
     """Merge our hooks (Pre/PostToolUse; 0.15.0 also PostToolUseFailure, UserPromptSubmit,
     Stop for the multi-session relay; 0.18.0 Notification, PermissionRequest; 0.21.0
     SessionStart) into settings.json. Idempotent (an older install gets the missing ones
@@ -1066,6 +1077,21 @@ def install(path: Path, exe: str | None = None) -> tuple[int, str]:
                 h.update(command=want, **inner)
                 if label not in updated:
                     updated.append(label)
+    if perm_wait_wanted(permission_wait):
+        for ev, (template, _outer, inner) in OPT_HOOKS.items():
+            entries = hooks.setdefault(ev, [])
+            mine = _our_extra(entries, ev, OPT_HOOKS)
+            label = f"{ev} ({template.split()[1]})"
+            if not mine:
+                entries.append(extra_entry(ev, exe, OPT_HOOKS))
+                added.append(label)
+                continue
+            want = _with_bin(template, exe)
+            for h in mine:
+                if h.get("command") != want or any(h.get(k) != v for k, v in inner.items()):
+                    h.update(command=want, **inner)
+                    if label not in updated:
+                        updated.append(label)
     if not added and not updated:
         return 0, f"already installed in {path} ({exe})"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1443,6 +1469,9 @@ def main(argv: list[str] | None = None) -> int:
         if cmd == "print":
             print(agents.print_snippet(opts["agent"]))
             return 0
+        if opts["permission_wait"] and opts["agent"] != "claude":
+            print("[error] --permission-wait is for Claude Code only", file=sys.stderr)
+            return 2
         if opts["agent"] == agents.CODEX:
             if opts["settings"] or opts["opencode_home"]:
                 print("[error] --settings/--opencode-home is not for Codex; Codex: --codex-home DIR",
@@ -1459,12 +1488,14 @@ def main(argv: list[str] | None = None) -> int:
             if opts["codex_home"] or opts["opencode_home"]:
                 print("[error] --codex-home/--opencode-home needs the matching --agent", file=sys.stderr)
                 return 2
-            rc, msg = install(opts["settings"] or default_settings_path())
+            rc, msg = install(opts["settings"] or default_settings_path(),
+                              permission_wait=opts["permission_wait"])
         print(msg, file=sys.stderr if rc else sys.stdout)
         return rc
     print("usage: voicehook-agent hook {pre-tool-use|post-tool-use|post-tool-use-failure|"
           "user-prompt-submit|stop|notification|permission-request|session-start|session-end|doctor|"
           "print [--agent claude|codex|opencode]|install [--agent claude|codex|opencode] [--settings PATH] "
+          "[--permission-wait] "
           "[--codex-home DIR] [--opencode-home DIR]|codex <event>|codex-notify <json>|opencode <event>|"
           "mcp [--agent NAME]}",
           file=sys.stderr)
@@ -1474,10 +1505,14 @@ def main(argv: list[str] | None = None) -> int:
 def _install_opts(rest: list[str]) -> tuple[dict, str]:
     """--agent claude|codex|opencode, --settings PATH (Claude Code), --codex-home DIR (Codex),
     --opencode-home DIR (opencode config dir)."""
-    opts: dict = {"agent": "claude", "settings": None, "codex_home": None, "opencode_home": None}
+    opts: dict = {"agent": "claude", "settings": None, "codex_home": None, "opencode_home": None,
+                  "permission_wait": False}
     rest = list(rest)
     while rest:
         a = rest.pop(0)
+        if a == "--permission-wait":   # SS2kwgDK: opt-in, local only (Review Ines #196 Punkt 6)
+            opts["permission_wait"] = True
+            continue
         key, _, val = a.partition("=")
         if key not in ("--agent", "--settings", "--codex-home", "--opencode-home"):
             return opts, f"unknown argument {a!r}"

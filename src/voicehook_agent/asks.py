@@ -560,26 +560,60 @@ def wait_open(skey: str, rel: dict, t0: float, next_events=None,
         return 0, ""
 
 
+PERM_FRESH_S = 10.0   # the decision slot must have been created for THIS request (parallel hook, same moment)
+
+
 def permission_decision(ev: dict) -> dict | None:
     """The PermissionRequest decision for one board answer, or None (the dialog shows locally).
-    allow ONLY on yes by the owner's click (answered_via click, answered_role owner): never by voice,
-    never automatically, never by a guest (Oliver 10.11., SS2kwgDK: "Klick gibt frei, nie automatisch").
+    allow ONLY on yes by a click whose owner the server SIGNED (answered_via click and
+    answered_owner_signed True, server #959: only a click with the room account's signed vh.owner=1;
+    a voice is never signed). A missing field (older server) never allows (Review Ines #196 Punkt 2).
     no by the owner (click or voice) denies; everything else (free text, missing fields) -> None."""
     verdict = str(ev.get("verdict") or "")
-    owner = ev.get("answered_role") == "owner"
-    if verdict == "yes" and owner and ev.get("answered_via") == "click":
+    signed = ev.get("answered_owner_signed") is True
+    if verdict == "yes" and signed and ev.get("answered_via") == "click":
         return {"behavior": "allow"}
+    owner = signed or ev.get("answered_role") == "owner"
     if verdict == "no" and owner and ev.get("answered_via") in ("click", "voice"):
         why = vact.scrub(str(ev.get("text") or "")).strip()[:200]
         return {"behavior": "deny", "message": "Declined in the voicehook call" + (f": {why}" if why else ".")}
     return None
 
 
-def permission_wait(raw: str, next_events=None, clock=time.monotonic, sleep=time.sleep) -> dict | None:
-    """`voicehook-agent-hook permission-wait` (an extra PermissionRequest hook): waits up to
+def allow_gates(event: dict, rel: dict, slot: dict | None, question: str, t0: float) -> str:
+    """Why a yes from the board may NOT allow this dialog ('' = it may). Review Ines #196:
+    1 local relay of a join with the signed owner_agent (relay.json, written by the CLI at join);
+    3 the slot was created fresh for exactly this request (sha256 of session, tool, tool_input);
+    4 a one-line Bash command shown whole and verbatim on the card;
+    5 nothing blacked out (bash_exact). Deny never needs these."""
+    from . import multisession as vmulti
+    if not vmulti._is_local(rel):
+        return "remote_relay"
+    if rel.get("owner_agent") is not True:
+        return "no_owner_agent"
+    if not vnotify.bash_exact(event):
+        return "not_exact_bash"
+    if not vnotify.perm_card_exact(question, event):
+        return "card_differs"
+    if not isinstance(slot, dict) or slot.get("h") != vnotify.perm_hash(event):
+        return "hash_mismatch"
+    try:
+        at = float(slot.get("at") or 0)
+    except (TypeError, ValueError):
+        at = 0.0
+    if at < t0 - PERM_FRESH_S:
+        return "stale_slot"
+    return ""
+
+
+def permission_wait(raw: str, next_events=None, clock=time.monotonic, sleep=time.sleep,
+                    wall=time.time) -> dict | None:
+    """`voicehook-agent-hook permission-wait` (an extra PermissionRequest hook, only installed with
+    `hook install --permission-wait` or VOICEHOOK_PERMISSION_WAIT=1 at install): waits up to
     PERM_WAIT_S for the board answer of the decision the parallel permission-request hook created
     (notify.handle) and decides the dialog, or None (the dialog shows as before). Never raises."""
     try:
+        t0 = wall()
         event = json.loads(raw) if raw and raw.strip() else {}
         if not isinstance(event, dict) or event.get("hook_event_name") != "PermissionRequest":
             return None
@@ -590,7 +624,7 @@ def permission_wait(raw: str, next_events=None, clock=time.monotonic, sleep=time
         if who is None:
             return None
         skey, rel, frm = who
-        info = vnotify.classify(event, frm)
+        info = vnotify.perm_classify(event, frm, rel)
         if not info or info.get("kind") != "ask":
             return None   # nothing concrete on the board: the dialog shows
         qk = vnotify.group_key(info)
@@ -598,6 +632,7 @@ def permission_wait(raw: str, next_events=None, clock=time.monotonic, sleep=time
         ids = _ids_of(skey, qk, 1, ID_WAIT_S, sleep=sleep)
         if len(ids) != 1:
             return None
+        slot = vnotify.open_slot(skey)
         got = _wait_answers(rel, frm, ids, start + wait, skey, qk, next_events, clock)
         if got is None:
             return None
@@ -608,6 +643,12 @@ def permission_wait(raw: str, next_events=None, clock=time.monotonic, sleep=time
         board.mark_delivered(skey, [ev])
         if decision is None:
             return None
+        if decision["behavior"] == "allow":
+            why = allow_gates(event, rel, slot, str(info.get("question") or ""), t0)
+            if why:
+                print(f"voicehook permission-wait: yes on the board, not allowed here ({why}); "
+                      "decide in the terminal", file=sys.stderr, flush=True)
+                return None   # the dialog stays in the terminal
         return {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}
     except Exception:  # noqa: BLE001 - a hook must never disturb Claude Code
         return None

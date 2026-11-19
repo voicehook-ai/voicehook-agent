@@ -925,7 +925,8 @@ async def _publish_relay(room, tok: dict | None, slug: str, json_mode: bool,
             path = vmulti.write_relay(rel["url"], rel["token"], slug, rel.get("expires_in"))
             kind = ""
         elif local_dir is not None:
-            path = vmulti.write_local_relay(local_dir, slug)
+            granted = vagentkey.owner_granted(tok.get("token")) if isinstance(tok, dict) else None
+            path = vmulti.write_local_relay(local_dir, slug, owner_agent=granted is True)
             kind = " (local)"
         else:
             return

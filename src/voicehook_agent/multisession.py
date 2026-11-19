@@ -222,9 +222,12 @@ LOCAL_TAG = vact.RELAY_TOOL  # tool field of a local relay line (server: activit
 
 def write_local_relay(dir_: Path, room: str, *, label: str | None = None,
                       owner_pid: int | None = None, owner_session: str | None = None,
-                      owner_agent_pid: int | None = None, now: float | None = None) -> Path:
+                      owner_agent_pid: int | None = None, now: float | None = None,
+                      owner_agent: bool = False) -> Path:
     """WebRTC join: relay.json pointing at the join's own session dir (0600, atomic).
-    ValueError when dir_ is not a directory."""
+    `owner_agent`: the server put vh.owner_agent=1 into this join's signed LiveKit token (an own
+    agent of the room's account); only then may permission-wait allow from the board (Review Ines
+    #196 Punkt 1). ValueError when dir_ is not a directory."""
     d = Path(dir_).resolve()
     if not d.is_dir():
         raise ValueError("join dir missing")
@@ -234,6 +237,7 @@ def write_local_relay(dir_: Path, room: str, *, label: str | None = None,
             "owner_pid": int(os.getpid() if owner_pid is None else owner_pid),
             "owner_session": own_session_hash() if owner_session is None else owner_session,
             **_agent_fields(owner_agent_pid),
+            "owner_agent": owner_agent is True,
             "written_at": int(t)}
     vact._private_dir(vact.state_root())
     path = relay_path()
