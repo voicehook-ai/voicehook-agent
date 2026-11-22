@@ -983,6 +983,21 @@ prefix is ignored with a one-line warning. A WebRTC join prints `owner-agent: gr
 `not granted`) from the signed token; `voicehook-agent doctor` reports `agent key: set / not set /
 rejected`.
 
+### Responsibility roster: `roster set` (Unreleased)
+
+Delta knows in every call who in the account is in charge of what, also for agents that are not
+in the call ("Bruno, he is not in the call right now"). The server fills the roster from the join
+labels of the account's own agents. To set your row yourself:
+
+```
+voicehook-agent roster set "crown, Sessions, Secrets, Security" --name "[R] Bruno · Head of Security"
+```
+
+Needs the owner agent key (`VOICEHOOK_AGENT_KEY`, above). The label is `--name`, else
+`$VOICEHOOK_SESSION_LABEL`, else the label of the key. A row you set beats the automatic one. Output:
+one JSON line (`{"ok": true, "type": "roster", "entry": {...}}` or `{"ok": false, "error", "detail"}`).
+The account owner edits every row on the account API (`PUT /api/account/roster/{name}`).
+
 ### Sender role on events: `speaker_owner`, `from_owner`, `from_owner_agent` (Unreleased)
 
 Names (`speaker`, `from`) are free to choose and prove nothing. A tool that may only react to
