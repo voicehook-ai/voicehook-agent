@@ -4613,6 +4613,48 @@ def _client_request(args) -> dict:
     return {"cmd": "status"}
 
 
+def _run_roster(args) -> int:
+    """`roster set AREAS [--name LABEL] [--base URL]`: this agent's own roster row
+    (PUT /api/account/roster/me, Bearer = owner agent key). Prints one JSON line; the key
+    never appears in output or errors."""
+    base = (args.base or os.environ.get("VOICEHOOK_API_BASE") or "https://voicehook.ai").rstrip("/")
+    key = vagentkey.for_base(vagentkey.get(), base)
+    if not key:
+        print(json.dumps({"ok": False, "type": "error", "error": "agent_key_missing",
+                          "detail": f"{vagentkey.ENV} not set or the host is not trusted"}), flush=True)
+        return 2
+    areas = " ".join(str(args.areas or "").split())
+    if not areas:
+        print(json.dumps({"ok": False, "type": "error", "error": "invalid_value",
+                          "detail": "areas empty"}), flush=True)
+        return 2
+    label = " ".join(str(args.name or os.environ.get("VOICEHOOK_SESSION_LABEL") or "").split())
+    headers = {"user-agent": _USER_AGENT, "x-vh-cli": _VERSION, **vagentkey.headers(key)}
+    if label:
+        headers["x-vh-agent"] = label
+    try:
+        r = httpx.put(f"{base}/api/account/roster/me", json={"areas": areas}, headers=headers,
+                      timeout=10.0)
+    except httpx.HTTPError as e:
+        print(json.dumps({"ok": False, "type": "error", "error": "network",
+                          "detail": vagentkey.redact(str(e), key)}), flush=True)
+        return 1
+    try:
+        body = r.json()
+    except ValueError:
+        body = {}
+    if r.status_code >= 400 or not isinstance(body, dict) or not body.get("ok"):
+        b = body if isinstance(body, dict) else {}
+        print(json.dumps({"ok": False, "type": "error", "status": r.status_code,
+                          "error": str(b.get("error") or "http_error"),
+                          "detail": vagentkey.redact(str(b.get("detail") or (r.text or "")[:200]), key)}),
+              flush=True)
+        return 1
+    print(json.dumps({"ok": True, "type": "roster", "entry": body.get("entry")}, ensure_ascii=False),
+          flush=True)
+    return 0
+
+
 def _run_bridge_session(args) -> int:
     """0.13.0 `bridge-session --save JSON [--base URL] | --clear`. Never prints the token."""
     if args.clear:
@@ -6009,9 +6051,25 @@ def main(argv: list[str] | None = None) -> None:
     p_bs.add_argument("--clear", action="store_true", default=False, help="delete the file")
     p_bs.add_argument("--no-relay", action="store_true", default=False,
                       help="0.15.0: do not mint ~/.voicehook/relay.json for the other sessions")
+    # roster (XQ14jFc1): this agent's own row of the account's responsibility roster
+    p_ro = sub.add_parser(
+        "roster", help="the account's responsibility roster (who is in charge of what; Delta "
+        "knows it in every call): `roster set AREAS` writes this agent's own row "
+        "(PUT /api/account/roster/me, needs VOICEHOOK_AGENT_KEY); a row you set beats the one "
+        "taken from your join label")
+    ro_sub = p_ro.add_subparsers(dest="action", required=True)
+    p_ros = ro_sub.add_parser("set", help="set what this agent is in charge of")
+    p_ros.add_argument("areas", help="what you are in charge of, e.g. 'crown, Sessions, Secrets'")
+    p_ros.add_argument("--name", default=None, metavar="LABEL",
+                       help="your agent label, e.g. '[R] Bruno · Head of Security' (default "
+                       "$VOICEHOOK_SESSION_LABEL, else the label of the agent key)")
+    p_ros.add_argument("--base", default=None, metavar="URL",
+                       help="server base (default $VOICEHOOK_API_BASE or https://voicehook.ai)")
     args = ap.parse_args(argv)
     if args.cmd == "bridge-session":
         sys.exit(_run_bridge_session(args))
+    if args.cmd == "roster":
+        sys.exit(_run_roster(args))
     if args.cmd == "self-update":
         sys.exit(_run_self_update(args.dry_run))
     if args.cmd == "doctor":

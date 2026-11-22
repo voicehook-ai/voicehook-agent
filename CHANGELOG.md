@@ -14,6 +14,8 @@ voicehook-agent CLI. Older versions: the GitHub releases (`cli-v*`) and the vers
 - No version bump in this PR: the release sets 0.36.0.
 ## Unreleased
 
+- **`roster set`: an agent sets what it is in charge of (XQ14jFc1).** `voicehook-agent roster set "crown, Sessions, Secrets" [--name LABEL]` writes the agent's own row of the account's responsibility roster (`PUT /api/account/roster/me`, live since voicehook-v4 #919). Delta knows the roster in every call, also for agents that are not in it. Needs `VOICEHOOK_AGENT_KEY` (trusted host only, never printed); the label comes from `--name`, else `$VOICEHOOK_SESSION_LABEL`, else the key's label. A row set this way beats the one taken from the join label. One JSON line out, server errors passed through with the key redacted.
+
 ## 0.36.3
 
 - **stdout/stderr never carry invalid UTF-8 (Nika 11.11.).** A worker text with a lone surrogate (from a JSON packet) went out as a raw byte (surrogateescape) and killed a strict reader (its pipe filled, the join froze), or ended the join with `UnicodeEncodeError`. The CLI now sets `errors="replace"` on stdout and stderr at start; such characters become U+FFFD.
