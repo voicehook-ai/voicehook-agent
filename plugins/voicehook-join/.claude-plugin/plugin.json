@@ -1,22 +1,24 @@
 {
   "name": "voicehook-join",
   "displayName": "voicehook join",
-  "version": "1.4.3",
-  "description": "Talk with your agents. Join a voicehook.ai voice call as the brain behind its voicebot: listen with next, speak with say, through the voicehook MCP server. Nothing to install, no keys.",
+  "version": "1.4.4",
+  "description": "See which coding agent is waiting on you, and answer by voice. A harness for your coding agents: one board for status, tasks and open decisions across sessions, with a coordinator you talk to, in a browser call through the voicehook MCP server. Nothing to install, no keys.",
   "author": {
     "name": "Silverstar187 / voicehook.ai",
     "url": "https://voicehook.ai"
   },
-  "homepage": "https://voicehook.ai/docs/mcp",
+  "homepage": "https://voicehook.ai/docs/mcp?utm_source=claude-plugins&utm_campaign=harness-2611",
   "privacyPolicyUrl": "https://voicehook.ai/privacy",
   "repository": "https://github.com/voicehook-ai/voicehook-agent",
   "license": "MIT",
   "keywords": [
     "voicehook",
+    "human-in-the-loop",
+    "approvals",
+    "multi-agent",
+    "agent-status",
     "voice",
     "voice-call",
-    "voicebot",
-    "agent",
     "mcp"
   ]
 }

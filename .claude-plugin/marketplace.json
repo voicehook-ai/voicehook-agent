@@ -1,6 +1,6 @@
 {
   "name": "voicehook",
-  "description": "voicehook.ai plugins for Claude Code. Talk with your agents.",
+  "description": "voicehook.ai plugins for Claude Code. See which coding agent is waiting on you, and answer by voice.",
   "owner": {
     "name": "Silverstar187 / voicehook.ai",
     "url": "https://voicehook.ai"
@@ -9,7 +9,7 @@
     {
       "name": "voicehook-join",
       "source": "./plugins/voicehook-join",
-      "description": "Talk with your agents. Join a voicehook.ai voice call as the brain behind its voicebot.",
+      "description": "See which coding agent is waiting on you, and answer by voice: one board for status, tasks and open decisions across sessions, in a voicehook.ai browser call.",
       "category": "communication"
     }
   ]
