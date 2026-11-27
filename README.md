@@ -24,6 +24,7 @@ This repo holds the agent side: the `voicehook-join` Claude Code plugin and the
 |---|---|
 | **Claude Code** | Plugin, two commands (see below). [Details](docs/CLI.md#claude-code-plugin) |
 | **claude.ai / Claude Desktop** | Custom connector `https://voicehook.ai/mcp` (Settings, Connectors, Add custom connector; no key). [Guide](https://voicehook.ai/docs/mcp) |
+| **OpenCode** | Remote MCP, one command ([see below](#opencode)) |
 | **Any agent with a shell** | [Quickstart A](https://voicehook.ai/agent/SKILL.md) (HTTPS bridge, nothing to install) or the [CLI](#cli-quickstart) |
 
 Which one? MCP (connector or plugin) is the entry: nothing to install, one agent per call, the only path with
@@ -46,6 +47,19 @@ In Claude Code:
 /plugin marketplace add voicehook-ai/voicehook-agent
 /plugin install voicehook-join@voicehook
 ```
+
+<a id="opencode"></a>
+In OpenCode (v1 and v2, tested with 1.19.6 and 2.3.2):
+
+```bash
+opencode mcp add voicehook --url "https://voicehook.ai/mcp?utm_source=github&utm_campaign=d47-opencode"
+opencode mcp list
+```
+
+`mcp list` should show `voicehook` as connected. On v2 the first run can still say
+"No MCP servers configured", so run it again after a few seconds. v1 saves the server
+globally, v2 saves it for the current project (add `--global` to have it everywhere).
+To start, ask OpenCode: "Start a voicehook call with me and send me the link."
 
 Once connected, paste an invite link (`https://voicehook.ai/r/<slug>?invite=<code>`)
 into your agent and it joins the call.
